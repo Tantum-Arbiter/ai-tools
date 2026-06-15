@@ -1,0 +1,115 @@
+brand:
+  name: "Grow with Freya"
+  tagline: "Calm. Connected. Confident parenting."
+  voice: "warm, reassuring, knowledgeable but not preachy"
+  persona: "a trusted friend who also happens to be a child development expert"
+
+audience:
+  primary: "parents and caregivers of children aged 0-6"
+  secondary: "expectant parents, grandparents, early years practitioners"
+  pain_points:
+    - "screen time guilt and anxiety"
+    - "feeling like a bad parent"
+    - "child not hitting developmental milestones"
+    - "toddler emotional meltdowns"
+    - "bedtime battles and sleep anxiety"
+    - "worry about digital world impact on children"
+    - "comparison with other parents on social media"
+    - "loneliness and lack of support"
+  desires:
+    - "reassurance they are doing enough"
+    - "practical, simple guidance"
+    - "to feel seen and understood"
+    - "a calmer home environment"
+    - "to raise emotionally intelligent children"
+    - "connection with their child"
+    - "to trust their instincts"
+
+psychology:
+  # Core emotional triggers to use (ethically)
+  primary_triggers:
+    - name: "guilt_relief"
+      description: "Validate the parent, release guilt, offer a reframe"
+      hook_pattern: "You're not failing — you're {positive_reframe}"
+    - name: "identity_validation"
+      description: "Affirm their identity as a good parent"
+      hook_pattern: "The fact that you're worried about this means you're {positive_quality}"
+    - name: "curiosity_gap"
+      description: "Open a loop that only watching resolves"
+      hook_pattern: "The one thing most parents don't know about {toddler_behaviour}"
+    - name: "paradox_hook"
+      description: "Counterintuitive truth that stops the scroll"
+      hook_pattern: "Stop trying to {common_advice} — here's what actually works"
+    - name: "social_proof_belonging"
+      description: "You are not alone, other parents feel this too"
+      hook_pattern: "If you've ever felt {emotion} as a parent, this is for you"
+    - name: "practical_hope"
+      description: "Quick actionable win that gives real hope"
+      hook_pattern: "3 seconds. That's all it takes to {positive_outcome}"
+
+  # AIDA content structure
+  aida_framework:
+    attention: "2 seconds — hook must stop scroll cold. Visual + first line of text."
+    interest: "5-8 seconds — deepen the emotion or curiosity. Make it personal."
+    desire: "10-15 seconds — the insight, the reframe, the value."
+    action: "3 seconds — CTA. Follow for more. Save this. Share with a parent who needs it."
+
+  # What to NEVER do
+  avoid:
+    - "shaming or blaming parents"
+    - "fear-mongering about child development"
+    - "making unverified developmental claims"
+    - "overstimulating visuals or audio"
+    - "targeting children directly"
+    - "showing identifiable children's faces without consent"
+    - "promoting comparison with other families"
+    - "dramatic or alarming hooks around child safety"
+
+visual_style:
+  palette:
+    primary: "#F5E6D3"       # Warm sand
+    secondary: "#A8C5A0"     # Sage green
+    accent: "#E8A87C"        # Soft terracotta
+    text: "#3D3530"          # Warm dark brown
+    background: "#FDFAF7"    # Off-white cream
+  aesthetic: "warm, soft, photorealistic, golden hour, calm home environment"
+  avoid: "bright primary colours, cartoon, chaotic backgrounds, clinical white"
+  subjects: "parents with toddlers, hands, cozy home scenes, nature walks, reading together"
+  face_policy: "parent faces OK, child faces shown from behind or partially — never full face"
+
+audio_direction:
+  preferred_moods:
+    - "soft piano"
+    - "gentle acoustic guitar"
+    - "warm ambient"
+    - "music box / lullaby style"
+    - "light marimba / xylophone"
+    - "calm lo-fi"
+  avoid:
+    - "EDM or hard beats"
+    - "copyrighted pop music"
+    - "overstimulating or fast-paced audio"
+    - "dramatic cinematic swells"
+  voiceover_tone: "calm, warm, slow, conversational — like a trusted friend"
+
+hashtag_strategy:
+  layers:
+    broad:          ["#parenting", "#toddlers", "#earlyyears", "#mumlife", "#parentingadvice"]
+    niche:          ["#toddlermum", "#bedtimeroutine", "#emotionallearning", "#calmparenting",
+                     "#screentimekids", "#phonicsfun", "#toddlerdevelopment", "#gentleparenting"]
+    intent:         ["#parentingstruggles", "#toddlertantrums", "#mumguilt", "#parentingtips",
+                     "#babyadvice", "#toddlersleep", "#newmum", "#parentinguk"]
+    branded:        ["#growwithfreya", "#calmscreentime", "#interactivebedtimestories"]
+  formula: "2 broad + 4 niche + 2 intent + 1 branded = 9 total"
+
+content_themes:
+  - "screen time reassurance"
+  - "bedtime routine tips"
+  - "toddler emotional regulation"
+  - "early language development"
+  - "co-engagement activities"
+  - "parent self-compassion"
+  - "toddler behaviour explained"
+  - "phonics at home"
+  - "digital world guidance"
+  - "calm parenting techniques"

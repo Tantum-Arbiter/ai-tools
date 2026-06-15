@@ -1,0 +1,145 @@
+# ============================================================
+# DM Sequences — Grow with Freya Engagement Hub
+# GoHighLevel-style automated DM flows triggered by behaviour.
+# CRITICAL RULES:
+#   - Stop sequence immediately if person replies at ANY point
+#   - Never send more than 1 DM per day to same person
+#   - Max 3 DMs per sequence — do not bombard
+#   - Always warm, never salesy in first message
+# ============================================================
+
+sequences:
+
+  welcome_first_comment:
+    trigger: "first_ever_comment"
+    description: "Someone comments on our content for the first time"
+    delay_after_trigger_hours: 2
+    messages:
+      - day: 0
+        delay_hours: 2
+        message: >
+          Hi {first_name} 👋 I noticed your comment on our post — thank you so much
+          for being here. It means a lot.
+
+          If you ever have questions or just want to chat about the parenting stuff
+          we cover, my DMs are always open. 💛
+
+          — Freya
+
+  bedtime_help:
+    trigger: "keyword:bedtime_help"
+    description: "Comment mentions bedtime struggles"
+    delay_after_trigger_hours: 1
+    messages:
+      - day: 0
+        delay_hours: 1
+        message: >
+          Hi {first_name} — I saw your comment about bedtime and wanted to reach out.
+
+          Bedtime battles are honestly one of the most exhausting things — you're
+          not alone in this at all.
+
+          I put together a short guide on what actually helps (based on what the
+          research says, not the Pinterest-perfect routines 😅). Want me to send
+          it over?
+
+      - day: 3
+        delay_hours: 0
+        condition: "no_reply"
+        message: >
+          Hey {first_name} — just following up in case my last message got buried!
+
+          No pressure at all — just wanted to make sure you had this if it helps:
+          [Link to bedtime resource or lead magnet]
+
+          Hope bedtime is a little easier this week 💛
+
+  screen_time_concern:
+    trigger: "keyword:screen_time"
+    description: "Comment mentions screen time worry or guilt"
+    delay_after_trigger_hours: 1
+    messages:
+      - day: 0
+        delay_hours: 1
+        message: >
+          Hi {first_name} — I saw what you shared about screen time and I just
+          wanted to say: the guilt you're feeling? That's your love showing up.
+
+          There's actually some really reassuring research on this that most
+          parents never hear. Want me to share it with you? No strings — just
+          something I think might help.
+
+  app_interest:
+    trigger: "keyword:app_interest"
+    description: "Comment shows interest in the app or product"
+    delay_after_trigger_hours: 0.5
+    messages:
+      - day: 0
+        delay_hours: 1
+        message: >
+          Hi {first_name}! You asked about the app — here's everything you need:
+
+          📱 [App Store Link]
+          🎁 Use code FREYA for [offer if applicable]
+
+          It's designed for moments exactly like the ones you're describing.
+          Let me know if you have any questions — I'm always here. 💛
+
+  emotional_support:
+    trigger: "keyword:emotional_help"
+    description: "Comment mentions toddler meltdowns or emotional regulation struggle"
+    delay_after_trigger_hours: 2
+    messages:
+      - day: 0
+        delay_hours: 2
+        message: >
+          Hi {first_name} — toddler emotions are genuinely one of the hardest
+          parts of early parenting. I see you.
+
+          I made a short (3-minute) guide on co-regulation — basically, how
+          YOUR calm helps THEIR brain calm down. It's changed things for so
+          many parents.
+
+          Want me to send it over? It's free — just something I think you'd find
+          genuinely useful right now.
+
+  re_engagement:
+    trigger: "pipeline_stage:warm_no_activity_14_days"
+    description: "Warm contact has gone quiet for 14 days"
+    delay_after_trigger_hours: 0
+    messages:
+      - day: 0
+        delay_hours: 9   # Send at 9am
+        message: >
+          Hey {first_name} — just thinking about you and the parents in our
+          community. How are things going?
+
+          We just posted something I think you'd really connect with. No pressure
+          — just wanted to check in. 💛
+
+pipeline_stage_triggers:
+  # Automatically advance pipeline stage based on behaviour
+  discovered:
+    condition: "first_comment_or_like"
+    advance_to: "engaged"
+    advance_after_events: 1
+
+  engaged:
+    condition: "3_or_more_comments"
+    advance_to: "warm"
+    advance_after_events: 3
+
+  warm:
+    condition: "clicked_link_or_saved_post"
+    advance_to: "lead"
+    advance_after_events: 1
+
+  lead:
+    condition: "replied_to_dm_or_signed_up"
+    advance_to: "trial"
+    advance_after_events: 1
+
+  trial:
+    condition: "app_download_confirmed"
+    advance_to: "customer"
+    advance_after_events: 1

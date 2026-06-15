@@ -1,0 +1,7 @@
+httpx>=0.27.0
+python-dotenv>=1.0.0
+PyYAML>=6.0.1
+openai>=1.30.0
+fastapi>=0.111.0
+uvicorn>=0.29.0          # to run webhook server: uvicorn scripts.webhook:app
+pytest>=8.2.0

@@ -1,0 +1,86 @@
+# Optimal posting schedule based on parent audience engagement research
+# All times in LOCAL time of your audience (adjust TZ offset for your region)
+# Source: Later, Hootsuite, and Sprout Social 2024 parenting niche studies
+
+timezone: "Europe/London"  # Change to your target audience timezone
+
+instagram:
+  # Reels perform best at these windows
+  reels:
+    monday:    ["07:00", "12:00", "19:30"]
+    tuesday:   ["07:00", "12:00", "20:00"]
+    wednesday: ["07:00", "11:00", "19:00"]
+    thursday:  ["07:00", "12:00", "20:00"]
+    friday:    ["07:00", "12:00", "18:00"]
+    saturday:  ["09:00", "11:00", "19:00"]
+    sunday:    ["10:00", "19:00"]
+  # Static images (carousel or single)
+  images:
+    monday:    ["08:00", "13:00"]
+    tuesday:   ["08:00", "13:00", "20:30"]
+    wednesday: ["08:00", "13:00"]
+    thursday:  ["08:00", "20:00"]
+    friday:    ["08:00", "12:00"]
+    saturday:  ["10:00", "20:00"]
+    sunday:    ["11:00", "20:00"]
+
+  # Notes:
+  # - 07:00: Parents checking phone before kids wake / during morning feed
+  # - 12:00: Naptime scroll / lunch break
+  # - 19:00-20:00: After bedtime, kids in bed, parent wind-down
+  # - Saturday 10-11am: Weekend family morning
+  # - Sunday evening: Pre-week anxiety / planning
+
+  max_posts_per_day: 3
+  min_gap_hours: 3
+
+youtube:
+  # Shorts - treated like Reels
+  shorts:
+    monday:    ["12:00", "20:00"]
+    tuesday:   ["12:00", "20:00"]
+    wednesday: ["12:00", "20:00"]
+    thursday:  ["12:00", "20:30"]
+    friday:    ["12:00", "18:00", "20:00"]
+    saturday:  ["10:00", "15:00", "20:00"]
+    sunday:    ["12:00", "20:00"]
+  # Long-form videos (if applicable)
+  videos:
+    thursday:  ["15:00"]
+    friday:    ["15:00"]
+    saturday:  ["12:00"]
+    sunday:    ["14:00"]
+
+  # Notes:
+  # - 12:00-14:00: Lunch nap / afternoon nap for babies
+  # - 20:00-21:00: After bedtime routine, parents relax
+  # - Friday/Saturday: Higher weekend discovery traffic
+
+  max_shorts_per_day: 2
+  max_videos_per_day: 1
+  min_gap_hours: 4
+
+content_mix:
+  # Ratio of content types per week
+  reels_vs_images_ratio: 0.6      # 60% Reels, 40% Images on Instagram
+  shorts_vs_videos_ratio: 0.85    # 85% Shorts, 15% long-form on YouTube
+
+  # Rotate through themes (don't repeat same theme within 2 days)
+  theme_rotation_days: 2
+
+  # Minimum content in queue before posting (safety buffer)
+  min_queue_size: 2
+
+engagement_windows:
+  # Times NOT to post (low parent engagement)
+  blackout_periods:
+    - "03:00-06:30"   # Sleep hours
+    - "08:30-11:30"   # School run + morning routines (busy)
+    - "16:30-18:30"   # School pickup + homework / dinner chaos
+
+  # Highest priority slots (generate extra content for these)
+  prime_time:
+    - "07:00"         # Pre-morning chaos
+    - "12:00"         # Naptime
+    - "19:30"         # After bedtime
+    - "20:30"         # Parent wind-down

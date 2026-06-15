@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ARBITER — Mission Control</title>
+    <link rel="stylesheet" href="/static/style.css?v=20260614q">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js"></script>
+</head>
+<body>
+    <div class="scanline"></div>
+
+    <!-- ═══ TOP STATUS BAR ═══════════════════════════════════════ -->
+    <header class="mc-topbar">
+        <div class="topbar-left">
+            <div class="system-status" id="system-badge">● INITIALISING</div>
+            <span class="mc-indicator" id="s-content-db" data-label="Content DB"><span class="ind-dot offline">●</span></span>
+            <span class="mc-indicator" id="s-engage-db" data-label="Engage DB"><span class="ind-dot offline">●</span></span>
+            <span class="mc-indicator" id="s-llm" data-label="LLM"><span class="ind-dot offline">●</span></span>
+        </div>
+        <div class="topbar-center">
+            <div class="arc-reactor"></div>
+            <div class="topbar-title-stack">
+                <h1>A R B I T E R</h1>
+                <span class="topbar-subtitle">MISSION CONTROL</span>
+            </div>
+        </div>
+        <div class="topbar-right">
+            <div class="clock-time" id="clock-time">--:--:--</div>
+            <div class="clock-date" id="clock-date">Loading...</div>
+        </div>
+    </header>
+
+    <!-- ═══ MAIN VIEWPORT ═══════════════════════════════════════ -->
+    <main class="mc-viewport">
+
+        <!-- LEFT SIDE — Bulletins + System + System Logs + Conversation Logs -->
+        <aside class="mc-float-left" id="float-left">
+            <!-- Bulletins — top-left critical info -->
+            <div class="float-section bulletin-panel">
+                <div class="float-label"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg> BULLETINS</div>
+                <div class="bulletin-feed" id="bulletin-feed-live">
+                    <div class="feed-empty">ALL NOMINAL</div>
+                </div>
+            </div>
+            <!-- System Info sliders (clickable to expand graphs) -->
+            <div class="float-section sys-info-panel" id="sys-info-panel" style="cursor:pointer;">
+                <div class="float-label"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg> SYSTEM <span style="font-size:11px;opacity:0.5;letter-spacing:1px;margin-left:6px;">▼ CLICK FOR GRAPHS</span></div>
+                <div class="sys-sliders" id="sys-sliders">
+                    <div class="sys-slider"><span class="sys-lbl">CPU</span><div class="sys-bar"><div class="sys-fill" id="sys-cpu" style="width:0%"></div></div><span class="sys-val" id="sys-cpu-val">—</span></div>
+                    <div class="sys-slider"><span class="sys-lbl">MEM</span><div class="sys-bar"><div class="sys-fill" id="sys-mem" style="width:0%"></div></div><span class="sys-val" id="sys-mem-val">—</span></div>
+                    <div class="sys-slider"><span class="sys-lbl">DISK</span><div class="sys-bar"><div class="sys-fill" id="sys-disk" style="width:0%"></div></div><span class="sys-val" id="sys-disk-val">—</span></div>
+                    <div class="sys-slider"><span class="sys-lbl">NET</span><div class="sys-bar"><div class="sys-fill" id="sys-net" style="width:0%"></div></div><span class="sys-val" id="sys-net-val">—</span></div>
+                </div>
+                <!-- System graphs (hidden until clicked) -->
+                <div class="sys-graphs-panel" id="sys-graphs-panel">
+                    <div class="sys-graph-wrap"><canvas id="sys-cpu-chart"></canvas></div>
+                    <div class="sys-graph-wrap"><canvas id="sys-mem-chart"></canvas></div>
+                </div>
+            </div>
+            <!-- System Logs (floating, no panel borders) -->
+            <div class="float-section">
+                <div class="log-section-label">── SYSTEM LOGS ──</div>
+                <div class="floating-logs" id="floating-logs">
+                    <div class="log-line dim">ARBITER v1.0 — awaiting signals...</div>
+                </div>
+            </div>
+            <!-- Conversation Logs (moved from right) -->
+            <div class="float-section convo-panel">
+                <div class="log-section-label">── CONVERSATION LOGS ──</div>
+                <div class="convo-log" id="convo-log">
+                    <div class="convo-line system">ARBITER online. Awaiting input...</div>
+                </div>
+            </div>
+        </aside>
+
+        <!-- LEFT EXPAND PANEL (hidden until dock tile clicked) -->
+        <div class="expand-panel expand-left" id="expand-left">
+            <div class="expand-header">
+                <span class="expand-title" id="expand-left-title"></span>
+            </div>
+            <div class="expand-body" id="expand-left-body"></div>
+        </div>
+
+        <!-- ANALYSIS WING — LEFT (inline between left stats and orb) -->
+        <div class="analysis-wing analysis-wing-left" id="analysis-wing-left">
+            <div class="analysis-wing-header">
+                <span class="analysis-title" id="analysis-title-left">ANALYSIS</span>
+                <button class="expand-close analysis-close-btn" id="analysis-close-left">✕</button>
+            </div>
+            <div class="analysis-wing-body" id="analysis-body-left"></div>
+        </div>
+
+        <!-- CENTER — Orb (always visible, absolutely centered) -->
+        <section class="mc-center">
+            <div class="orb-wrapper" id="orb-container">
+                <canvas id="orb-canvas" width="640" height="640"></canvas>
+                <div class="orb-state" id="orb-state">STANDBY</div>
+            </div>
+            <button class="btn-stop" id="btn-stop" style="display:none;" title="Stop speaking">■ STOP</button>
+
+            <!-- ═══ HANDS-ON: Chat input below orb ═══ -->
+            <div class="chat-input-row" id="chat-input-row" style="display:none;">
+                <input type="text" class="chat-input" id="chat-input" placeholder="Type a message..." autocomplete="off" />
+                <button class="chat-send-btn" id="chat-send" title="Send">▶</button>
+            </div>
+
+            <div class="orb-input-wrap" id="orb-input-wrap" style="display:none;">
+                <input type="text" class="orb-input" id="orb-input" placeholder="Command..." autocomplete="off" />
+            </div>
+            <!-- Dialogue Options (RPG-style follow-ups) -->
+            <div class="dialogue-options" id="dialogue-options"></div>
+            <!-- Revenue Summary Box (below orb, same width) -->
+            <div class="revenue-summary-box" id="revenue-summary-bar">
+                <div class="rev-sum-header">BUSINESS SUMMARY</div>
+                <div class="rev-sum-row">
+                    <div class="rev-sum-item rev-sum-primary"><span class="rev-sum-val" id="rsum-mrr">—</span><span class="rev-sum-lbl">MRR</span></div>
+                    <div class="rev-sum-item"><span class="rev-sum-val" id="rsum-adcost">—</span><span class="rev-sum-lbl">AD COSTS</span></div>
+                    <div class="rev-sum-item"><span class="rev-sum-val" id="rsum-totalcost">—</span><span class="rev-sum-lbl">TOTAL COSTS</span></div>
+                    <div class="rev-sum-item"><span class="rev-sum-val" id="rsum-subs">—</span><span class="rev-sum-lbl">SUBSCRIBERS</span></div>
+                    <div class="rev-sum-item"><span class="rev-sum-val" id="rsum-revenue">—</span><span class="rev-sum-lbl">REVENUE</span></div>
+                    <div class="rev-sum-item"><span class="rev-sum-val" id="rsum-trials">—</span><span class="rev-sum-lbl">TRIALS</span></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ═══ HANDS-ON CHAT MESSAGE PANEL (to the right of orb) ═══ -->
+        <div class="chat-panel" id="chat-panel">
+            <div class="chat-panel-header">
+                <span class="chat-panel-title">⌨ HANDS-ON MODE</span>
+                <button class="chat-panel-close" id="chat-panel-close" title="Return to voice mode">✕ VOICE</button>
+            </div>
+            <div class="chat-messages" id="chat-messages"></div>
+        </div>
+
+        <!-- ANALYSIS WING — RIGHT (inline between orb and right stats) -->
+        <div class="analysis-wing analysis-wing-right" id="analysis-wing-right">
+            <div class="analysis-wing-header">
+                <span class="analysis-title" id="analysis-title-right">INSIGHTS</span>
+                <button class="expand-close analysis-close-btn" id="analysis-close-right">✕</button>
+            </div>
+            <div class="analysis-wing-body" id="analysis-body-right"></div>
+        </div>
+
+        <!-- RIGHT EXPAND PANEL (hidden until dock tile clicked) -->
+        <div class="expand-panel expand-right" id="expand-right">
+            <div class="expand-header">
+                <span class="expand-title" id="expand-right-title"></span>
+                <button class="expand-close" id="expand-close">✕</button>
+            </div>
+            <div class="expand-body" id="expand-right-body"></div>
+        </div>
+
+        <!-- RIGHT SIDE — Service health + Infrastructure + GCP Pods -->
+        <aside class="mc-float-right" id="float-right">
+            <div class="float-section">
+                <div class="float-label"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg> SERVICE UPTIME</div>
+                <div class="health-groups" id="health-grid"></div>
+            </div>
+            <div class="float-section float-globe">
+                <div class="float-label"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10A15.3 15.3 0 0 1 12 2z"/></svg> INFRASTRUCTURE</div>
+                <canvas id="gcp-map-canvas" width="420" height="340"></canvas>
+                <div class="hero-legend" id="gcp-region-legend"></div>
+            </div>
+            <!-- GCP Pod Metrics — Grow with Freya -->
+            <div class="float-section gcp-pods-panel">
+                <div class="float-label"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg> GCP — GROW WITH FREYA</div>
+                <div class="gcp-pods" id="gcp-pods">
+                    <div class="feed-empty">LOADING PODS...</div>
+                </div>
+            </div>
+        </aside>
+    </main>
+
+    <!-- ═══ BOTTOM DOCK — Summary panels with visible data ═════ -->
+    <footer class="mc-dock">
+        <!-- Email -->
+        <div class="dock-panel" data-dock="email" title="Email Intelligence">
+            <div class="dp-header"><span class="dp-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M22 7l-10 7L2 7"/></svg></span><span class="dp-title">EMAIL</span></div>
+            <div class="dp-stats">
+                <div class="dp-stat"><span class="dp-val caution" id="dock-email-unread">—</span><span class="dp-lbl">UNREAD</span></div>
+                <div class="dp-stat"><span class="dp-val alert" id="dock-email-urgent">—</span><span class="dp-lbl">URGENT</span></div>
+            </div>
+        </div>
+        <!-- Revenue -->
+        <div class="dock-panel" data-dock="revenue" title="Revenue">
+            <div class="dp-header"><span class="dp-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></span><span class="dp-title">REVENUE</span></div>
+            <div class="dp-stats">
+                <div class="dp-stat"><span class="dp-val accent" id="dock-rev-mrr">—</span><span class="dp-lbl">MRR</span></div>
+                <div class="dp-stat"><span class="dp-val nominal" id="dock-rev-subs">—</span><span class="dp-lbl">SUBS</span></div>
+            </div>
+        </div>
+
+        <!-- Weather -->
+        <div class="dock-panel" data-dock="weather" title="Weather — UK">
+            <div class="dp-header"><span class="dp-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg></span><span class="dp-title">WEATHER</span></div>
+            <div class="dp-stats">
+                <div class="dp-stat"><span class="dp-val" id="dock-wx-temp">—</span><span class="dp-lbl" id="dock-wx-desc">—</span></div>
+            </div>
+        </div>
+        <!-- Deadlines -->
+        <div class="dock-panel" data-dock="deadlines" title="Key Deadlines & Roadmap">
+            <div class="dp-header"><span class="dp-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></span><span class="dp-title">DEADLINES</span></div>
+            <div class="dp-stats">
+                <div class="dp-stat"><span class="dp-val caution" id="dock-dl-next">—</span><span class="dp-lbl" id="dock-dl-label">NEXT</span></div>
+            </div>
+        </div>
+        <!-- Feed -->
+        <div class="dock-panel" data-dock="activity" title="Live Feed">
+            <div class="dp-header"><span class="dp-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49"/><path d="M7.76 16.24a6 6 0 0 1 0-8.49"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M4.93 19.07a10 10 0 0 1 0-14.14"/></svg></span><span class="dp-title">FEED</span></div>
+            <div class="dp-stats">
+                <div class="dp-stat"><span class="dp-val" id="dock-feed-count">—</span><span class="dp-lbl">ITEMS</span></div>
+            </div>
+        </div>
+        <!-- CI/CD -->
+        <div class="dock-panel" data-dock="cicd" title="CI/CD — Grow with Freya">
+            <div class="dp-header"><span class="dp-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg></span><span class="dp-title">CI/CD</span></div>
+            <div class="dp-stats">
+                <div class="dp-stat"><span class="dp-val nominal" id="dock-cicd-pass">—</span><span class="dp-lbl">PASS</span></div>
+                <div class="dp-stat"><span class="dp-val alert" id="dock-cicd-fail">—</span><span class="dp-lbl">FAIL</span></div>
+            </div>
+        </div>
+        <!-- Meta -->
+        <div class="dock-meta">
+            <div class="dock-meta-brand">ARBITER v1.0</div>
+            <div class="dock-meta-line" id="refresh-timer">NEXT: 30s</div>
+        </div>
+    </footer>
+
+    <!-- ═══ HIDDEN DOCK PANEL CONTENT (moved into overlay on click) ═══ -->
+    <div id="dock-panels" style="display:none;">
+
+
+        <!-- Agents -->
+        <div id="dock-panel-agents" class="dock-panel-inner">
+            <div class="agent-grid-compact" id="agent-grid"></div>
+        </div>
+
+        <!-- Email -->
+        <div id="dock-panel-email" class="dock-panel-inner">
+            <div class="readout-grid">
+                <div class="readout-cell"><span class="rv" id="em-total">—</span><span class="rl">▼ RECEIVED</span></div>
+                <div class="readout-cell"><span class="rv caution" id="em-unread">—</span><span class="rl">● UNREAD</span></div>
+                <div class="readout-cell"><span class="rv nominal" id="em-replied">—</span><span class="rl">✓ REPLIED</span></div>
+                <div class="readout-cell"><span class="rv alert" id="em-urgent">—</span><span class="rl">▲ URGENT</span></div>
+            </div>
+            <div class="chart-container" style="height:180px;margin-top:12px;">
+                <canvas id="email-chart"></canvas>
+            </div>
+        </div>
+
+        <!-- Revenue -->
+        <div id="dock-panel-revenue" class="dock-panel-inner">
+            <div class="readout-grid">
+                <div class="readout-cell"><span class="rv nominal" id="rc-subs">—</span><span class="rl">SUBS</span></div>
+                <div class="readout-cell"><span class="rv" id="rc-trials">—</span><span class="rl">◇ TRIALS</span></div>
+                <div class="readout-cell"><span class="rv accent" id="rc-mrr">—</span><span class="rl">$ MRR</span></div>
+                <div class="readout-cell"><span class="rv accent" id="rc-revenue">—</span><span class="rl">$ REVENUE</span></div>
+                <div class="readout-cell"><span class="rv nominal" id="rc-new">—</span><span class="rl">▲ NEW</span></div>
+                <div class="readout-cell"><span class="rv alert" id="rc-churn">—</span><span class="rl">▼ CHURNED</span></div>
+            </div>
+            <div class="chart-container" style="height:180px;margin-top:12px;">
+                <canvas id="revenue-chart"></canvas>
+            </div>
+        </div>
+
+        <!-- Weather -->
+        <div id="dock-panel-weather" class="dock-panel-inner">
+            <div class="weather-card" id="weather-card">
+                <div class="weather-loading">Locating…</div>
+            </div>
+        </div>
+
+        <!-- Deadlines / Roadmap -->
+        <div id="dock-panel-deadlines" class="dock-panel-inner">
+            <div class="deadlines-grid" id="deadlines-grid">
+                <div class="feed-empty">NO DEADLINES SET</div>
+            </div>
+        </div>
+
+        <!-- Bulletins -->
+        <div id="dock-panel-bulletins" class="dock-panel-inner">
+            <div class="bulletin-feed" id="bulletin-feed">
+                <div class="feed-empty">ALL NOMINAL</div>
+            </div>
+        </div>
+
+        <!-- Activity / Live Feed -->
+        <div id="dock-panel-activity" class="dock-panel-inner">
+            <div class="activity-feed" id="activity-feed">
+                <div class="feed-empty">AWAITING SIGNALS...</div>
+            </div>
+        </div>
+
+        <!-- Intelligence -->
+        <div id="dock-panel-intelligence" class="dock-panel-inner">
+            <div class="intel-body">
+                <div class="fact-text" id="fact-text">Awaiting scan...</div>
+                <div class="fact-source" id="fact-source"></div>
+                <div class="fact-truth" id="fact-truth"></div>
+            </div>
+            <div class="review-queue" id="review-queue">
+                <div class="feed-empty">CLEAR</div>
+            </div>
+        </div>
+
+        <!-- CI/CD — Grow with Freya -->
+        <div id="dock-panel-cicd" class="dock-panel-inner">
+            <div class="cicd-grid" id="cicd-grid">
+                <div class="feed-empty">LOADING BUILDS...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ═══ STARTUP GUIDE — shown when critical deps are offline ═══ -->
+    <div class="startup-overlay" id="startup-overlay">
+        <div class="startup-card">
+            <h2><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-3px;margin-right:6px"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg> SYSTEMS OFFLINE</h2>
+            <p>Some critical dependencies are not running. Follow the steps below to get Arbiter fully operational.</p>
+            <div id="startup-deps"></div>
+            <div id="startup-instructions"></div>
+            <button class="startup-dismiss" id="startup-dismiss">CONTINUE ANYWAY</button>
+        </div>
+    </div>
+
+    <!-- Hidden panels for JS compat -->
+    <div style="display:none;">
+        <div id="system-status-body"></div>
+        <canvas id="email-donut-chart" width="1" height="1"></canvas>
+        <div id="panel-email-donut"></div>
+        <div id="panel-systems"></div>
+    </div>
+
+    <script src="/static/jarvis.js?v=20260614q"></script>
+</body>
+</html>

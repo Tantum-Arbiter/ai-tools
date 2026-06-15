@@ -1,0 +1,74 @@
+[
+  {
+    "title": "App Store v2.0 Launch",
+    "date": "2026-07-15",
+    "quarter": "Q3",
+    "category": "launch",
+    "status": "in_progress",
+    "priority": "critical",
+    "description": "Major app store release with new features and UI overhaul",
+    "id": "85068668",
+    "notes": "",
+    "created": "2026-06-14T19:04:35.820047"
+  },
+  {
+    "title": "EAS Production Build Pipeline",
+    "date": "2026-08-01",
+    "quarter": "Q3",
+    "category": "milestone",
+    "status": "planned",
+    "priority": "high",
+    "description": "Expo Application Services production build & deployment pipeline",
+    "id": "2e4e107a",
+    "notes": "",
+    "created": "2026-06-14T19:04:35.820055"
+  },
+  {
+    "title": "Freya Content Automation v3",
+    "date": "2026-09-01",
+    "quarter": "Q3",
+    "category": "milestone",
+    "status": "planned",
+    "priority": "high",
+    "description": "Third generation content automation with AI-driven scheduling",
+    "id": "218efe6f",
+    "notes": "",
+    "created": "2026-06-14T19:04:35.820059"
+  },
+  {
+    "title": "RevenueCat Premium Tier",
+    "date": "2026-10-15",
+    "quarter": "Q4",
+    "category": "launch",
+    "status": "planned",
+    "priority": "critical",
+    "description": "Premium subscription tier with advanced analytics and features",
+    "id": "1b859205",
+    "notes": "",
+    "created": "2026-06-14T19:04:35.820063"
+  },
+  {
+    "title": "Holiday Campaign Launch",
+    "date": "2026-11-01",
+    "quarter": "Q4",
+    "category": "campaign",
+    "status": "planned",
+    "priority": "medium",
+    "description": "Q4 holiday marketing campaign across all channels",
+    "id": "086584fb",
+    "notes": "",
+    "created": "2026-06-14T19:04:35.820067"
+  },
+  {
+    "title": "Annual Roadmap Review",
+    "date": "2027-01-15",
+    "quarter": "Q1",
+    "category": "review",
+    "status": "planned",
+    "priority": "medium",
+    "description": "Annual strategic review and 2027 roadmap planning",
+    "id": "78405a6c",
+    "notes": "",
+    "created": "2026-06-14T19:04:35.820071"
+  }
+]

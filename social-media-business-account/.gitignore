@@ -1,0 +1,17 @@
+# Secrets
+.env
+data/youtube_token.json
+
+# Generated content (large files)
+data/content/
+logs/
+reports/
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Database (contains post history — commit or not, your choice)
+# data/state.db   # uncomment to also ignore the DB

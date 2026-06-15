@@ -1,0 +1,30 @@
+# Core
+requests>=2.31.0
+httpx>=0.27.0
+pydantic>=2.7.0
+python-dotenv>=1.0.0
+PyYAML>=6.0.1
+
+# LLM providers (install at least one)
+anthropic>=0.25.0          # Claude — recommended if you have Claude Code Pro
+openai>=1.30.0             # OpenAI — alternative
+
+# YouTube upload
+google-api-python-client>=2.130.0
+google-auth-oauthlib>=1.2.0
+google-auth-httplib2>=0.2.0
+
+# TTS
+# Option A: Kokoro (local, free, best quality) — install separately: pip install kokoro soundfile
+# Option B: gTTS (free, requires internet, simpler)
+gTTS>=2.5.0
+
+# Video/image processing
+# FFmpeg must be installed separately on Windows: https://ffmpeg.org/download.html
+Pillow>=10.3.0
+
+# Optional: Google Trends collection
+pytrends>=4.9.2
+
+# Dev / testing
+pytest>=8.2.0
