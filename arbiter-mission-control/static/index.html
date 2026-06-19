@@ -4,33 +4,46 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ARBITER — Mission Control</title>
-    <link rel="stylesheet" href="/static/style.css?v=20260614q">
+    <link rel="stylesheet" href="/static/style.css?v=20260615f">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js"></script>
 </head>
-<body>
+<body class="booting">
+    <!-- ═══ SPLASH / LOADING SCREEN ═══════════════════════════════ -->
+    <div class="splash-overlay" id="splash-overlay">
+        <div class="splash-content">
+            <div class="splash-reactor"></div>
+            <div class="splash-title">A R B I T E R</div>
+            <div class="splash-subtitle">MISSION CONTROL</div>
+            <div class="splash-status" id="splash-status">INITIALISING SYSTEMS</div>
+            <div class="splash-bar"><div class="splash-bar-fill" id="splash-bar-fill"></div></div>
+        </div>
+        <div class="splash-grid"></div>
+    </div>
+
     <div class="scanline"></div>
 
     <!-- ═══ TOP STATUS BAR ═══════════════════════════════════════ -->
-    <header class="mc-topbar">
-        <div class="topbar-left">
+    <!-- ═══ BRAND STRIP (top-left overlay) ══════════════════════ -->
+    <div class="mc-brand" id="mc-brand">
+        <div class="arc-reactor"></div>
+        <div class="brand-text">
+            <h1>ARBITER</h1>
+            <span class="brand-sub">MISSION CONTROL</span>
+        </div>
+        <div class="brand-status">
             <div class="system-status" id="system-badge">● INITIALISING</div>
             <span class="mc-indicator" id="s-content-db" data-label="Content DB"><span class="ind-dot offline">●</span></span>
             <span class="mc-indicator" id="s-engage-db" data-label="Engage DB"><span class="ind-dot offline">●</span></span>
             <span class="mc-indicator" id="s-llm" data-label="LLM"><span class="ind-dot offline">●</span></span>
         </div>
-        <div class="topbar-center">
-            <div class="arc-reactor"></div>
-            <div class="topbar-title-stack">
-                <h1>A R B I T E R</h1>
-                <span class="topbar-subtitle">MISSION CONTROL</span>
-            </div>
-        </div>
-        <div class="topbar-right">
-            <div class="clock-time" id="clock-time">--:--:--</div>
-            <div class="clock-date" id="clock-date">Loading...</div>
-        </div>
-    </header>
+    </div>
+
+    <!-- ═══ CLOCK (top-right overlay) ═════════════════════════ -->
+    <div class="mc-clock" id="mc-clock">
+        <div class="clock-time" id="clock-time">--:--:--</div>
+        <div class="clock-date" id="clock-date">Loading...</div>
+    </div>
 
     <!-- ═══ MAIN VIEWPORT ═══════════════════════════════════════ -->
     <main class="mc-viewport">
@@ -75,12 +88,46 @@
             </div>
         </aside>
 
-        <!-- LEFT EXPAND PANEL (hidden until dock tile clicked) -->
-        <div class="expand-panel expand-left" id="expand-left">
-            <div class="expand-header">
-                <span class="expand-title" id="expand-left-title"></span>
+        <!-- VERTICAL EXPAND OVERLAY (slides up from dock on click) -->
+        <div class="dock-overlay" id="dock-overlay">
+            <div class="dock-overlay-header">
+                <span class="dock-overlay-title" id="dock-overlay-title"></span>
+                <button class="expand-close" id="dock-overlay-close">✕</button>
             </div>
-            <div class="expand-body" id="expand-left-body"></div>
+            <div class="dock-overlay-body" id="dock-overlay-body"></div>
+        </div>
+
+        <!-- ═══ CAMERA VISION ══════════════════════════════════════ -->
+        <div id="cam-bg">
+            <video id="cam-video" autoplay playsinline muted></video>
+        </div>
+        <canvas id="cam-particles"></canvas>
+        <canvas id="cam-capture"></canvas>
+        <div class="cam-scanline" id="cam-scanline"></div>
+        <div class="cam-corner cam-tl"></div>
+        <div class="cam-corner cam-tr"></div>
+        <div class="cam-corner cam-bl"></div>
+        <div class="cam-corner cam-br"></div>
+        <div id="cam-scan-grid"></div>
+        <div class="cam-hud-badge" id="cam-hud-badge">
+            <span class="cam-hud-dot"></span> REMOTE VISION
+            <span class="cam-hud-processing">ANALYSING</span>
+            <button class="cam-exit-btn" id="cam-exit-btn" title="Exit Vision Mode">✕</button>
+        </div>
+        <!-- Vision info panels (flanking the camera viewport) -->
+        <div class="vision-panel vision-panel-left" id="vision-panel-left">
+            <div class="vision-panel-header">
+                <span class="vision-panel-icon">◉</span>
+                <span class="vision-panel-title" id="vision-title-left">ANALYSIS</span>
+            </div>
+            <div class="vision-panel-body" id="vision-body-left"></div>
+        </div>
+        <div class="vision-panel vision-panel-right" id="vision-panel-right">
+            <div class="vision-panel-header">
+                <span class="vision-panel-icon">⬡</span>
+                <span class="vision-panel-title" id="vision-title-right">GUIDANCE</span>
+            </div>
+            <div class="vision-panel-body" id="vision-body-right"></div>
         </div>
 
         <!-- ANALYSIS WING — LEFT (inline between left stats and orb) -->
@@ -96,7 +143,7 @@
         <section class="mc-center">
             <div class="orb-wrapper" id="orb-container">
                 <canvas id="orb-canvas" width="640" height="640"></canvas>
-                <div class="orb-state" id="orb-state">STANDBY</div>
+                <div class="orb-state" id="orb-state" style="display:none;"></div>
             </div>
             <button class="btn-stop" id="btn-stop" style="display:none;" title="Stop speaking">■ STOP</button>
 
@@ -128,8 +175,14 @@
         <!-- ═══ HANDS-ON CHAT MESSAGE PANEL (to the right of orb) ═══ -->
         <div class="chat-panel" id="chat-panel">
             <div class="chat-panel-header">
-                <span class="chat-panel-title">⌨ HANDS-ON MODE</span>
-                <button class="chat-panel-close" id="chat-panel-close" title="Return to voice mode">✕ VOICE</button>
+                <span class="chat-panel-title">⌨ HANDS-ON</span>
+                <div class="chat-panel-actions">
+                    <span class="session-badge" id="session-badge" title="Cached queries this session">0</span>
+                    <button class="chat-action-btn" id="btn-sessions" title="View saved sessions">📁</button>
+                    <button class="chat-action-btn" id="btn-report" title="Build report">📊</button>
+                    <button class="chat-action-btn session-new" id="btn-new-session" title="Start fresh">⟳</button>
+                    <button class="chat-panel-close" id="chat-panel-close" title="Return to voice mode">✕</button>
+                </div>
             </div>
             <div class="chat-messages" id="chat-messages"></div>
         </div>
@@ -143,14 +196,7 @@
             <div class="analysis-wing-body" id="analysis-body-right"></div>
         </div>
 
-        <!-- RIGHT EXPAND PANEL (hidden until dock tile clicked) -->
-        <div class="expand-panel expand-right" id="expand-right">
-            <div class="expand-header">
-                <span class="expand-title" id="expand-right-title"></span>
-                <button class="expand-close" id="expand-close">✕</button>
-            </div>
-            <div class="expand-body" id="expand-right-body"></div>
-        </div>
+
 
         <!-- RIGHT SIDE — Service health + Infrastructure + GCP Pods -->
         <aside class="mc-float-right" id="float-right">
@@ -206,11 +252,12 @@
                 <div class="dp-stat"><span class="dp-val caution" id="dock-dl-next">—</span><span class="dp-lbl" id="dock-dl-label">NEXT</span></div>
             </div>
         </div>
-        <!-- Feed -->
-        <div class="dock-panel" data-dock="activity" title="Live Feed">
-            <div class="dp-header"><span class="dp-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49"/><path d="M7.76 16.24a6 6 0 0 1 0-8.49"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M4.93 19.07a10 10 0 0 1 0-14.14"/></svg></span><span class="dp-title">FEED</span></div>
+        <!-- Todo List -->
+        <div class="dock-panel" data-dock="todo" title="Todo List & Schedule">
+            <div class="dp-header"><span class="dp-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></span><span class="dp-title">TODO</span></div>
             <div class="dp-stats">
-                <div class="dp-stat"><span class="dp-val" id="dock-feed-count">—</span><span class="dp-lbl">ITEMS</span></div>
+                <div class="dp-stat"><span class="dp-val caution" id="dock-todo-count">0</span><span class="dp-lbl">TASKS</span></div>
+                <div class="dp-stat"><span class="dp-val nominal" id="dock-todo-done">0</span><span class="dp-lbl">DONE</span></div>
             </div>
         </div>
         <!-- CI/CD -->
@@ -219,6 +266,21 @@
             <div class="dp-stats">
                 <div class="dp-stat"><span class="dp-val nominal" id="dock-cicd-pass">—</span><span class="dp-lbl">PASS</span></div>
                 <div class="dp-stat"><span class="dp-val alert" id="dock-cicd-fail">—</span><span class="dp-lbl">FAIL</span></div>
+            </div>
+        </div>
+        <!-- Claude Token Usage -->
+        <div class="dock-panel" data-dock="claude" title="Claude API Token Usage">
+            <div class="dp-header"><span class="dp-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 14a1 1 0 1 1 1-1 1 1 0 0 1-1 1zm1-5h-2V7h2z"/></svg></span><span class="dp-title">CLAUDE</span></div>
+            <div class="dp-stats">
+                <div class="dp-stat"><span class="dp-val" id="dock-claude-cost">—</span><span class="dp-lbl">COST</span></div>
+                <div class="dp-stat"><span class="dp-val" id="dock-claude-reqs">—</span><span class="dp-lbl">REQS</span></div>
+            </div>
+        </div>
+        <!-- Camera Vision -->
+        <div class="dock-panel dock-panel-cam" id="dock-cam-btn" title="Camera Vision">
+            <div class="dp-header"><span class="dp-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg></span><span class="dp-title">VISION</span></div>
+            <div class="dp-stats">
+                <div class="dp-stat"><span class="dp-val" id="dock-cam-status">OFF</span><span class="dp-lbl">CAM</span></div>
             </div>
         </div>
         <!-- Meta -->
@@ -286,10 +348,24 @@
             </div>
         </div>
 
-        <!-- Activity / Live Feed -->
-        <div id="dock-panel-activity" class="dock-panel-inner">
-            <div class="activity-feed" id="activity-feed">
-                <div class="feed-empty">AWAITING SIGNALS...</div>
+        <!-- Todo List -->
+        <div id="dock-panel-todo" class="dock-panel-inner">
+            <div class="todo-container" id="todo-container">
+                <div class="todo-add-row">
+                    <input type="text" class="todo-input" id="todo-input" placeholder="Add a task..." autocomplete="off" />
+                    <div class="todo-field">
+                        <label class="todo-field-label" for="todo-date">DATE</label>
+                        <input type="date" class="todo-date" id="todo-date" />
+                    </div>
+                    <div class="todo-field">
+                        <label class="todo-field-label" for="todo-time">TIME</label>
+                        <input type="time" class="todo-time" id="todo-time" />
+                    </div>
+                    <button class="todo-add-btn" id="todo-add-btn">+ ADD</button>
+                </div>
+                <div class="todo-schedule" id="todo-schedule">
+                    <div class="feed-empty">NO TASKS — ADD ONE ABOVE</div>
+                </div>
             </div>
         </div>
 
@@ -311,6 +387,30 @@
                 <div class="feed-empty">LOADING BUILDS...</div>
             </div>
         </div>
+
+        <!-- Claude Token Usage -->
+        <div id="dock-panel-claude" class="dock-panel-inner">
+            <div class="readout-grid">
+                <div class="readout-cell"><span class="rv" id="cl-model">—</span><span class="rl">MODEL</span></div>
+                <div class="readout-cell"><span class="rv accent" id="cl-cost">—</span><span class="rl">$ COST TODAY</span></div>
+                <div class="readout-cell"><span class="rv" id="cl-budget">—</span><span class="rl">$ BUDGET</span></div>
+                <div class="readout-cell"><span class="rv" id="cl-input-tok">—</span><span class="rl">▼ INPUT TOKENS</span></div>
+                <div class="readout-cell"><span class="rv" id="cl-output-tok">—</span><span class="rl">▲ OUTPUT TOKENS</span></div>
+                <div class="readout-cell"><span class="rv" id="cl-reqs">—</span><span class="rl">REQUESTS</span></div>
+                <div class="readout-cell"><span class="rv" id="cl-rpm">—</span><span class="rl">RPM LIMIT</span></div>
+                <div class="readout-cell"><span class="rv" id="cl-circuit">—</span><span class="rl">CIRCUIT BREAKER</span></div>
+            </div>
+            <div class="claude-usage-bar" id="claude-usage-bar" style="margin-top:10px;">
+                <div class="float-label" style="font-size:10px; letter-spacing:1px; margin-bottom:4px;">BUDGET USAGE</div>
+                <div style="background:rgba(0,200,255,0.08); border-radius:3px; height:8px; overflow:hidden;">
+                    <div id="cl-budget-fill" style="height:100%; background:var(--cyan); border-radius:3px; transition:width 0.5s ease; width:0%;"></div>
+                </div>
+                <div style="display:flex; justify-content:space-between; font-family:var(--font-mono); font-size:9px; color:var(--cyan-dim); margin-top:3px;">
+                    <span id="cl-budget-pct">0%</span>
+                    <span id="cl-blocked-status">OPERATIONAL</span>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- ═══ STARTUP GUIDE — shown when critical deps are offline ═══ -->
@@ -324,6 +424,16 @@
         </div>
     </div>
 
+    <!-- ═══ SESSION REPORT OVERLAY ═══ -->
+    <div class="report-overlay" id="report-overlay">
+        <div class="report-header">
+            <span class="report-title">📊 SESSION REPORT</span>
+            <span class="report-meta" id="report-meta"></span>
+            <button class="report-close" id="report-close">✕ CLOSE</button>
+        </div>
+        <div class="report-body" id="report-body"></div>
+    </div>
+
     <!-- Hidden panels for JS compat -->
     <div style="display:none;">
         <div id="system-status-body"></div>
@@ -332,6 +442,6 @@
         <div id="panel-systems"></div>
     </div>
 
-    <script src="/static/jarvis.js?v=20260614q"></script>
+    <script src="/static/jarvis.js?v=20260619a"></script>
 </body>
 </html>

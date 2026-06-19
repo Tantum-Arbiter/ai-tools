@@ -48,9 +48,10 @@ class Orb {
         window.addEventListener('resize', () => this._resize());
     }
 
-    _resize() {
+    _resize(forceSize) {
         const rect = this.canvas.parentElement.getBoundingClientRect();
-        const size = Math.min(rect.width, rect.height, 740);
+        let size = forceSize || Math.min(rect.width, rect.height, 740);
+        if (size < 10) size = 200;
         this.canvas.width = size * this.dpr;
         this.canvas.height = size * this.dpr;
         this.canvas.style.width = size + 'px';
@@ -470,6 +471,12 @@ class VoiceEngine {
         // Active follow-up options (for voice command selection)
         this._activeFollowups = null;
 
+        // Session cache — stores all query/panel pairs for report building
+        this._sessionCache = [];
+        this._sessionId = Date.now().toString(36);
+        this._sessionName = null;
+        this._reportCharts = [];  // track charts rendered inside the report
+
         // Audio analyser for real-time mic level → orb waveform
         this._audioCtx = null;
         this._analyser = null;
@@ -766,7 +773,7 @@ class VoiceEngine {
         this._lastProcessed = 0; // always reset — new recognition session = fresh results
 
         if (mode === 'passive') {
-            if (this.speaking) return; // don't listen while Arbiter is talking
+            // Allow passive listening even while speaking — enables wake word interruption
             this._mode = 'passive';
             this._finalTranscript = '';
             try {
@@ -882,6 +889,12 @@ class VoiceEngine {
                         // Only advance past *previous* results.
                         this._lastProcessed = i;
 
+                        // ── Interrupt speech if currently speaking ──
+                        if (this.speaking) {
+                            console.log('[ARBITER] Interrupting speech — wake word detected');
+                            this.stopSpeaking();
+                        }
+
                         // Seamless switch to active
                         this._mode = 'active';
                         this._finalTranscript = afterWake ? ' ' + afterWake : '';
@@ -980,8 +993,17 @@ class VoiceEngine {
             this._running = false;
             this._lastProcessed = 0; // reset for next session
 
-            // NEVER restart recognition while speaking — mic would hear the output
+            // While speaking, only allow passive wake-word listening (for interrupt)
             if (this.speaking) {
+                if (this._pendingStart === 'passive') {
+                    setTimeout(() => this._doStart('passive'), 50);
+                    return;
+                }
+                // Passive mode timed out during speech — restart it
+                if (this._mode === 'passive') {
+                    setTimeout(() => this._doStart('passive'), 200);
+                    return;
+                }
                 this._mode = 'off';
                 this._pendingStart = null;
                 return;
@@ -1149,7 +1171,10 @@ class VoiceEngine {
 
         // Click orb to toggle chat mode
         const orbCanvas = document.getElementById('orb-canvas');
-        if (orbCanvas) orbCanvas.addEventListener('click', () => this._toggleChatMode());
+        if (orbCanvas) orbCanvas.addEventListener('click', () => {
+            if (_cam.active) return; // no chat mode during vision
+            this._toggleChatMode();
+        });
 
         // Chat panel elements
         const chatClose = document.getElementById('chat-panel-close');
@@ -1176,6 +1201,16 @@ class VoiceEngine {
                 }
             });
         }
+
+        // Session controls
+        const btnReport = document.getElementById('btn-report');
+        const btnNewSession = document.getElementById('btn-new-session');
+        const btnSessions = document.getElementById('btn-sessions');
+        const reportClose = document.getElementById('report-close');
+        if (btnReport) btnReport.addEventListener('click', () => this._buildReport());
+        if (btnNewSession) btnNewSession.addEventListener('click', () => this._newSession());
+        if (btnSessions) btnSessions.addEventListener('click', () => this._showSessionDrawer());
+        if (reportClose) reportClose.addEventListener('click', () => this._closeReport());
 
         // Keyboard shortcuts: press 1-4 to select dialogue options (only when not typing)
         document.addEventListener('keydown', (e) => {
@@ -1216,6 +1251,7 @@ class VoiceEngine {
         this._stopLevelPump();
 
         this._chatMode = true;
+        document.body.classList.add('chat-active');
         const panel = document.getElementById('chat-panel');
         const inputRow = document.getElementById('chat-input-row');
         const orbWrap = document.getElementById('orb-container');
@@ -1251,6 +1287,7 @@ class VoiceEngine {
 
     _exitChatMode() {
         this._chatMode = false;
+        document.body.classList.remove('chat-active');
         const panel = document.getElementById('chat-panel');
         const inputRow = document.getElementById('chat-input-row');
         const orbWrap = document.getElementById('orb-container');
@@ -1267,17 +1304,16 @@ class VoiceEngine {
     }
 
     _alignChatPanel() {
-        // Align the chat panel's bottom edge with the business summary box's bottom edge
-        const revBox = document.getElementById('revenue-summary-bar');
+        // Align chat panel with the orb area
         const panel = document.getElementById('chat-panel');
-        if (!revBox || !panel) return;
+        if (!panel) return;
 
         requestAnimationFrame(() => {
-            const revRect = revBox.getBoundingClientRect();
             const viewH = window.innerHeight;
-            // Distance from bottom of viewport to bottom of revenue box
-            const bottomGap = viewH - revRect.bottom;
-            panel.style.bottom = Math.max(bottomGap, 16) + 'px';
+            // Bottom: dock bar is ~60px, leave some gap
+            const dockEl = document.querySelector('.mc-dock');
+            const dockH = dockEl ? dockEl.getBoundingClientRect().height : 60;
+            panel.style.bottom = (dockH + 12) + 'px';
 
             // Also align top with top of orb canvas
             const canvas = document.getElementById('orb-canvas');
@@ -1321,6 +1357,9 @@ class VoiceEngine {
     }
 
     async _chatSend(text) {
+        // Stop any current speech immediately when user sends a new message
+        if (this.speaking) this.stopSpeaking();
+
         this._clearDialogueOptions();
         // Add user message to chat panel
         this._chatAddMessage(text, 'user');
@@ -1339,12 +1378,36 @@ class VoiceEngine {
         logConvo(text, 'user');
 
         try {
-            const r = await fetch('/api/jarvis/chat', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ message: text, history: this.history }),
-            });
-            const d = await r.json();
+            // If camera is active, route through vision endpoint
+            let r, d;
+            if (_cam.active && _cam.stream) {
+                const frameB64 = _camCaptureFrame();
+                if (frameB64) {
+                    this._chatAddMessage('[📷 Frame captured]', 'system');
+                    _camScanStart();
+                    r = await fetch('/api/jarvis/vision', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ query: text, image: frameB64 }),
+                    });
+                    d = await r.json();
+                    _camScanStop();
+                } else {
+                    r = await fetch('/api/jarvis/chat', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ message: text, history: this.history }),
+                    });
+                    d = await r.json();
+                }
+            } else {
+                r = await fetch('/api/jarvis/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message: text, history: this.history }),
+                });
+                d = await r.json();
+            }
             const rawReply = d.reply || 'No response.';
 
             // Remove thinking indicator
@@ -1369,6 +1432,14 @@ class VoiceEngine {
             }
             if (d.panel) this._renderAnalysisPanel(d.panel);
 
+            // Cache this exchange for session report
+            this._cacheExchange(text, spokenText, d.panel || null);
+
+            // Render vision panels if camera is active
+            if (_cam.active && spokenText) {
+                _camRenderVisionPanels(spokenText, text);
+            }
+
             // Add response to chat panel (no speech in hands-on mode)
             this._chatAddMessage(spokenText, 'assistant');
             logConvo(spokenText, 'arbiter');
@@ -1382,6 +1453,7 @@ class VoiceEngine {
             }
         } catch (e) {
             console.error('[ARBITER] Chat error:', e);
+            _camScanStop();
             const think = document.getElementById('chat-thinking');
             if (think) think.remove();
             this._chatAddMessage('Connection error. Backend may be offline.', 'system');
@@ -1449,6 +1521,8 @@ class VoiceEngine {
                 </span>
             `;
             btn.addEventListener('click', () => {
+                // Stop any current speech immediately
+                if (this.speaking) this.stopSpeaking();
                 container.classList.add('picked');
                 btn.classList.add('chosen');
                 setTimeout(() => {
@@ -1494,6 +1568,7 @@ class VoiceEngine {
             btn.className = 'chat-followup-btn';
             btn.textContent = fu.text;
             btn.addEventListener('click', () => {
+                if (this.speaking) this.stopSpeaking();
                 wrap.remove();
                 this._chatSend(fu.text);
             });
@@ -1506,6 +1581,39 @@ class VoiceEngine {
 
     // ── Send message to LLM ─────────────────────────────────────
     async _sendMessage(text) {
+        // Stop any current speech immediately when a new query comes in
+        if (this.speaking) this.stopSpeaking();
+
+        // ── Briefing prompt intercept — catch "yes/no" before hitting LLM ──
+        if (window._briefingPromptActive) {
+            const lower = text.toLowerCase().trim();
+            const yesPatterns = /^(yes|yeah|yep|go ahead|sure|please|do it|run it|affirmative|briefing|daily briefing)\b/;
+            const noPatterns = /^(no|nah|nope|skip|decline|not now|negative|pass)\b/;
+            if (yesPatterns.test(lower)) {
+                window._briefingPromptActive = false;
+                _dismissBriefingPrompt();
+                logConvo(text, 'user');
+                this.orb.setState('idle');
+                this._processingQuery = false;
+                _runMorningBriefing();
+                setTimeout(() => this._requestStart('passive'), 500);
+                return;
+            }
+            if (noPatterns.test(lower)) {
+                window._briefingPromptActive = false;
+                _dismissBriefingPrompt();
+                logConvo(text, 'user');
+                logConvo('Briefing declined', 'system');
+                this.orb.setState('idle');
+                this._processingQuery = false;
+                this._speak('Very well, Sir. Standing by.');
+                setTimeout(() => this._requestStart('passive'), 500);
+                return;
+            }
+            // Anything else — dismiss prompt and process normally
+            window._briefingPromptActive = false;
+            _dismissBriefingPrompt();
+        }
 
         // ── Voice intercepts — handle UI commands before hitting the LLM ──
         const lower = text.toLowerCase().trim();
@@ -1526,6 +1634,81 @@ class VoiceEngine {
             return;
         }
 
+        // ── Session voice commands ──
+        const sessionPatterns = [
+            { rx: /^(new session|start fresh|clear session|reset session|fresh start)\s*(arbiter)?[.!]?$/, action: 'new' },
+            { rx: /^(build|generate|show|create)\s*(a\s*)?(report|session report)\s*(arbiter)?[.!]?$/, action: 'report' },
+            { rx: /^(show|list|my)\s*(sessions?|previous sessions?|past sessions?)\s*(arbiter)?[.!]?$/, action: 'list' },
+            { rx: /^(close|hide|exit)\s*(report|the report)\s*(arbiter)?[.!]?$/, action: 'close_report' },
+        ];
+        const sessionMatch = sessionPatterns.find(p => p.rx.test(lower));
+        if (sessionMatch) {
+            logConvo(text, 'user');
+            this.orb.setState('idle');
+            this._processingQuery = false;
+            switch (sessionMatch.action) {
+                case 'new':
+                    this._saveCurrentSession();
+                    this._sessionCache = [];
+                    this._sessionId = Date.now().toString(36);
+                    this._sessionName = null;
+                    this.history = [];
+                    this._updateSessionBadge();
+                    this._closeAnalysisWings();
+                    this._speak('New session started, Sir. Previous data has been archived.');
+                    logConvo('Session reset', 'system');
+                    break;
+                case 'report':
+                    this._buildReport();
+                    this._speak('Session report compiled. All visualisations and data are assembled.');
+                    break;
+                case 'list':
+                    this._showSessionDrawer();
+                    this._speak('Here are your previous sessions, Sir.');
+                    break;
+                case 'close_report':
+                    this._closeReport();
+                    this._speak('Report closed.');
+                    break;
+            }
+            setTimeout(() => this._requestStart('passive'), 500);
+            return;
+        }
+
+        // ── Vision voice commands — toggle camera ──
+        const visionOnPatterns = [
+            /\b(switch|turn|go)\s*(to|on)\s*(camera|vision|cam)\b/,
+            /\b(open|start|activate|enable)\s*(the\s*)?(camera|vision|cam|webcam)\b/,
+            /\bwhat\s*(do|can)\s*you\s*see\b/,
+            /\bwhat('?s| is)\s*in front of (you|me)\b/,
+            /\blook\s*(at|around)\b/,
+            /\bshow\s*me\s*(your|the)\s*(eyes|vision|camera|view)\b/,
+        ];
+        const visionOffPatterns = [
+            /\b(close|stop|turn off|deactivate|disable|exit)\s*(the\s*)?(camera|vision|cam|webcam)\b/,
+            /\b(camera|vision|cam)\s*(off|close|stop)\b/,
+        ];
+        if (visionOffPatterns.some(p => p.test(lower))) {
+            _camClose();
+            logConvo(text, 'user');
+            this.orb.setState('idle');
+            this._processingQuery = false;
+            this._speak('Vision mode disengaged, Sir.');
+            logConvo('Camera closed', 'system');
+            setTimeout(() => this._requestStart('passive'), 500);
+            return;
+        }
+        if (!_cam.active && visionOnPatterns.some(p => p.test(lower))) {
+            _camOpen();
+            logConvo(text, 'user');
+            this.orb.setState('idle');
+            this._processingQuery = false;
+            this._speak('Remote vision activated, Sir. I can now see what you show me.');
+            logConvo('Camera activated via voice', 'system');
+            setTimeout(() => this._requestStart('passive'), 500);
+            return;
+        }
+
         this._clearDialogueOptions();
         this.orb.setState('thinking');
         this.orb.setAudioLevel(0);
@@ -1534,12 +1717,36 @@ class VoiceEngine {
         logConvo('Processing...', 'system');
 
         try {
-            const r = await fetch('/api/jarvis/chat', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ message: text, history: this.history }),
-            });
-            const d = await r.json();
+            // If camera is active, route through vision endpoint with captured frame
+            let r, d;
+            if (_cam.active && _cam.stream) {
+                const frameB64 = _camCaptureFrame();
+                if (frameB64) {
+                    logConvo('[Camera frame captured for visual analysis]', 'system');
+                    _camScanStart();
+                    r = await fetch('/api/jarvis/vision', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ query: text, image: frameB64 }),
+                    });
+                    d = await r.json();
+                    _camScanStop();
+                } else {
+                    r = await fetch('/api/jarvis/chat', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ message: text, history: this.history }),
+                    });
+                    d = await r.json();
+                }
+            } else {
+                r = await fetch('/api/jarvis/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message: text, history: this.history }),
+                });
+                d = await r.json();
+            }
 
             const rawReply = d.reply || 'No response.';
 
@@ -1569,6 +1776,14 @@ class VoiceEngine {
                 this._renderAnalysisPanel(d.panel);
             }
 
+            // Cache this exchange for session report
+            this._cacheExchange(text, spokenText, d.panel || null);
+
+            // Render vision panels if camera is active
+            if (_cam.active && spokenText) {
+                _camRenderVisionPanels(spokenText, text);
+            }
+
             logConvo(spokenText, 'arbiter');
             this._speak(spokenText);
 
@@ -1579,6 +1794,7 @@ class VoiceEngine {
             }
         } catch (e) {
             console.error('[ARBITER] Chat error:', e);
+            _camScanStop();
             this.orb.setState('idle');
             logConvo('Connection error. Backend may be offline.', 'system');
             setTimeout(() => this._requestStart('passive'), 500);
@@ -1634,6 +1850,12 @@ class VoiceEngine {
             case 'show_panel':
                 if (action.panel) this._renderAnalysisPanel(action.panel);
                 break;
+            case 'camera_on':
+                _camOpen();
+                break;
+            case 'camera_off':
+                _camClose();
+                break;
             default:
                 console.log('[ARBITER] Unknown action:', action.action);
         }
@@ -1649,14 +1871,15 @@ class VoiceEngine {
         const titleR = document.getElementById('analysis-title-right');
         if (!wingL || !wingR || !bodyL || !bodyR) return;
 
-        // Close existing panels first — clean slate for new content
-        this._closeAnalysisWings();
-
-        // Destroy previous charts
-        if (this._analysisCharts) { this._analysisCharts.forEach(c => c.destroy()); }
+        // Clean up previous charts (no sidebar restore — avoids blackout flash)
+        if (this._analysisCharts) { this._analysisCharts.forEach(c => { try { c.destroy(); } catch {} }); }
         this._analysisCharts = [];
-        if (this._analysisChart) { this._analysisChart.destroy(); this._analysisChart = null; }
+        if (this._analysisChart) { try { this._analysisChart.destroy(); } catch {} this._analysisChart = null; }
 
+        // Check if wings are already open (content swap vs fresh open)
+        const alreadyOpen = wingL.classList.contains('active') || wingR.classList.contains('active');
+
+        // Clear body content (in-place swap if already visible — no flicker)
         bodyL.innerHTML = '';
         bodyR.innerHTML = '';
 
@@ -1664,23 +1887,36 @@ class VoiceEngine {
         const sections = panel.sections || [panel];
 
         // Collect left-side and right-side content from all sections
-        const leftData = { chart: null, table: null, image_url: null, comparison_matrix: null, title: panel.title || 'ANALYSIS' };
+        const leftData = { chart: null, table: null, image_url: null, comparison_matrix: null,
+            heatmap: null, quadrant: null, calendar_heatmap: null, title: panel.title || 'ANALYSIS' };
         const rightData = { stats: [], hero: null, status_grid: null, summary: null,
-            insights: [], recommendations: [], scorecard: null, trend_indicators: null, title: 'INSIGHTS' };
+            insights: [], recommendations: [], scorecard: null, trend_indicators: null,
+            pros_cons: null, swot: null, risk_matrix: null, timeline: null, key_metrics: [],
+            gauges: null, funnel: null, title: 'INSIGHTS' };
 
         for (const section of sections) {
             if (section.chart && !leftData.chart) leftData.chart = section.chart;
             if (section.table && !leftData.table) leftData.table = section.table;
             if (section.image_url && !leftData.image_url) leftData.image_url = section.image_url;
             if (section.comparison_matrix && !leftData.comparison_matrix) leftData.comparison_matrix = section.comparison_matrix;
+            if (section.heatmap && !leftData.heatmap) leftData.heatmap = section.heatmap;
+            if (section.quadrant && !leftData.quadrant) leftData.quadrant = section.quadrant;
+            if (section.calendar_heatmap && !leftData.calendar_heatmap) leftData.calendar_heatmap = section.calendar_heatmap;
             if (section.hero && !rightData.hero) rightData.hero = section.hero;
             if (section.status_grid) rightData.status_grid = section.status_grid;
             if (section.stats && section.stats.length) rightData.stats = rightData.stats.concat(section.stats);
+            if (section.key_metrics && section.key_metrics.length) rightData.key_metrics = rightData.key_metrics.concat(section.key_metrics);
             if (section.summary) rightData.summary = section.summary;
             if (section.insights && section.insights.length) rightData.insights = rightData.insights.concat(section.insights);
             if (section.recommendations && section.recommendations.length) rightData.recommendations = rightData.recommendations.concat(section.recommendations);
             if (section.scorecard && !rightData.scorecard) rightData.scorecard = section.scorecard;
             if (section.trend_indicators && !rightData.trend_indicators) rightData.trend_indicators = section.trend_indicators;
+            if (section.pros_cons && !rightData.pros_cons) rightData.pros_cons = section.pros_cons;
+            if (section.swot && !rightData.swot) rightData.swot = section.swot;
+            if (section.risk_matrix && !rightData.risk_matrix) rightData.risk_matrix = section.risk_matrix;
+            if (section.timeline && !rightData.timeline) rightData.timeline = section.timeline;
+            if (section.gauges && !rightData.gauges) rightData.gauges = section.gauges;
+            if (section.funnel && !rightData.funnel) rightData.funnel = section.funnel;
         }
 
         // If there's a section title from the panel, use it
@@ -1693,9 +1929,13 @@ class VoiceEngine {
         titleR.textContent = rightData.title;
 
         // Determine what goes where
-        const hasLeft = leftData.chart || leftData.table || leftData.image_url || leftData.comparison_matrix;
+        const hasLeft = leftData.chart || leftData.table || leftData.image_url || leftData.comparison_matrix
+            || leftData.heatmap || leftData.quadrant || leftData.calendar_heatmap;
         const hasRight = rightData.stats.length || rightData.hero || rightData.status_grid || rightData.summary
-            || rightData.insights.length || rightData.recommendations.length || rightData.scorecard || rightData.trend_indicators;
+            || rightData.insights.length || rightData.recommendations.length || rightData.scorecard
+            || rightData.trend_indicators || rightData.pros_cons || rightData.swot
+            || rightData.risk_matrix || rightData.timeline || rightData.gauges || rightData.funnel
+            || rightData.key_metrics.length;
 
         if (hasLeft) {
             this._renderSection(bodyL, {
@@ -1703,15 +1943,22 @@ class VoiceEngine {
                 table: leftData.table,
                 image_url: leftData.image_url,
                 comparison_matrix: leftData.comparison_matrix,
+                heatmap: leftData.heatmap,
+                quadrant: leftData.quadrant,
+                calendar_heatmap: leftData.calendar_heatmap,
             });
         } else {
             // No chart/table — put stats on left, keep right for analysis
             const halfStats = rightData.stats.splice(0, Math.ceil(rightData.stats.length / 2));
             this._renderSection(bodyL, { stats: halfStats, hero: rightData.hero, status_grid: rightData.status_grid,
-                trend_indicators: rightData.trend_indicators });
+                trend_indicators: rightData.trend_indicators, gauges: rightData.gauges,
+                pros_cons: rightData.pros_cons, swot: rightData.swot });
             rightData.hero = null;
             rightData.status_grid = null;
             rightData.trend_indicators = null;
+            rightData.gauges = null;
+            rightData.pros_cons = null;
+            rightData.swot = null;
         }
 
         if (hasRight || rightData.stats.length || rightData.summary) {
@@ -1719,10 +1966,17 @@ class VoiceEngine {
                 hero: rightData.hero,
                 status_grid: rightData.status_grid,
                 stats: rightData.stats,
+                key_metrics: rightData.key_metrics,
                 trend_indicators: rightData.trend_indicators,
+                gauges: rightData.gauges,
                 scorecard: rightData.scorecard,
+                funnel: rightData.funnel,
                 insights: rightData.insights,
                 recommendations: rightData.recommendations,
+                pros_cons: rightData.pros_cons,
+                swot: rightData.swot,
+                risk_matrix: rightData.risk_matrix,
+                timeline: rightData.timeline,
                 summary: rightData.summary,
             });
         } else {
@@ -1731,9 +1985,22 @@ class VoiceEngine {
             }
         }
 
-        // Show both wings
+        // Only animate sidebars out on fresh open (not on content swap)
+        if (!alreadyOpen) {
+            document.body.classList.add('panel-focus');
+            const floatL = document.getElementById('float-left');
+            const floatR = document.getElementById('float-right');
+            if (floatL) floatL.classList.add('hidden');
+            if (floatR) floatR.classList.add('hidden');
+        }
+
+        // Show both wings (no-op if already active — smooth content swap)
         wingL.classList.add('active');
         wingR.classList.add('active');
+
+        // Scroll wing bodies to top for new content
+        bodyL.scrollTop = 0;
+        bodyR.scrollTop = 0;
 
         // Close handlers
         const closeWings = () => { this._closeAnalysisWings(); };
@@ -1749,6 +2016,320 @@ class VoiceEngine {
         if (wingR) wingR.classList.remove('active');
         if (this._analysisCharts) { this._analysisCharts.forEach(c => c.destroy()); this._analysisCharts = []; }
         if (this._analysisChart) { this._analysisChart.destroy(); this._analysisChart = null; }
+
+        // Restore sidebars
+        document.body.classList.remove('panel-focus');
+        const floatL = document.getElementById('float-left');
+        const floatR = document.getElementById('float-right');
+        if (floatL) floatL.classList.remove('hidden');
+        if (floatR) floatR.classList.remove('hidden');
+    }
+
+    // ── Session Cache & Report ──────────────────────────────────
+    _cacheExchange(query, reply, panel) {
+        this._sessionCache.push({
+            id: Date.now().toString(36),
+            ts: new Date().toISOString(),
+            query,
+            reply,
+            panel: panel ? JSON.parse(JSON.stringify(panel)) : null, // deep clone
+        });
+        this._updateSessionBadge();
+        // Auto-save to localStorage every 3 exchanges
+        if (this._sessionCache.length % 3 === 0) this._saveCurrentSession();
+        console.log(`[SESSION] Cached exchange #${this._sessionCache.length}: "${query.slice(0,40)}…"`);
+    }
+
+    _updateSessionBadge() {
+        const badge = document.getElementById('session-badge');
+        if (badge) {
+            badge.textContent = this._sessionCache.length;
+            badge.style.display = this._sessionCache.length > 0 ? 'inline-flex' : 'none';
+        }
+    }
+
+    _newSession() {
+        if (this._sessionCache.length > 0 &&
+            !confirm(`Clear ${this._sessionCache.length} cached queries and start a new session?`)) return;
+        this._saveCurrentSession();
+        this._sessionCache = [];
+        this._sessionId = Date.now().toString(36);
+        this._sessionName = null;
+        this.history = [];
+        this._updateSessionBadge();
+        this._closeAnalysisWings();
+        // Clear chat messages
+        const msgs = document.getElementById('chat-messages');
+        if (msgs) msgs.innerHTML = '';
+        this._chatAddMessage('New session started. Previous context cleared.', 'system');
+        logConvo('Session reset', 'system');
+    }
+
+    // ── Session Persistence (localStorage) ──────────────────────
+    _saveCurrentSession() {
+        if (this._sessionCache.length === 0) return;
+        try {
+            const sessions = this._loadAllSessions();
+            // Auto-generate session name from first query
+            const name = this._sessionName ||
+                this._sessionCache[0].query.slice(0, 50) +
+                (this._sessionCache[0].query.length > 50 ? '…' : '');
+            const entry = {
+                id: this._sessionId,
+                name,
+                ts: new Date().toISOString(),
+                count: this._sessionCache.length,
+                cache: this._sessionCache,
+                history: this.history.slice(-10),
+            };
+            // Replace existing or append
+            const idx = sessions.findIndex(s => s.id === this._sessionId);
+            if (idx >= 0) sessions[idx] = entry;
+            else sessions.unshift(entry);
+            // Keep max 20 sessions
+            if (sessions.length > 20) sessions.length = 20;
+            localStorage.setItem('arbiter_sessions', JSON.stringify(sessions));
+            console.log(`[SESSION] Saved session "${name}" (${entry.count} queries)`);
+        } catch (e) {
+            console.warn('[SESSION] localStorage save failed:', e);
+        }
+    }
+
+    _loadAllSessions() {
+        try {
+            return JSON.parse(localStorage.getItem('arbiter_sessions') || '[]');
+        } catch { return []; }
+    }
+
+    _restoreSession(sessionId) {
+        const sessions = this._loadAllSessions();
+        const session = sessions.find(s => s.id === sessionId);
+        if (!session) return;
+        // Save current session first
+        this._saveCurrentSession();
+        // Restore
+        this._sessionCache = session.cache || [];
+        this._sessionId = session.id;
+        this._sessionName = session.name;
+        this.history = session.history || [];
+        this._updateSessionBadge();
+        this._closeAnalysisWings();
+        this._closeReport();
+        // Clear and populate chat
+        const msgs = document.getElementById('chat-messages');
+        if (msgs) msgs.innerHTML = '';
+        this._chatAddMessage(`Session restored: "${session.name}" (${session.count} queries)`, 'system');
+        // Replay last few exchanges into chat view
+        for (const entry of this._sessionCache.slice(-5)) {
+            this._chatAddMessage(entry.query, 'user', true);
+            if (entry.reply) this._chatAddMessage(entry.reply, 'assistant', true);
+        }
+        logConvo(`Session restored: ${session.name}`, 'system');
+        this._hideSessionDrawer();
+    }
+
+    _deleteSession(sessionId) {
+        const sessions = this._loadAllSessions().filter(s => s.id !== sessionId);
+        localStorage.setItem('arbiter_sessions', JSON.stringify(sessions));
+        // Refresh drawer if open
+        const drawer = document.getElementById('session-drawer');
+        if (drawer && drawer.classList.contains('active')) this._showSessionDrawer();
+    }
+
+    _showSessionDrawer() {
+        let drawer = document.getElementById('session-drawer');
+        if (!drawer) {
+            drawer = document.createElement('div');
+            drawer.id = 'session-drawer';
+            drawer.className = 'session-drawer';
+            document.body.appendChild(drawer);
+        }
+        // Auto-save current session so it appears in the list
+        this._saveCurrentSession();
+        const sessions = this._loadAllSessions();
+        drawer.innerHTML = `
+            <div class="session-drawer-header">
+                <span class="session-drawer-title">SESSIONS</span>
+                <button class="session-drawer-close" id="session-drawer-close">✕</button>
+            </div>
+            <div class="session-drawer-list" id="session-drawer-list">
+                ${sessions.length === 0 ? '<div class="session-drawer-empty">No saved sessions</div>' :
+                sessions.map(s => `
+                    <div class="session-drawer-item ${s.id === this._sessionId ? 'active' : ''}" data-sid="${s.id}">
+                        <div class="session-drawer-item-name">${this._escHtml(s.name)}</div>
+                        <div class="session-drawer-item-meta">
+                            ${s.count} queries · ${new Date(s.ts).toLocaleDateString()} ${new Date(s.ts).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}
+                        </div>
+                        <button class="session-drawer-item-del" data-del="${s.id}" title="Delete session">✕</button>
+                    </div>
+                `).join('')}
+            </div>`;
+        drawer.classList.add('active');
+        // Event listeners
+        drawer.querySelector('#session-drawer-close').onclick = () => this._hideSessionDrawer();
+        drawer.querySelectorAll('.session-drawer-item').forEach(el => {
+            el.addEventListener('click', (e) => {
+                if (e.target.classList.contains('session-drawer-item-del')) return;
+                this._restoreSession(el.dataset.sid);
+            });
+        });
+        drawer.querySelectorAll('.session-drawer-item-del').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this._deleteSession(btn.dataset.del);
+            });
+        });
+    }
+
+    _hideSessionDrawer() {
+        const drawer = document.getElementById('session-drawer');
+        if (drawer) drawer.classList.remove('active');
+    }
+
+    _buildReport() {
+        if (this._sessionCache.length === 0) {
+            this._chatAddMessage('No data cached this session. Run some queries first.', 'system');
+            return;
+        }
+
+        // Destroy any previous report charts
+        if (this._reportCharts) { this._reportCharts.forEach(c => c.destroy()); }
+        this._reportCharts = [];
+
+        const overlay = document.getElementById('report-overlay');
+        const body = document.getElementById('report-body');
+        const meta = document.getElementById('report-meta');
+        if (!overlay || !body) return;
+
+        body.innerHTML = '';
+        const count = this._sessionCache.length;
+        const first = new Date(this._sessionCache[0].ts);
+        const last = new Date(this._sessionCache[count - 1].ts);
+        meta.textContent = `${count} queries · ${first.toLocaleTimeString()} – ${last.toLocaleTimeString()} · ${first.toLocaleDateString()}`;
+
+        // Render each cached exchange as a report section
+        for (let i = 0; i < count; i++) {
+            const entry = this._sessionCache[i];
+            const section = document.createElement('div');
+            section.className = 'report-section';
+
+            // Section header: query
+            const header = document.createElement('div');
+            header.className = 'report-section-header';
+            header.innerHTML = `<span class="report-section-num">${i + 1}</span>
+                <span class="report-section-query">${this._escHtml(entry.query)}</span>
+                <span class="report-section-time">${new Date(entry.ts).toLocaleTimeString()}</span>`;
+            section.appendChild(header);
+
+            // Reply text
+            if (entry.reply) {
+                const replyEl = document.createElement('div');
+                replyEl.className = 'report-reply';
+                replyEl.textContent = entry.reply;
+                section.appendChild(replyEl);
+            }
+
+            // Visualizations — re-render all panel data
+            if (entry.panel) {
+                const vizContainer = document.createElement('div');
+                vizContainer.className = 'report-viz-container';
+                section.appendChild(vizContainer);
+                // Use the existing _renderSection to render all viz types
+                this._renderReportPanel(vizContainer, entry.panel);
+            }
+
+            body.appendChild(section);
+        }
+
+        overlay.classList.add('active');
+        document.body.classList.add('report-active');
+    }
+
+    _renderReportPanel(container, panel) {
+        const sections = panel.sections || [panel];
+
+        // Collect left-side and right-side data exactly like _renderAnalysisPanel
+        const leftData = { chart: null, table: null, image_url: null, comparison_matrix: null,
+            heatmap: null, quadrant: null, calendar_heatmap: null };
+        const rightData = { hero: null, status_grid: null, stats: [], key_metrics: [],
+            trend_indicators: null, gauges: null, scorecard: null, funnel: null,
+            insights: null, recommendations: null, pros_cons: null, swot: null,
+            risk_matrix: null, timeline: null, summary: null };
+
+        for (const s of sections) {
+            if (s.chart) leftData.chart = s.chart;
+            if (s.table) leftData.table = s.table;
+            if (s.image_url) leftData.image_url = s.image_url;
+            if (s.comparison_matrix) leftData.comparison_matrix = s.comparison_matrix;
+            if (s.heatmap) leftData.heatmap = s.heatmap;
+            if (s.quadrant) leftData.quadrant = s.quadrant;
+            if (s.calendar_heatmap) leftData.calendar_heatmap = s.calendar_heatmap;
+            if (s.hero) rightData.hero = s.hero;
+            if (s.status_grid) rightData.status_grid = s.status_grid;
+            if (s.stats && Array.isArray(s.stats)) rightData.stats.push(...s.stats);
+            if (s.key_metrics && Array.isArray(s.key_metrics)) rightData.key_metrics.push(...s.key_metrics);
+            if (s.trend_indicators) rightData.trend_indicators = s.trend_indicators;
+            if (s.gauges) rightData.gauges = s.gauges;
+            if (s.scorecard) rightData.scorecard = s.scorecard;
+            if (s.funnel) rightData.funnel = s.funnel;
+            if (s.insights) rightData.insights = s.insights;
+            if (s.recommendations) rightData.recommendations = s.recommendations;
+            if (s.pros_cons) rightData.pros_cons = s.pros_cons;
+            if (s.swot) rightData.swot = s.swot;
+            if (s.risk_matrix) rightData.risk_matrix = s.risk_matrix;
+            if (s.timeline) rightData.timeline = s.timeline;
+            if (s.summary) rightData.summary = s.summary;
+        }
+
+        const hasLeft = leftData.chart || leftData.table || leftData.image_url ||
+            leftData.comparison_matrix || leftData.heatmap || leftData.quadrant || leftData.calendar_heatmap;
+
+        // Create a two-column layout inside the report section
+        const row = document.createElement('div');
+        row.className = 'report-viz-row';
+        container.appendChild(row);
+
+        if (hasLeft) {
+            const leftCol = document.createElement('div');
+            leftCol.className = 'report-viz-col report-viz-left';
+            row.appendChild(leftCol);
+            this._renderSection(leftCol, leftData);
+        }
+
+        const hasRight = rightData.hero || rightData.status_grid || rightData.stats.length ||
+            rightData.key_metrics.length || rightData.trend_indicators || rightData.gauges ||
+            rightData.scorecard || rightData.funnel || rightData.insights ||
+            rightData.recommendations || rightData.pros_cons || rightData.swot ||
+            rightData.risk_matrix || rightData.timeline || rightData.summary;
+
+        if (hasRight) {
+            const rightCol = document.createElement('div');
+            rightCol.className = 'report-viz-col report-viz-right';
+            row.appendChild(rightCol);
+            this._renderSection(rightCol, rightData);
+        }
+
+        // If neither side had data, render raw sections
+        if (!hasLeft && !hasRight) {
+            for (const s of sections) {
+                this._renderSection(container, s);
+            }
+        }
+    }
+
+    _closeReport() {
+        const overlay = document.getElementById('report-overlay');
+        if (overlay) overlay.classList.remove('active');
+        document.body.classList.remove('report-active');
+        // Destroy charts rendered inside the report (they share _analysisCharts)
+        if (this._analysisCharts) { this._analysisCharts.forEach(c => { try { c.destroy(); } catch {} }); this._analysisCharts = []; }
+        if (this._analysisChart) { try { this._analysisChart.destroy(); } catch {} this._analysisChart = null; }
+    }
+
+    _escHtml(str) {
+        const d = document.createElement('div');
+        d.textContent = str;
+        return d.innerHTML;
     }
 
     // ── Render a single panel section ────────────────────────────
@@ -1806,76 +2387,222 @@ class VoiceEngine {
             container.appendChild(grid);
         }
 
-        // ── Chart (bar, hbar, line, area, doughnut, pie) ──
+        // ── Chart (bar, hbar, line, area, doughnut, pie, radar, polarArea, scatter, bubble, stacked) ──
         if (section.chart) {
+            const c = section.chart;
             const wrap = document.createElement('div');
             wrap.className = 'analysis-chart';
-            const canvas = document.createElement('canvas');
-            wrap.appendChild(canvas);
             container.appendChild(wrap);
 
-            const c = section.chart;
-            const isHbar = c.type === 'hbar';
-            const isArea = c.type === 'area';
-            const chartType = isHbar ? 'bar' : isArea ? 'line' : (c.type || 'bar');
-
-            let datasets;
-            if (c.datasets) {
-                datasets = c.datasets.map((ds, i) => ({
-                    label: ds.label || '',
-                    data: ds.data || [],
-                    borderColor: colors[i % colors.length],
-                    backgroundColor: (chartType === 'line' || isArea) ? bgColors[i % bgColors.length] : colors.map((_, j) => colors[j % colors.length]),
-                    borderWidth: (chartType === 'line') ? 2 : 0,
-                    pointRadius: (chartType === 'line') ? 3 : 0,
-                    fill: (chartType === 'line'),
-                    tension: 0.4,
-                    yAxisID: ds.yAxisID || undefined,
-                }));
-            } else {
-                // Single dataset from labels/values
-                const barColors = isHbar
-                    ? (c.values || []).map(v => v >= 0 ? 'rgba(0,255,136,0.75)' : 'rgba(255,51,85,0.75)')
-                    : (c.values || []).map((_, i) => colors[i % colors.length]);
-                datasets = [{
-                    label: c.label || '',
-                    data: c.values || [],
-                    backgroundColor: barColors,
-                    borderWidth: 0,
-                }];
-            }
-
-            const opts = {
-                responsive: true, maintainAspectRatio: false,
-                indexAxis: isHbar ? 'y' : 'x',
-                animation: { duration: 600 },
-                plugins: {
-                    legend: {
-                        display: !!(c.datasets && c.datasets.length > 1),
-                        labels: { color: '#7a9aaa', font: { size: 11, family: "'Courier New'" } }
+            // ── Candlestick — custom canvas renderer (no Chart.js plugin needed) ──
+            if (c.type === 'candlestick') {
+                wrap.style.height = '260px';
+                const canvas = document.createElement('canvas');
+                wrap.appendChild(canvas);
+                requestAnimationFrame(() => {
+                    const data = c.data || [];
+                    if (!data.length) return;
+                    const dpr = window.devicePixelRatio || 1;
+                    const rect = wrap.getBoundingClientRect();
+                    const W = rect.width || 380, H = rect.height || 260;
+                    canvas.width = W * dpr; canvas.height = H * dpr;
+                    canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+                    const ctx = canvas.getContext('2d');
+                    ctx.scale(dpr, dpr);
+                    const PAD = { top: 16, right: 16, bottom: 28, left: 54 };
+                    const cW = W - PAD.left - PAD.right, cH = H - PAD.top - PAD.bottom;
+                    const allV = data.flatMap(d => [d.o, d.h, d.l, d.c]);
+                    const mn = Math.min(...allV), mx = Math.max(...allV);
+                    const rng = (mx - mn) || 1;
+                    const yMin = mn - rng * 0.08, yMax = mx + rng * 0.08;
+                    const toY = v => PAD.top + cH - ((v - yMin) / (yMax - yMin)) * cH;
+                    const colW = cW / data.length, bodyW = Math.max(colW * 0.55, 2);
+                    // Y gridlines
+                    ctx.font = `9px 'Courier New'`; ctx.textAlign = 'right';
+                    for (let i = 0; i <= 5; i++) {
+                        const v = yMin + (i / 5) * (yMax - yMin), y = toY(v);
+                        ctx.strokeStyle = 'rgba(60,220,255,0.1)'; ctx.lineWidth = 1;
+                        ctx.beginPath(); ctx.moveTo(PAD.left, y); ctx.lineTo(W - PAD.right, y); ctx.stroke();
+                        ctx.fillStyle = '#a0c4d8'; ctx.fillText(v.toFixed(2), PAD.left - 4, y + 3);
                     }
-                },
-            };
+                    // Candles + x-labels
+                    const step = Math.max(1, Math.floor(data.length / 8));
+                    ctx.textAlign = 'center';
+                    data.forEach((d, i) => {
+                        const x = PAD.left + i * colW + colW / 2;
+                        const col = d.c >= d.o ? 'rgba(0,255,136,0.9)' : 'rgba(255,51,85,0.9)';
+                        ctx.strokeStyle = col; ctx.lineWidth = 1;
+                        ctx.beginPath(); ctx.moveTo(x, toY(d.h)); ctx.lineTo(x, toY(d.l)); ctx.stroke();
+                        const bTop = toY(Math.max(d.o, d.c)), bBot = toY(Math.min(d.o, d.c));
+                        ctx.fillStyle = col;
+                        ctx.fillRect(x - bodyW / 2, bTop, bodyW, Math.max(bBot - bTop, 1));
+                        if (d.date && i % step === 0) {
+                            ctx.fillStyle = '#a0c4d8'; ctx.font = `8px 'Courier New'`;
+                            ctx.fillText(d.date, x, H - PAD.bottom + 13);
+                        }
+                    });
+                    // Series label
+                    if (c.label) {
+                        ctx.fillStyle = 'rgba(160,196,216,0.7)'; ctx.font = `10px 'Courier New'`;
+                        ctx.textAlign = 'left';
+                        ctx.fillText(c.label, PAD.left + 4, PAD.top + 12);
+                    }
+                });
 
-            if (chartType === 'doughnut' || chartType === 'pie') {
-                opts.scales = {};
             } else {
-                opts.scales = {
-                    x: { ticks: { color: '#5a7a8a', font: { size: 10 } }, grid: { color: 'rgba(60,220,255,0.06)' } },
-                    y: { ticks: { color: '#5a7a8a', font: { size: 10 } }, grid: { color: 'rgba(60,220,255,0.06)' } },
-                };
-                // Support dual y-axis (e.g. precipitation on weather chart)
-                if (c.datasets && c.datasets.some(ds => ds.yAxisID === 'y1')) {
-                    opts.scales.y1 = {
-                        position: 'right', grid: { drawOnChartArea: false },
-                        ticks: { color: '#5a7a8a', font: { size: 10 } },
-                    };
-                }
-            }
+                // ── Chart.js renderers (bar / line / doughnut / radar / waterfall / scatter / …) ──
+                const canvas = document.createElement('canvas');
+                wrap.appendChild(canvas);
 
-            const chart = new Chart(canvas, { type: chartType, data: { labels: c.labels || [], datasets }, options: opts });
-            this._analysisCharts.push(chart);
-            this._analysisChart = chart;
+                const isHbar     = c.type === 'hbar';
+                const isArea     = c.type === 'area';
+                const isStacked  = c.type === 'stacked' || c.type === 'stacked_bar';
+                const isWaterfall= c.type === 'waterfall';
+                const isRadar    = c.type === 'radar';
+                const isPolar    = c.type === 'polarArea';
+                const isScatter  = c.type === 'scatter';
+                const isBubble   = c.type === 'bubble';
+                if (isRadar || isPolar) wrap.style.height = '290px';
+                let chartType = c.type || 'bar';
+                if (isHbar || isStacked || isWaterfall) chartType = 'bar';
+                else if (isArea) chartType = 'line';
+
+                const _tickColor = '#a0c4d8';
+                const _gridColor = 'rgba(60,220,255,0.07)';
+                const _tickFont  = { size: 11, family: "'Courier New'" };
+
+                let datasets;
+                if (isWaterfall) {
+                    // Stacked-bar trick: transparent spacer dataset + coloured delta dataset
+                    const wfData = c.data || [];
+                    const spacer = [], bars = [], barColors = [];
+                    let running = 0;
+                    for (const d of wfData) {
+                        const v = Number(d.value) || 0;
+                        if (d.type === 'total') {
+                            spacer.push(0); bars.push(v);
+                            barColors.push('rgba(0,200,255,0.85)'); running = v;
+                        } else if (d.type === 'neg' || v < 0) {
+                            spacer.push(running + v); bars.push(Math.abs(v));
+                            barColors.push('rgba(255,51,85,0.8)'); running += v;
+                        } else {
+                            spacer.push(running); bars.push(v);
+                            barColors.push('rgba(0,255,136,0.8)'); running += v;
+                        }
+                    }
+                    if (!c.labels) c.labels = wfData.map(d => d.label || '');
+                    datasets = [
+                        { label: '_spacer', data: spacer, backgroundColor: 'transparent', borderWidth: 0, stack: 'wf' },
+                        { label: c.label || 'Change', data: bars, backgroundColor: barColors, borderWidth: 0, stack: 'wf' },
+                    ];
+                } else if (c.datasets) {
+                    datasets = c.datasets.map((ds, i) => {
+                        const base = {
+                            label: ds.label || '',
+                            data: ds.data || [],
+                            borderColor: colors[i % colors.length],
+                            borderWidth: (chartType === 'line' || isRadar) ? 2 : (isScatter || isBubble) ? 1 : 0,
+                            tension: 0.4,
+                            yAxisID: ds.yAxisID || undefined,
+                        };
+                        if (isRadar || isPolar) {
+                            base.backgroundColor = bgColors[i % bgColors.length];
+                            base.pointBackgroundColor = colors[i % colors.length];
+                            base.pointRadius = 4; base.fill = true;
+                        } else if (chartType === 'line' || isArea) {
+                            base.backgroundColor = bgColors[i % bgColors.length];
+                            base.pointRadius = 3; base.fill = true;
+                        } else if (isScatter || isBubble) {
+                            base.backgroundColor = colors[i % colors.length];
+                            base.pointRadius = isBubble ? undefined : 6;
+                        } else {
+                            base.backgroundColor = colors[i % colors.length];
+                            base.borderWidth = 0;
+                        }
+                        return base;
+                    });
+                } else {
+                    const barColors = isHbar
+                        ? (c.values || []).map(v => v >= 0 ? 'rgba(0,255,136,0.75)' : 'rgba(255,51,85,0.75)')
+                        : (c.values || []).map((_, i) => colors[i % colors.length]);
+                    datasets = [{
+                        label: c.label || '',
+                        data: c.values || [],
+                        backgroundColor: (isRadar || isPolar) ? bgColors[0] : barColors,
+                        borderColor: (isRadar || isPolar) ? colors[0] : undefined,
+                        borderWidth: (isRadar || isPolar) ? 2 : 0,
+                        pointBackgroundColor: (isRadar || isPolar) ? colors[0] : undefined,
+                        pointRadius: (isRadar || isPolar) ? 4 : undefined,
+                        fill: (isRadar || isPolar),
+                    }];
+                }
+
+                const opts = {
+                    responsive: true, maintainAspectRatio: false,
+                    indexAxis: isHbar ? 'y' : 'x',
+                    animation: { duration: 600 },
+                    plugins: {
+                        legend: {
+                            display: (!isWaterfall && !!(c.datasets && c.datasets.length > 1)) || isScatter,
+                            labels: {
+                                color: _tickColor, font: { size: 11, family: "'Courier New'" }, padding: 12,
+                                filter: isWaterfall ? (item) => item.text !== '_spacer' : undefined,
+                            },
+                        },
+                        tooltip: isWaterfall ? {
+                            callbacks: {
+                                label: (ctx) => {
+                                    if (ctx.datasetIndex === 0) return null; // hide spacer rows
+                                    const orig = (c.data || [])[ctx.dataIndex];
+                                    if (!orig) return null;
+                                    const sign = orig.type === 'total' ? '' :
+                                        (orig.type === 'neg' || Number(orig.value) < 0) ? '−' : '+';
+                                    return ` ${sign}${orig.display || Math.abs(orig.value)}`;
+                                },
+                            },
+                        } : undefined,
+                    },
+                };
+
+                if (chartType === 'doughnut' || chartType === 'pie' || chartType === 'polarArea') {
+                    opts.scales = {};
+                } else if (chartType === 'radar') {
+                    opts.scales = {
+                        r: {
+                            angleLines: { color: 'rgba(60,220,255,0.15)' },
+                            grid: { color: _gridColor },
+                            pointLabels: { color: _tickColor, font: { size: 12, family: "'Courier New'" }, padding: 6 },
+                            ticks: { color: _tickColor, backdropColor: 'rgba(8,14,28,0.7)', font: { size: 10 }, maxTicksLimit: 5 },
+                            suggestedMin: 0,
+                        },
+                    };
+                } else {
+                    opts.scales = {
+                        x: {
+                            ticks: { color: _tickColor, font: _tickFont, maxRotation: 35 },
+                            grid: { color: _gridColor },
+                            stacked: (isStacked || isWaterfall) || undefined,
+                            title: c.xLabel ? { display: true, text: c.xLabel, color: _tickColor, font: _tickFont } : undefined,
+                        },
+                        y: {
+                            ticks: { color: _tickColor, font: _tickFont },
+                            grid: { color: _gridColor },
+                            stacked: (isStacked || isWaterfall) || undefined,
+                            title: c.yLabel ? { display: true, text: c.yLabel, color: _tickColor, font: _tickFont } : undefined,
+                        },
+                    };
+                    if (c.datasets && c.datasets.some(ds => ds.yAxisID === 'y1')) {
+                        opts.scales.y1 = {
+                            position: 'right', grid: { drawOnChartArea: false },
+                            ticks: { color: _tickColor, font: _tickFont },
+                        };
+                    }
+                }
+
+                const chart = new Chart(canvas, { type: chartType, data: { labels: c.labels || [], datasets }, options: opts });
+                this._analysisCharts.push(chart);
+                this._analysisChart = chart;
+            }
         }
 
         // ── Image display (for ComfyUI output) ──
@@ -1889,12 +2616,18 @@ class VoiceEngine {
         // ── Table ──
         if (section.table) {
             const t = section.table;
+            const tableWrap = document.createElement('div');
+            tableWrap.className = 'analysis-table-wrap';
             const table = document.createElement('table');
             table.className = 'analysis-table';
             if (t.headers) {
                 const thead = document.createElement('thead');
                 const tr = document.createElement('tr');
-                for (const h of t.headers) { const th = document.createElement('th'); th.textContent = h; tr.appendChild(th); }
+                for (const h of t.headers) {
+                    const th = document.createElement('th');
+                    th.textContent = h;
+                    tr.appendChild(th);
+                }
                 thead.appendChild(tr);
                 table.appendChild(thead);
             }
@@ -1907,14 +2640,23 @@ class VoiceEngine {
                         const str = String(cell);
                         if (str.startsWith('+') || str.includes('↑')) td.className = 'at-positive';
                         else if (str.startsWith('-') || str.includes('↓')) td.className = 'at-negative';
-                        td.textContent = str;
+                        // Detect URLs and make them clickable
+                        if (/https?:\/\/\S+/.test(str)) {
+                            td.innerHTML = str.replace(
+                                /(https?:\/\/[^\s<]+)/g,
+                                '<a href="$1" target="_blank" rel="noopener" class="at-link">$1</a>'
+                            );
+                        } else {
+                            td.textContent = str;
+                        }
                         tr.appendChild(td);
                     }
                     tbody.appendChild(tr);
                 }
                 table.appendChild(tbody);
             }
-            container.appendChild(table);
+            tableWrap.appendChild(table);
+            container.appendChild(tableWrap);
         }
 
         // ── Insights list (strategic observations) ──
@@ -2148,6 +2890,189 @@ class VoiceEngine {
             container.appendChild(wrap);
         }
 
+        // ── Heatmap (color-coded grid) ──
+        if (section.heatmap) {
+            const hm = section.heatmap;
+            const wrap = document.createElement('div');
+            wrap.className = 'analysis-heatmap';
+            wrap.innerHTML = `<div class="analysis-heatmap-title">${hm.title || 'HEATMAP'}</div>`;
+            const cols = hm.columns || [];
+            const rows = hm.rows || [];
+            const grid = document.createElement('div');
+            grid.className = 'heatmap-grid';
+            grid.style.gridTemplateColumns = `120px repeat(${cols.length}, 1fr)`;
+            // Header row
+            grid.innerHTML = '<div class="heatmap-header"></div>' +
+                cols.map(c => `<div class="heatmap-header">${c}</div>`).join('');
+            // Data rows
+            for (const row of rows) {
+                grid.innerHTML += `<div class="heatmap-row-label">${row.label || ''}</div>`;
+                for (const val of (row.values || [])) {
+                    // Normalize intensity 0-5 from value (assume 0-100 scale or use raw)
+                    const num = typeof val === 'object' ? (val.score || 0) : (parseFloat(val) || 0);
+                    const displayVal = typeof val === 'object' ? (val.display || num) : val;
+                    const intensity = Math.min(5, Math.max(0, Math.round(num / 20)));
+                    grid.innerHTML += `<div class="heatmap-cell" data-intensity="${intensity}">${displayVal}</div>`;
+                }
+            }
+            wrap.appendChild(grid);
+            container.appendChild(wrap);
+        }
+
+        // ── Gauge / Meter ──
+        if (section.gauges && section.gauges.length) {
+            const wrap = document.createElement('div');
+            wrap.className = 'analysis-gauges';
+            for (const g of section.gauges) {
+                const pct = Math.min(100, Math.max(0, g.value || 0));
+                const cls = pct >= 70 ? 'g-good' : pct >= 40 ? 'g-warn' : 'g-bad';
+                const item = document.createElement('div');
+                item.className = 'gauge-item';
+                item.innerHTML = `
+                    <div class="gauge-ring">
+                        <div class="gauge-fill ${cls}" style="--pct:${pct}%"></div>
+                    </div>
+                    <div class="gauge-val">${g.display || pct + '%'}</div>
+                    <div class="gauge-label">${g.label || ''}</div>
+                    ${g.context ? `<div class="gauge-sub">${g.context}</div>` : ''}
+                `;
+                wrap.appendChild(item);
+            }
+            container.appendChild(wrap);
+        }
+
+        // ── Funnel ──
+        if (section.funnel && section.funnel.length) {
+            const wrap = document.createElement('div');
+            wrap.className = 'analysis-funnel';
+            wrap.innerHTML = '<div class="analysis-funnel-title">FUNNEL</div>';
+            const maxVal = Math.max(...section.funnel.map(f => f.value || 0), 1);
+            const funnelColors = ['rgba(0,240,255,0.8)', 'rgba(0,200,255,0.7)', 'rgba(0,255,136,0.65)',
+                'rgba(255,170,0,0.65)', 'rgba(255,51,85,0.6)', 'rgba(170,0,255,0.6)'];
+            section.funnel.forEach((stage, i) => {
+                const widthPct = Math.max(15, ((stage.value || 0) / maxVal) * 100);
+                const row = document.createElement('div');
+                row.className = 'funnel-stage';
+                row.innerHTML = `
+                    <div class="funnel-label">${stage.label || ''}</div>
+                    <div class="funnel-bar" style="width:${widthPct}%;background:${funnelColors[i % funnelColors.length]}">${stage.display || stage.value || ''}</div>
+                    ${stage.pct ? `<div class="funnel-pct">${stage.pct}</div>` : ''}
+                `;
+                wrap.appendChild(row);
+            });
+            container.appendChild(wrap);
+        }
+
+        // ── Quadrant / Positioning Map ──
+        if (section.quadrant) {
+            const q = section.quadrant;
+            const wrap = document.createElement('div');
+            wrap.className = 'analysis-quadrant';
+            wrap.innerHTML = `<div class="analysis-quadrant-title">${q.title || 'POSITIONING MAP'}</div>`;
+            const canvas = document.createElement('div');
+            canvas.className = 'quadrant-canvas';
+            // Crosshairs
+            canvas.innerHTML = `
+                <div class="quadrant-crosshair-h"></div>
+                <div class="quadrant-crosshair-v"></div>
+                <div class="quadrant-axis-x">${q.x_axis || ''}</div>
+                <div class="quadrant-axis-y">${q.y_axis || ''}</div>
+                ${q.quadrant_labels ? `
+                    <div class="quadrant-label ql-tl">${q.quadrant_labels[0] || ''}</div>
+                    <div class="quadrant-label ql-tr">${q.quadrant_labels[1] || ''}</div>
+                    <div class="quadrant-label ql-bl">${q.quadrant_labels[2] || ''}</div>
+                    <div class="quadrant-label ql-br">${q.quadrant_labels[3] || ''}</div>
+                ` : ''}
+            `;
+            // Plot points
+            const dotColors = ['#00f0ff', '#00ff88', '#ffaa00', '#ff00aa', '#ff2255', '#aa55ff'];
+            for (let i = 0; i < (q.points || []).length; i++) {
+                const pt = q.points[i];
+                const x = Math.min(95, Math.max(5, pt.x || 50));
+                const y = Math.min(95, Math.max(5, 100 - (pt.y || 50))); // invert Y
+                const dot = document.createElement('div');
+                dot.className = 'quadrant-dot';
+                dot.style.cssText = `left:${x}%;top:${y}%;background:${dotColors[i % dotColors.length]};border-color:${dotColors[i % dotColors.length]}`;
+                if (pt.size) dot.style.width = dot.style.height = Math.max(8, Math.min(24, pt.size)) + 'px';
+                const lbl = document.createElement('div');
+                lbl.className = 'quadrant-dot-label';
+                lbl.textContent = pt.label || '';
+                dot.appendChild(lbl);
+                canvas.appendChild(dot);
+            }
+            wrap.appendChild(canvas);
+            container.appendChild(wrap);
+        }
+
+        // ── Calendar Heatmap ──────────────────────────────────────
+        if (section.calendar_heatmap) {
+            const cal = section.calendar_heatmap;
+            const data = cal.data || [];
+            const calWrap = document.createElement('div');
+            calWrap.className = 'cal-heatmap';
+            if (cal.title) {
+                const t = document.createElement('div');
+                t.className = 'cal-heatmap-title';
+                t.textContent = cal.title;
+                calWrap.appendChild(t);
+            }
+            if (data.length) {
+                const vals = data.map(d => Number(d.value) || 0);
+                const minV = Math.min(...vals), maxV = Math.max(...vals);
+                const rng = (maxV - minV) || 1;
+                const dateMap = {};
+                for (const d of data) dateMap[d.date] = d;
+                const sorted = [...data].sort((a, b) => a.date.localeCompare(b.date));
+                const start = new Date(sorted[0].date);
+                const end   = new Date(sorted[sorted.length - 1].date);
+                // Rewind to nearest Monday
+                start.setDate(start.getDate() - ((start.getDay() + 6) % 7));
+                const grid = document.createElement('div');
+                grid.className = 'cal-heatmap-grid';
+                // Day-of-week labels column
+                const lblCol = document.createElement('div');
+                lblCol.className = 'cal-day-labels';
+                for (const d of ['M','T','W','T','F','S','S']) {
+                    const l = document.createElement('div');
+                    l.className = 'cal-day-label'; l.textContent = d;
+                    lblCol.appendChild(l);
+                }
+                grid.appendChild(lblCol);
+                // Week columns
+                const cur = new Date(start);
+                while (cur <= end) {
+                    const col = document.createElement('div');
+                    col.className = 'cal-week-col';
+                    for (let dow = 0; dow < 7; dow++) {
+                        const cell = document.createElement('div');
+                        cell.className = 'cal-cell';
+                        const ds = cur.toISOString().split('T')[0];
+                        const entry = dateMap[ds];
+                        if (entry) {
+                            const intensity = (Number(entry.value) - minV) / rng;
+                            cell.style.background = `rgba(0,200,255,${(0.08 + intensity * 0.82).toFixed(2)})`;
+                            cell.title = `${ds}: ${entry.label || entry.value}`;
+                            cell.classList.add('cal-cell-active');
+                        } else {
+                            cell.style.background = 'rgba(0,200,255,0.04)';
+                        }
+                        col.appendChild(cell);
+                        cur.setDate(cur.getDate() + 1);
+                    }
+                    grid.appendChild(col);
+                }
+                calWrap.appendChild(grid);
+                // Legend
+                const leg = document.createElement('div');
+                leg.className = 'cal-legend';
+                leg.innerHTML = `<span class="cal-legend-label">Less</span>
+                    <div class="cal-legend-scale"></div>
+                    <span class="cal-legend-label">More</span>`;
+                calWrap.appendChild(leg);
+            }
+            container.appendChild(calWrap);
+        }
+
         // ── Summary text ──
         if (section.summary) {
             const div = document.createElement('div');
@@ -2229,6 +3154,13 @@ class VoiceEngine {
     // ── Speak response using edge-tts (neural voice) ──────────────
     // onDone: optional callback after speech finishes (overrides default passive restart)
     async _speak(text, onDone) {
+        // Cancel any current speech first — prevents overlapping audio
+        if (this.speaking) {
+            this.stopSpeaking();
+            // Brief pause so previous audio fully stops
+            await new Promise(r => setTimeout(r, 80));
+        }
+
         text = this._cleanForTTS(text);             // strip formatting before TTS
         this.orb.setState('speaking');
         this.speaking = true;
@@ -2238,11 +3170,13 @@ class VoiceEngine {
         const stopBtn = document.getElementById('btn-stop');
         if (stopBtn) stopBtn.style.display = '';
 
-        // ── Kill mic recognition while speaking so it doesn't hear the output ──
-        this._mode = 'off';
-        this._pendingStart = null;
-        try { this.recognition.stop(); } catch (_) {}
-        this._running = false;
+        // ── Keep passive wake-word listening alive during speech so user can interrupt ──
+        // The mic stays open in 'passive' mode — only the wake word triggers action.
+        // This allows "Arbiter" to interrupt speech and start a new query.
+        this._stopLevelPump();  // stop mic level pump (we're using playback level now)
+        if (!this._running || this._mode !== 'passive') {
+            this._requestStart('passive');
+        }
 
         let speakPump = null;
         let cleanedUp = false;
@@ -2776,7 +3710,46 @@ async function refreshCICD() {
     if (dockFail) dockFail.textContent = failCount;
 }
 
-
+// ── Claude Token Usage ──────────────────────────────────────────
+async function refreshClaudeUsage() {
+    const d = await api('/api/claude-usage');
+    if (!d) return;
+    const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+    // Expanded panel
+    set('cl-model', d.model ? d.model.toUpperCase() : '—');
+    set('cl-cost', d.daily_cost_usd != null ? `$${Number(d.daily_cost_usd).toFixed(4)}` : '—');
+    set('cl-budget', d.daily_budget_usd != null ? `$${Number(d.daily_budget_usd).toFixed(2)}` : '—');
+    set('cl-input-tok', d.daily_input_tokens != null ? Number(d.daily_input_tokens).toLocaleString() : '—');
+    set('cl-output-tok', d.daily_output_tokens != null ? Number(d.daily_output_tokens).toLocaleString() : '—');
+    set('cl-reqs', d.session_requests != null ? `${d.session_requests} / ${d.session_limit || '—'}` : '—');
+    set('cl-rpm', d.rpm_limit || '—');
+    const cbState = d.circuit_breaker === 'open' ? 'OPEN ⚠' : 'CLOSED ✓';
+    set('cl-circuit', cbState);
+    // Budget bar
+    const pct = d.daily_budget_usd > 0 ? Math.min(100, (d.daily_cost_usd / d.daily_budget_usd) * 100) : 0;
+    const fill = document.getElementById('cl-budget-fill');
+    if (fill) {
+        fill.style.width = pct + '%';
+        fill.style.background = pct > 80 ? 'var(--red)' : pct > 50 ? 'var(--amber)' : 'var(--cyan)';
+    }
+    set('cl-budget-pct', pct.toFixed(1) + '%');
+    const blocked = d.blocked;
+    const blockedEl = document.getElementById('cl-blocked-status');
+    if (blockedEl) {
+        blockedEl.textContent = blocked ? 'BLOCKED: ' + blocked : 'OPERATIONAL';
+        blockedEl.style.color = blocked ? 'var(--red)' : 'var(--green)';
+    }
+    // Dock stats
+    const dockCost = document.getElementById('dock-claude-cost');
+    const dockReqs = document.getElementById('dock-claude-reqs');
+    if (dockCost) {
+        dockCost.textContent = d.daily_cost_usd != null ? `$${Number(d.daily_cost_usd).toFixed(3)}` : '—';
+        dockCost.className = 'dp-val' + (pct > 80 ? ' alert' : pct > 50 ? ' caution' : ' nominal');
+    }
+    if (dockReqs) {
+        dockReqs.textContent = d.session_requests != null ? d.session_requests : '—';
+    }
+}
 
 // ── Email Intelligence ───────────────────────────────────────────
 let emailBarChart = null;
@@ -3733,18 +4706,19 @@ async function refreshWeather() {
     if (wDesc) wDesc.textContent = c.is_day ? 'DAY' : 'NIGHT';
 }
 
-// ── Expand Panels (left + right flanking orb) ───────────────────
-// Each dock tile maps to a LEFT panel (primary data) and RIGHT panel (secondary/chart)
+// ── Vertical Dock Overlay ────────────────────────────────────────
+// Each dock tile maps to a title and a panel ID
 const DOCK_EXPAND = {
-    email:     { left: 'EMAIL INTELLIGENCE',    right: 'EMAIL ANALYTICS',     leftPanel: 'dock-panel-email',     rightPanel: null },
-    revenue:   { left: 'REVENUE OVERVIEW',      right: 'REVENUE ANALYTICS',   leftPanel: 'dock-panel-revenue',   rightPanel: null },
-    content:   { left: 'CONTENT PIPELINE',      right: 'CONTENT QUEUE',       leftPanel: 'dock-panel-content',   rightPanel: null },
-    engage:    { left: 'ENGAGEMENT HUB',        right: 'ENGAGEMENT DATA',     leftPanel: 'dock-panel-engage',    rightPanel: null },
-    weather:   { left: 'WEATHER — UK',          right: null,                  leftPanel: 'dock-panel-weather',   rightPanel: null },
-    deadlines: { left: 'DEADLINES & ROADMAP',   right: null,                  leftPanel: 'dock-panel-deadlines', rightPanel: null },
-    bulletins: { left: 'BULLETINS',             right: 'LIVE FEED',           leftPanel: 'dock-panel-bulletins', rightPanel: 'dock-panel-activity' },
-    activity:  { left: 'LIVE FEED',             right: 'INTELLIGENCE',        leftPanel: 'dock-panel-activity',  rightPanel: 'dock-panel-intelligence' },
-    cicd:      { left: 'CI/CD — GROW WITH FREYA', right: null,                leftPanel: 'dock-panel-cicd',    rightPanel: null },
+    email:     { title: 'EMAIL INTELLIGENCE',       panel: 'dock-panel-email' },
+    revenue:   { title: 'REVENUE OVERVIEW',          panel: 'dock-panel-revenue' },
+    content:   { title: 'CONTENT PIPELINE',          panel: 'dock-panel-content' },
+    engage:    { title: 'ENGAGEMENT HUB',            panel: 'dock-panel-engage' },
+    weather:   { title: 'WEATHER — UK',              panel: 'dock-panel-weather' },
+    deadlines: { title: 'DEADLINES & ROADMAP',       panel: 'dock-panel-deadlines' },
+    bulletins: { title: 'BULLETINS',                 panel: 'dock-panel-bulletins' },
+    todo:      { title: 'TODO LIST',                 panel: 'dock-panel-todo' },
+    cicd:      { title: 'CI/CD — GROW WITH FREYA',   panel: 'dock-panel-cicd' },
+    claude:    { title: 'CLAUDE API USAGE',           panel: 'dock-panel-claude' },
 };
 
 let activeDock = null;
@@ -3758,58 +4732,31 @@ function openExpandPanels(panelKey) {
     // Toggle off if same
     if (activeDock === panelKey) { closeExpandPanels(); return; }
 
-    // If another panel is open, close it first then open the new one after transition
+    // If another panel is open, swap content in-place
     if (activeDock) {
-        _panelTransitioning = true;
-        closeExpandPanels();
-        setTimeout(() => {
-            _panelTransitioning = false;
-            openExpandPanels(panelKey);
-        }, 350); // match CSS transition duration
-        return;
+        _returnPanelContent(); // move old content back
     }
 
-    const leftEl = document.getElementById('expand-left');
-    const rightEl = document.getElementById('expand-right');
-    const leftBody = document.getElementById('expand-left-body');
-    const rightBody = document.getElementById('expand-right-body');
-    const leftTitle = document.getElementById('expand-left-title');
-    const rightTitle = document.getElementById('expand-right-title');
-    const floatRight = document.getElementById('float-right');
-    if (!leftEl || !rightEl || !leftBody || !rightBody) return;
+    const overlay = document.getElementById('dock-overlay');
+    const body = document.getElementById('dock-overlay-body');
+    const title = document.getElementById('dock-overlay-title');
+    if (!overlay || !body) return;
 
-    // Move left panel content
-    const leftSrc = cfg.leftPanel ? document.getElementById(cfg.leftPanel) : null;
-    if (leftSrc) {
-        leftBody.innerHTML = '';
-        leftBody.appendChild(leftSrc);
-        leftSrc.style.display = 'block';
-        leftTitle.textContent = cfg.left || '';
-        leftEl.classList.add('active');
-    } else {
-        leftEl.classList.remove('active');
-        leftBody.innerHTML = '';
-        leftTitle.textContent = '';
+    // Position overlay above the dock bar
+    const dock = document.querySelector('.mc-dock');
+    if (dock) {
+        overlay.style.bottom = dock.offsetHeight + 'px';
     }
 
-    // Move right panel content
-    const rightSrc = cfg.rightPanel ? document.getElementById(cfg.rightPanel) : null;
-    if (rightSrc) {
-        rightBody.innerHTML = '';
-        rightBody.appendChild(rightSrc);
-        rightSrc.style.display = 'block';
-        rightTitle.textContent = cfg.right || '';
-        rightEl.classList.add('active');
-    } else {
-        rightEl.classList.remove('active');
-        rightBody.innerHTML = '';
-        rightTitle.textContent = '';
+    // Move panel content into overlay
+    const src = cfg.panel ? document.getElementById(cfg.panel) : null;
+    if (src) {
+        body.innerHTML = '';
+        body.appendChild(src);
+        src.style.display = 'block';
     }
-
-    // Hide floating panels to make room (fade out, not display:none)
-    if (floatRight) floatRight.classList.add('hidden');
-    const floatLeft = document.getElementById('float-left');
-    if (floatLeft) floatLeft.classList.add('hidden');
+    title.textContent = cfg.title || '';
+    overlay.classList.add('active');
 
     activeDock = panelKey;
 
@@ -3817,50 +4764,284 @@ function openExpandPanels(panelKey) {
     document.querySelectorAll('.dock-panel[data-dock]').forEach(t => t.classList.remove('active'));
     const tile = document.querySelector(`.dock-panel[data-dock="${panelKey}"]`);
     if (tile) tile.classList.add('active');
+
+    // Refresh todo if opening todo panel
+    if (panelKey === 'todo') {
+        _renderTodoList();
+        // Re-bind listeners after DOM move (belt-and-suspenders)
+        const todoAddBtn = document.getElementById('todo-add-btn');
+        const todoInput = document.getElementById('todo-input');
+        if (todoAddBtn) {
+            todoAddBtn.onclick = _addTodo;
+        }
+        if (todoInput) {
+            todoInput.onkeydown = e => { if (e.key === 'Enter') _addTodo(); };
+        }
+    }
+}
+
+function _returnPanelContent() {
+    const body = document.getElementById('dock-overlay-body');
+    const panels = document.getElementById('dock-panels');
+    if (!body) return;
+    const child = body.querySelector('.dock-panel-inner');
+    if (child && panels) {
+        child.style.display = 'none';
+        panels.appendChild(child);
+    }
+    body.innerHTML = '';
 }
 
 function closeExpandPanels() {
-    const leftEl = document.getElementById('expand-left');
-    const rightEl = document.getElementById('expand-right');
-    const leftBody = document.getElementById('expand-left-body');
-    const rightBody = document.getElementById('expand-right-body');
-    const panels = document.getElementById('dock-panels');
+    _returnPanelContent();
 
-    // Move content back to hidden container
-    [leftBody, rightBody].forEach(body => {
-        if (!body) return;
-        const child = body.querySelector('.dock-panel-inner');
-        if (child && panels) {
-            child.style.display = 'none';
-            panels.appendChild(child);
-        }
-        body.innerHTML = ''; // clear to prevent stale content flashing
-    });
-
-    // Remove active state from both panels
-    if (leftEl) leftEl.classList.remove('active');
-    if (rightEl) rightEl.classList.remove('active');
-
-    // Clear titles
-    const leftTitle = document.getElementById('expand-left-title');
-    const rightTitle = document.getElementById('expand-right-title');
-    if (leftTitle) leftTitle.textContent = '';
-    if (rightTitle) rightTitle.textContent = '';
-
-    // Restore floating side panels (fade in)
-    const floatRight = document.getElementById('float-right');
-    const floatLeft = document.getElementById('float-left');
-    if (floatRight) floatRight.classList.remove('hidden');
-    if (floatLeft) floatLeft.classList.remove('hidden');
-
-    // Force globe to recalculate size after being re-shown
-    if (gcpGlobe) {
-        gcpGlobe.W = 0;
-        gcpGlobe.H = 0;
-    }
+    const overlay = document.getElementById('dock-overlay');
+    const title = document.getElementById('dock-overlay-title');
+    if (overlay) overlay.classList.remove('active');
+    if (title) title.textContent = '';
 
     activeDock = null;
     document.querySelectorAll('.dock-panel[data-dock]').forEach(t => t.classList.remove('active'));
+}
+
+// ── Todo List (localStorage-backed) ─────────────────────────────
+const TODO_KEY = 'arbiter_todos';
+const TODO_HISTORY_KEY = 'arbiter_todos_history';
+
+function _loadTodos() {
+    try { return JSON.parse(localStorage.getItem(TODO_KEY) || '[]'); }
+    catch { return []; }
+}
+
+function _saveTodos(todos) {
+    localStorage.setItem(TODO_KEY, JSON.stringify(todos));
+    _updateTodoDock(todos);
+}
+
+function _loadTodoHistory() {
+    try { return JSON.parse(localStorage.getItem(TODO_HISTORY_KEY) || '[]'); }
+    catch { return []; }
+}
+
+function _saveTodoHistory(history) {
+    localStorage.setItem(TODO_HISTORY_KEY, JSON.stringify(history));
+}
+
+function _clearDoneTodos() {
+    const todos = _loadTodos();
+    const done = todos.filter(t => t.done);
+    if (!done.length) return;
+    // Archive done tasks with completion timestamp
+    const history = _loadTodoHistory();
+    for (const t of done) {
+        history.unshift({ ...t, archivedAt: new Date().toISOString() });
+    }
+    _saveTodoHistory(history);
+    // Keep only active tasks
+    _saveTodos(todos.filter(t => !t.done));
+    _renderTodoList();
+}
+
+function _updateTodoDock(todos) {
+    if (!todos) todos = _loadTodos();
+    const total = todos.length;
+    const done = todos.filter(t => t.done).length;
+    const countEl = document.getElementById('dock-todo-count');
+    const doneEl = document.getElementById('dock-todo-done');
+    if (countEl) countEl.textContent = total - done;
+    if (doneEl) doneEl.textContent = done;
+}
+
+function _addTodo() {
+    const input = document.getElementById('todo-input');
+    const dateInput = document.getElementById('todo-date');
+    const timeInput = document.getElementById('todo-time');
+    if (!input || !input.value.trim()) return;
+
+    const todos = _loadTodos();
+    todos.push({
+        id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+        text: input.value.trim(),
+        date: dateInput ? dateInput.value : '',
+        time: timeInput ? timeInput.value : '',
+        done: false,
+        created: new Date().toISOString()
+    });
+    _saveTodos(todos);
+    input.value = '';
+    if (dateInput) dateInput.value = '';
+    if (timeInput) timeInput.value = '';
+    _renderTodoList();
+}
+
+function _toggleTodo(id) {
+    const todos = _loadTodos();
+    const t = todos.find(x => x.id === id);
+    if (t) t.done = !t.done;
+    _saveTodos(todos);
+    _renderTodoList();
+}
+
+function _deleteTodo(id) {
+    let todos = _loadTodos();
+    const removed = todos.find(x => x.id === id);
+    // Archive if it was completed
+    if (removed && removed.done) {
+        const history = _loadTodoHistory();
+        history.unshift({ ...removed, archivedAt: new Date().toISOString() });
+        _saveTodoHistory(history);
+    }
+    todos = todos.filter(x => x.id !== id);
+    _saveTodos(todos);
+    _renderTodoList();
+}
+
+function _renderTodoList() {
+    const container = document.getElementById('todo-schedule');
+    if (!container) return;
+    const todos = _loadTodos();
+    const history = _loadTodoHistory();
+    _updateTodoDock(todos);
+
+    const doneCount = todos.filter(t => t.done).length;
+
+    if (!todos.length && !history.length) {
+        container.innerHTML = '<div class="feed-empty">NO TASKS — ADD ONE ABOVE</div>';
+        return;
+    }
+
+    // Group by date
+    const now = new Date();
+    const todayStr = now.toISOString().slice(0, 10);
+    const tomorrowStr = new Date(now.getTime() + 86400000).toISOString().slice(0, 10);
+    const groups = {};
+    const noDate = [];
+
+    for (const t of todos) {
+        if (t.date) {
+            if (!groups[t.date]) groups[t.date] = [];
+            groups[t.date].push(t);
+        } else {
+            noDate.push(t);
+        }
+    }
+
+    // Sort dates
+    const sortedDates = Object.keys(groups).sort();
+
+    let html = '';
+
+    // Clear done button (only if there are completed tasks)
+    if (doneCount > 0) {
+        html += `<div class="todo-actions-bar">
+            <button class="todo-clear-done-btn" id="todo-clear-done">⏏ CLEAR ${doneCount} DONE</button>
+        </div>`;
+    }
+
+    // Render dated groups
+    for (const date of sortedDates) {
+        const items = groups[date].sort((a, b) => (a.time || '').localeCompare(b.time || ''));
+        let label = date;
+        let groupClass = 'upcoming';
+        if (date === todayStr) { label = 'TODAY — ' + _formatDateLabel(date); groupClass = 'today'; }
+        else if (date === tomorrowStr) { label = 'TOMORROW — ' + _formatDateLabel(date); groupClass = 'upcoming'; }
+        else if (date < todayStr) { label = 'OVERDUE — ' + _formatDateLabel(date); groupClass = 'overdue'; }
+        else { label = _formatDateLabel(date); }
+
+        html += `<div class="todo-day-group"><div class="todo-day-label">${label}</div>`;
+        for (const t of items) {
+            html += _renderTodoItem(t, groupClass);
+        }
+        html += '</div>';
+    }
+
+    // Undated tasks
+    if (noDate.length) {
+        html += '<div class="todo-day-group"><div class="todo-day-label">UNSCHEDULED</div>';
+        for (const t of noDate) {
+            html += _renderTodoItem(t, 'upcoming');
+        }
+        html += '</div>';
+    }
+
+    // ── History section (collapsible) ──
+    if (history.length) {
+        // Group history by archived date (day)
+        const histByDay = {};
+        for (const h of history) {
+            const day = (h.archivedAt || h.created || '').slice(0, 10);
+            const key = day || 'UNKNOWN';
+            if (!histByDay[key]) histByDay[key] = [];
+            histByDay[key].push(h);
+        }
+        const histDays = Object.keys(histByDay).sort().reverse(); // newest first
+
+        html += `<div class="todo-history-section">
+            <button class="todo-history-toggle" id="todo-history-toggle">
+                <span class="todo-history-chevron" id="todo-history-chevron">▶</span>
+                HISTORY <span class="todo-history-count">${history.length}</span>
+            </button>
+            <div class="todo-history-body" id="todo-history-body" style="display:none;">`;
+        for (const day of histDays) {
+            const label = day === todayStr ? 'TODAY' : _formatDateLabel(day);
+            html += `<div class="todo-day-group"><div class="todo-day-label todo-day-label-hist">${label}</div>`;
+            for (const h of histByDay[day]) {
+                const timeStr = h.time ? h.time.slice(0, 5) : '';
+                const origDate = h.date ? _formatDateLabel(h.date) : '';
+                html += `<div class="todo-item done history">
+                    <span class="todo-hist-check">✓</span>
+                    <span class="todo-item-time">${timeStr}</span>
+                    <span class="todo-item-text">${h.text}</span>
+                    ${origDate ? `<span class="todo-hist-orig">${origDate}</span>` : ''}
+                </div>`;
+            }
+            html += '</div>';
+        }
+        html += '</div></div>';
+    }
+
+    container.innerHTML = html;
+
+    // Attach event listeners — active tasks
+    container.querySelectorAll('.todo-check').forEach(btn => {
+        btn.addEventListener('click', () => _toggleTodo(btn.dataset.id));
+    });
+    container.querySelectorAll('.todo-item-delete').forEach(btn => {
+        btn.addEventListener('click', () => _deleteTodo(btn.dataset.id));
+    });
+    // Clear done button
+    const clearBtn = document.getElementById('todo-clear-done');
+    if (clearBtn) clearBtn.addEventListener('click', _clearDoneTodos);
+    // History toggle
+    const histToggle = document.getElementById('todo-history-toggle');
+    if (histToggle) {
+        histToggle.addEventListener('click', () => {
+            const body = document.getElementById('todo-history-body');
+            const chevron = document.getElementById('todo-history-chevron');
+            if (!body) return;
+            const open = body.style.display !== 'none';
+            body.style.display = open ? 'none' : 'block';
+            if (chevron) chevron.textContent = open ? '▶' : '▼';
+        });
+    }
+}
+
+function _renderTodoItem(t, groupClass) {
+    const cls = (t.done ? 'done' : groupClass);
+    const timeStr = t.time ? t.time.slice(0, 5) : '';
+    return `<div class="todo-item ${cls}">
+        <button class="todo-check ${t.done ? 'checked' : ''}" data-id="${t.id}">${t.done ? '✓' : ''}</button>
+        <span class="todo-item-time">${timeStr}</span>
+        <span class="todo-item-text">${t.text}</span>
+        <button class="todo-item-delete" data-id="${t.id}">✕</button>
+    </div>`;
+}
+
+function _formatDateLabel(dateStr) {
+    const d = new Date(dateStr + 'T00:00:00');
+    const days = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+    const months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+    return `${days[d.getDay()]} ${d.getDate()} ${months[d.getMonth()]}`;
 }
 
 // ── Roadmap / Business Planner ──────────────────────────────────
@@ -3890,16 +5071,13 @@ async function refreshDeadlines() {
     const now = new Date();
     let nextDeadline = null;
     const catIcons = { launch: '🚀', milestone: '📌', campaign: '📣', review: '📋' };
-    const statusCls = { planned: 'upcoming', in_progress: 'soon', completed: 'completed',
-                        at_risk: 'overdue', blocked: 'overdue' };
+    const STATUS_LABEL = { planned: 'PLANNED', in_progress: 'ACTIVE', at_risk: 'AT RISK', blocked: 'BLOCKED', completed: 'DONE' };
+    const STATUS_CLS   = { planned: 'planned', in_progress: 'active', at_risk: 'at-risk', blocked: 'at-risk', completed: 'done' };
 
     // Sort by date
     const sorted = [..._roadmapData].sort((a, b) => new Date(a.date) - new Date(b.date));
 
-    // ── Year-view timeline ──
-    let html = '<div class="roadmap-timeline">';
-
-    // Group by quarter
+    // ── 1. Quarterly horizontal timeline ───────────────────────
     const quarters = {};
     sorted.forEach(m => {
         const q = m.quarter || 'Other';
@@ -3907,46 +5085,79 @@ async function refreshDeadlines() {
         quarters[q].push(m);
     });
 
-    for (const [quarter, items] of Object.entries(quarters)) {
-        html += `<div class="rm-quarter">
-            <div class="rm-quarter-label">${quarter}</div>
-            <div class="rm-quarter-items">`;
-
+    const qOrder = Object.keys(quarters).sort();
+    let html = '<div class="rm-timeline-strip">';
+    qOrder.forEach((q, qi) => {
+        const items = quarters[q];
+        html += `<div class="rm-q-col">
+            <div class="rm-q-header">${q}</div>
+            <div class="rm-q-track">`;
         items.forEach(m => {
-            const target = new Date(m.date);
-            const diffDays = Math.ceil((target - now) / (1000 * 60 * 60 * 24));
+            const status = m.status || 'planned';
+            const cls = STATUS_CLS[status] || 'planned';
             const icon = catIcons[m.category] || '📌';
-            const urgency = m.status === 'completed' ? 'completed'
-                : diffDays < 0 ? 'overdue'
-                : diffDays <= 30 ? 'soon' : 'upcoming';
-            const dateStr = target.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
-
-            let countdownText = '';
-            if (m.status === 'completed') countdownText = '✓ DONE';
-            else if (diffDays < 0) countdownText = `${Math.abs(diffDays)}d OVER`;
-            else countdownText = `${diffDays}d`;
-
-            if (!nextDeadline && diffDays >= 0 && m.status !== 'completed') {
-                nextDeadline = { ...m, days: diffDays };
-            }
-
-            const priorityBadge = m.priority === 'critical' ? ' <span class="rm-priority critical">CRIT</span>'
-                : m.priority === 'high' ? ' <span class="rm-priority high">HIGH</span>' : '';
-
-            const statusBadge = m.status === 'in_progress' ? ' <span class="rm-status active">ACTIVE</span>'
-                : m.status === 'at_risk' ? ' <span class="rm-status at-risk">AT RISK</span>'
-                : m.status === 'completed' ? ' <span class="rm-status done">DONE</span>' : '';
-
-            html += `<div class="deadline-item ${urgency}" data-id="${m.id}" title="${m.description || ''}">
-                <span class="dl-icon">${icon}</span>
-                <span class="dl-date">${dateStr}</span>
-                <span class="dl-title">${m.title}${priorityBadge}${statusBadge}</span>
-                <span class="dl-countdown ${urgency}">${countdownText}</span>
+            const shortTitle = m.title.length > 20 ? m.title.slice(0, 18) + '…' : m.title;
+            html += `<div class="rm-q-marker ${cls}" title="${m.title} — ${m.date}">
+                <span class="rm-q-dot"></span>
+                <span class="rm-q-label">${icon} ${shortTitle}</span>
             </div>`;
         });
         html += '</div></div>';
-    }
+        if (qi < qOrder.length - 1) html += '<div class="rm-q-divider"></div>';
+    });
     html += '</div>';
+
+    // ── 2. Pipeline stage summary (single row) ────────────────
+    const counts = { planned: 0, in_progress: 0, at_risk: 0, completed: 0 };
+    sorted.forEach(m => {
+        const s = m.status || 'planned';
+        if (s === 'blocked') counts.at_risk++;
+        else if (counts[s] !== undefined) counts[s]++;
+    });
+    html += `<div class="rm-pipeline-summary">
+        <div class="rm-pipe-stage planned"><span class="rm-pipe-count">${counts.planned}</span> PLANNED</div>
+        <div class="rm-pipe-arrow">→</div>
+        <div class="rm-pipe-stage active"><span class="rm-pipe-count">${counts.in_progress}</span> IN PROGRESS</div>
+        <div class="rm-pipe-arrow">→</div>
+        <div class="rm-pipe-stage at-risk"><span class="rm-pipe-count">${counts.at_risk}</span> AT RISK</div>
+        <div class="rm-pipe-arrow">→</div>
+        <div class="rm-pipe-stage done"><span class="rm-pipe-count">${counts.completed}</span> DONE</div>
+    </div>`;
+
+    // ── 3. Compact milestone rows ─────────────────────────────
+    sorted.forEach(m => {
+        const target = new Date(m.date);
+        const diffDays = Math.ceil((target - now) / (1000 * 60 * 60 * 24));
+        const icon = catIcons[m.category] || '📌';
+        const status = m.status || 'planned';
+        const statusDotCls = status === 'completed' ? 'success'
+            : status === 'at_risk' || status === 'blocked' ? 'failure'
+            : status === 'in_progress' ? 'running' : 'unknown';
+        const dateStr = target.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' });
+
+        let countdownText = '';
+        if (status === 'completed') countdownText = '✓ DONE';
+        else if (diffDays < 0) countdownText = `${Math.abs(diffDays)}d OVER`;
+        else countdownText = `${diffDays}d`;
+
+        if (!nextDeadline && diffDays >= 0 && status !== 'completed') {
+            nextDeadline = { ...m, days: diffDays };
+        }
+
+        const priorityBadge = m.priority === 'critical' ? '<span class="rm-priority critical">CRIT</span>'
+            : m.priority === 'high' ? '<span class="rm-priority high">HIGH</span>' : '';
+
+        const statusBadge = `<span class="rm-status-badge ${STATUS_CLS[status]}">${STATUS_LABEL[status]}</span>`;
+
+        html += `<div class="rm-row" title="${m.description || ''}">
+            <span class="cicd-status ${statusDotCls}"></span>
+            <span class="rm-row-icon">${icon}</span>
+            <span class="rm-row-title">${m.title} ${priorityBadge}</span>
+            ${statusBadge}
+            <span class="rm-row-date">${dateStr}</span>
+            <span class="rm-row-countdown ${status === 'completed' ? 'done' : diffDays < 0 ? 'overdue' : diffDays <= 30 ? 'soon' : 'upcoming'}">${countdownText}</span>
+        </div>`;
+    });
 
     grid.innerHTML = html;
 
@@ -3962,20 +5173,472 @@ async function refreshDeadlines() {
     }
 }
 
+// ── Camera Vision Module (background mode) ──────────────────────
+const _cam = {
+    stream: null,
+    active: false,
+    particles: [],
+    animFrame: null,
+};
+
+function _camOpen() {
+    if (_cam.active) return;
+    const bg = document.getElementById('cam-bg');
+    const video = document.getElementById('cam-video');
+    if (!bg || !video) return;
+
+    // Close any open dock overlay
+    if (activeDock) closeExpandPanels();
+
+    _cam.active = true;
+
+    // Clear any dialogue options / briefing prompt so they don't travel with the orb
+    const dOpts = document.getElementById('dialogue-options');
+    if (dOpts) dOpts.innerHTML = '';
+    _dismissBriefingPrompt();
+
+    // Request camera first (so stream is ready when viewport appears)
+    navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false
+    }).then(stream => {
+        _cam.stream = stream;
+        video.srcObject = stream;
+
+        const mc = document.querySelector('.mc-center');
+        const startRect = mc.getBoundingClientRect();
+        const orbCanvas = document.getElementById('orb-canvas');
+        const orbW = orbCanvas ? orbCanvas.offsetWidth : startRect.width;
+        const scaleFrom = orbW / 130;
+
+        // ── Capture the visual center of the orb before any changes ──
+        const startCX = startRect.left + startRect.width / 2;
+        const startCY = startRect.top + startRect.height / 2;
+
+        // ── Resize canvas to 130px immediately (correct render intensity) ──
+        if (typeof orb !== 'undefined') orb._resize(130);
+        const mcW = mc.offsetWidth;
+        const mcH = mc.offsetHeight;
+
+        // ── Fix position so visual center stays at startCX/startCY ──
+        // scale() from center doesn't move the center, so top/left sets box position
+        mc.style.position = 'fixed';
+        mc.style.top = (startCY - mcH / 2) + 'px';
+        mc.style.left = (startCX - mcW / 2) + 'px';
+        mc.style.transformOrigin = 'center center';
+        mc.style.transform = `translate(0px, 0px) scale(${scaleFrom})`;
+        mc.style.transition = 'none';
+        mc.style.zIndex = '600';
+        void mc.offsetHeight;
+
+        // ── Slide panels out ──
+        document.body.classList.add('vision-mode');
+
+        // ── Target: bottom-right corner at scale(1), element edge at margin ──
+        const targetTop = window.innerHeight - 28 - mcH;
+        const targetLeft = window.innerWidth - 32 - mcW;
+        const targetCX = targetLeft + mcW / 2;
+        const targetCY = targetTop + mcH / 2;
+        const dx = targetCX - startCX;
+        const dy = targetCY - startCY;
+
+        // ── Animate: translate to corner + scale down to 1 (real 130px) ──
+        requestAnimationFrame(() => {
+            mc.style.transition = 'transform 0.9s cubic-bezier(0.22,1,0.36,1)';
+            mc.style.transform = `translate(${dx}px, ${dy}px) scale(1)`;
+        });
+
+        // ── After animation: swap transform for direct top/left ──
+        setTimeout(() => {
+            mc.style.transition = 'none';
+            mc.style.top = targetTop + 'px';
+            mc.style.left = targetLeft + 'px';
+            mc.style.transform = 'none';
+        }, 960);
+
+        // ── Camera viewport fades in after orb has settled ──
+        setTimeout(() => {
+            bg.classList.add('active');
+            document.getElementById('cam-particles')?.classList.add('active');
+            _camInitParticles();
+        }, 1100);
+
+        const ds = document.getElementById('dock-cam-status');
+        if (ds) { ds.textContent = 'LIVE'; ds.className = 'dp-val nominal'; }
+    }).catch(err => {
+        console.error('[VISION] Camera error:', err);
+        _cam.active = false;
+        document.body.classList.remove('vision-mode');
+        const mc = document.querySelector('.mc-center');
+        if (mc) mc.style.cssText = '';
+        const ds = document.getElementById('dock-cam-status');
+        if (ds) { ds.textContent = 'ERR'; ds.className = 'dp-val alert'; }
+    });
+}
+
+function _camClose() {
+    if (!_cam.active) return;
+    _cam.active = false;
+    _camScanStop();
+
+    const mc = document.querySelector('.mc-center');
+
+    // ── Step 1: Fade out camera feed + particles + vision panels ──
+    document.getElementById('cam-bg')?.classList.remove('active');
+    document.getElementById('cam-particles')?.classList.remove('active');
+    if (_cam.animFrame) { cancelAnimationFrame(_cam.animFrame); _cam.animFrame = null; }
+    const vbl = document.getElementById('vision-body-left');
+    const vbr = document.getElementById('vision-body-right');
+    if (vbl) vbl.innerHTML = '';
+    if (vbr) vbr.innerHTML = '';
+    console.log('[VISION] Step 1: Camera fading out');
+
+    // ── Step 2: After camera fades, animate orb back to center & grow ──
+    setTimeout(() => {
+        const curRect = mc.getBoundingClientRect();
+        const curCX = curRect.left + curRect.width / 2;
+        const curCY = curRect.top + curRect.height / 2;
+        const fullSize = Math.max(200, Math.min(window.innerWidth * 0.2, 420));
+        const scaleFrom = 130 / fullSize;
+
+        // ── Resize canvas to full immediately (correct render intensity) ──
+        if (typeof orb !== 'undefined') orb._resize(Math.round(fullSize));
+        const mcW = mc.offsetWidth;
+        const mcH = mc.offsetHeight;
+
+        // ── Fix position so visual center stays at curCX/curCY ──
+        mc.style.position = 'fixed';
+        mc.style.top = (curCY - mcH / 2) + 'px';
+        mc.style.left = (curCX - mcW / 2) + 'px';
+        mc.style.transformOrigin = 'center center';
+        mc.style.transform = `translate(0px, 0px) scale(${scaleFrom})`;
+        mc.style.transition = 'none';
+        mc.style.zIndex = '600';
+        void mc.offsetHeight;
+
+        // ── Measure where CSS will naturally place the orb ──
+        // CSS: position absolute, top 50%, left 50%, translate(-50%,-50%) inside .mc-viewport
+        const parent = mc.parentElement;
+        const parentRect = parent.getBoundingClientRect();
+        const cssCX = parentRect.left + parentRect.width / 2;
+        const cssCY = parentRect.top + parentRect.height / 2;
+        const dx = cssCX - curCX;
+        const dy = cssCY - curCY;
+
+        // Remove vision-mode (panels slide back in)
+        document.body.classList.remove('vision-mode');
+
+        // Animate: translate to center + scale up to 1 (real full size)
+        requestAnimationFrame(() => {
+            mc.style.transition = 'transform 0.9s cubic-bezier(0.22,1,0.36,1)';
+            mc.style.transform = `translate(${dx}px, ${dy}px) scale(1)`;
+        });
+
+        // After animation: clear inline styles without triggering CSS transitions
+        setTimeout(() => {
+            // Temporarily kill CSS transitions on mc-center, then clear inline styles
+            mc.style.transition = 'none';
+            mc.style.cssText = 'transition: none !important;';
+            void mc.offsetHeight; // force reflow with no transition
+            // Re-enable CSS transitions next frame — element is already at rest
+            requestAnimationFrame(() => {
+                mc.style.cssText = '';
+                if (typeof orb !== 'undefined') orb._resize();
+            });
+        }, 960);
+    }, 600);
+
+    // ── Step 3: Cleanup camera stream after all transitions finish ──
+    setTimeout(() => {
+        if (_cam.stream) {
+            _cam.stream.getTracks().forEach(t => t.stop());
+            _cam.stream = null;
+        }
+        const video = document.getElementById('cam-video');
+        if (video) video.srcObject = null;
+    }, 2200);
+
+    // Update dock badge immediately
+    const ds = document.getElementById('dock-cam-status');
+    if (ds) { ds.textContent = 'OFF'; ds.className = 'dp-val'; }
+}
+
+function _camToggle() { _cam.active ? _camClose() : _camOpen(); }
+
+/** Start the continuous scanning effect while processing a vision query */
+function _camScanStart() {
+    const scanline = document.getElementById('cam-scanline');
+    const grid = document.getElementById('cam-scan-grid');
+    if (scanline) { scanline.classList.remove('active'); scanline.classList.add('scanning'); }
+    if (grid) grid.classList.add('active');
+    document.body.classList.add('vision-scanning');
+}
+
+/** Stop the scanning effect */
+function _camScanStop() {
+    const scanline = document.getElementById('cam-scanline');
+    const grid = document.getElementById('cam-scan-grid');
+    if (scanline) { scanline.classList.remove('scanning'); scanline.classList.remove('active'); }
+    if (grid) grid.classList.remove('active');
+    document.body.classList.remove('vision-scanning');
+}
+
+/**
+ * Render a vision API response into the left/right flanking panels.
+ * Left panel: identification & details (what is it, specs, properties).
+ * Right panel: actionable guidance (how-to steps, tips, warnings).
+ */
+function _camRenderVisionPanels(reply, query) {
+    const bodyL = document.getElementById('vision-body-left');
+    const bodyR = document.getElementById('vision-body-right');
+    const titleL = document.getElementById('vision-title-left');
+    const titleR = document.getElementById('vision-title-right');
+    if (!bodyL || !bodyR) return;
+
+    // Split reply into paragraphs
+    const paragraphs = reply.split(/\n\n+/).map(p => p.trim()).filter(Boolean);
+    if (!paragraphs.length) return;
+
+    // Heuristic: detect numbered/bulleted steps for the right panel
+    const stepRegex = /^(\d+[\.\)]\s*|[-•]\s+)/;
+    const isHowTo = query && /\b(how|guide|steps?|setup|install|connect|configure|build|make|create|use|tutorial)\b/i.test(query);
+
+    // Split content: identification paragraphs vs actionable steps
+    const identParts = [];
+    const guideParts = [];
+    let foundSteps = false;
+
+    for (const p of paragraphs) {
+        const lines = p.split('\n').map(l => l.trim()).filter(Boolean);
+        const hasSteps = lines.some(l => stepRegex.test(l));
+
+        if (hasSteps || foundSteps) {
+            foundSteps = true;
+            guideParts.push(...lines);
+        } else {
+            identParts.push(p);
+        }
+    }
+
+    // If no steps found but it's a how-to query, try splitting on sentence boundaries
+    if (!guideParts.length && isHowTo && identParts.length > 1) {
+        // Move second half to guide
+        const mid = Math.ceil(identParts.length / 2);
+        guideParts.push(...identParts.splice(mid).flatMap(p => p.split('\n').map(l => l.trim()).filter(Boolean)));
+    }
+
+    // If still no split, put everything on the left, summary on right
+    if (!guideParts.length) {
+        // Extract key terms as tags
+        const allText = identParts.join(' ');
+        const sentences = allText.split(/[.!?]+/).map(s => s.trim()).filter(s => s.length > 10);
+        if (sentences.length > 2) {
+            // Put first half left, second half right
+            const mid = Math.ceil(sentences.length / 2);
+            guideParts.push(...sentences.slice(mid).map(s => s + '.'));
+            identParts.length = 0;
+            identParts.push(sentences.slice(0, mid).map(s => s + '.').join(' '));
+        }
+    }
+
+    // ── Render LEFT panel (Analysis / Identification) ──
+    titleL.textContent = 'ANALYSIS';
+    let leftHtml = '';
+
+    if (identParts.length) {
+        leftHtml += '<div class="v-section">';
+        leftHtml += '<div class="v-section-title">IDENTIFICATION</div>';
+        for (const p of identParts) {
+            // Check for key-value patterns like "Model: Raspberry Pi 4"
+            const kvLines = p.split('\n').map(l => l.trim()).filter(Boolean);
+            for (const line of kvLines) {
+                const kvMatch = line.match(/^[*-]?\s*\*?\*?([A-Za-z\s]+)\*?\*?\s*[:–—]\s*(.+)/);
+                if (kvMatch) {
+                    leftHtml += `<div class="v-item"><div class="v-item-dot cyan"></div><div><div class="v-item-text">${_escHtml(kvMatch[2])}</div><div class="v-item-label">${_escHtml(kvMatch[1])}</div></div></div>`;
+                } else {
+                    leftHtml += `<div class="v-item"><div class="v-item-dot"></div><div class="v-item-text">${_escHtml(line)}</div></div>`;
+                }
+            }
+        }
+        leftHtml += '</div>';
+    }
+
+    bodyL.innerHTML = leftHtml || '<div class="v-item"><div class="v-item-dot"></div><div class="v-item-text" style="color:rgba(60,140,255,0.3)">No details identified.</div></div>';
+
+    // ── Render RIGHT panel (Guidance / Steps) ──
+    titleR.textContent = guideParts.length ? (isHowTo ? 'HOW-TO' : 'DETAILS') : 'GUIDANCE';
+    let rightHtml = '';
+
+    if (guideParts.length) {
+        // Check if these are numbered steps
+        const numbered = guideParts.some(l => /^\d+[\.\)]/.test(l));
+
+        if (numbered || isHowTo) {
+            rightHtml += '<div class="v-section">';
+            rightHtml += `<div class="v-section-title">${isHowTo ? 'STEPS' : 'GUIDANCE'}</div>`;
+            let stepNum = 0;
+            for (const line of guideParts) {
+                const cleaned = line.replace(/^(\d+[\.\)]\s*|[-•]\s+)/, '').trim();
+                if (!cleaned) continue;
+                stepNum++;
+                rightHtml += `<div class="v-step"><div class="v-step-num">${stepNum}</div><div class="v-step-text">${_escHtml(cleaned)}</div></div>`;
+            }
+            rightHtml += '</div>';
+        } else {
+            rightHtml += '<div class="v-section">';
+            rightHtml += '<div class="v-section-title">ADDITIONAL DETAILS</div>';
+            for (const line of guideParts) {
+                rightHtml += `<div class="v-item"><div class="v-item-dot green"></div><div class="v-item-text">${_escHtml(line)}</div></div>`;
+            }
+            rightHtml += '</div>';
+        }
+    }
+
+    bodyR.innerHTML = rightHtml || '<div class="v-item"><div class="v-item-dot"></div><div class="v-item-text" style="color:rgba(60,140,255,0.3)">Ask a question to receive guidance.</div></div>';
+
+    // Mark panels as having content for CSS
+    document.getElementById('vision-panel-left')?.classList.add('has-content');
+    document.getElementById('vision-panel-right')?.classList.add('has-content');
+}
+
+function _escHtml(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function _camCaptureFrame() {
+    const video = document.getElementById('cam-video');
+    const canvas = document.getElementById('cam-capture');
+    if (!video || !canvas || !_cam.stream) return null;
+
+    canvas.width = video.videoWidth || 1280;
+    canvas.height = video.videoHeight || 720;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    // Show scanline effect
+    const scanline = document.getElementById('cam-scanline');
+    if (scanline) {
+        scanline.classList.remove('active');
+        void scanline.offsetWidth; // reflow
+        scanline.classList.add('active');
+        setTimeout(() => scanline.classList.remove('active'), 1300);
+    }
+
+    return canvas.toDataURL('image/jpeg', 0.85).split(',')[1];
+}
+
+// ── Particle System (border particles) ──────────────────────────
+function _camInitParticles() {
+    const canvas = document.getElementById('cam-particles');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const dpr = window.devicePixelRatio || 1;
+
+    function resize() {
+        canvas.width = window.innerWidth * dpr;
+        canvas.height = window.innerHeight * dpr;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    resize();
+    window.addEventListener('resize', resize);
+
+    // Create particles along the border
+    _cam.particles = [];
+    const TOTAL = 120;
+    const w = window.innerWidth, h = window.innerHeight;
+    const perimeter = 2 * (w + h);
+
+    for (let i = 0; i < TOTAL; i++) {
+        const pos = (i / TOTAL) * perimeter;
+        let x, y;
+        if (pos < w) { x = pos; y = 0; }
+        else if (pos < w + h) { x = w; y = pos - w; }
+        else if (pos < 2 * w + h) { x = 2 * w + h - pos; y = h; }
+        else { x = 0; y = perimeter - pos; }
+
+        _cam.particles.push({
+            x, y, baseX: x, baseY: y,
+            size: 1 + Math.random() * 2.5,
+            speed: 0.3 + Math.random() * 0.8,
+            offset: Math.random() * Math.PI * 2,
+            drift: 8 + Math.random() * 20,
+            alpha: 0.3 + Math.random() * 0.6,
+        });
+    }
+
+    let time = 0;
+    function animate() {
+        if (!_cam.active) return;
+        time += 0.012;
+        ctx.clearRect(0, 0, w, h);
+
+        for (const p of _cam.particles) {
+            const dx = Math.sin(time * p.speed + p.offset) * p.drift;
+            const dy = Math.cos(time * p.speed * 0.7 + p.offset) * p.drift;
+            p.x = p.baseX + dx;
+            p.y = p.baseY + dy;
+
+            const alpha = p.alpha * (0.5 + 0.5 * Math.sin(time * 2 + p.offset));
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+            ctx.fillStyle = `rgba(60,140,255,${alpha})`;
+            ctx.fill();
+
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.size * 3, 0, Math.PI * 2);
+            ctx.fillStyle = `rgba(60,140,255,${alpha * 0.15})`;
+            ctx.fill();
+        }
+
+        // Draw connecting lines between nearby particles
+        for (let i = 0; i < _cam.particles.length; i++) {
+            for (let j = i + 1; j < _cam.particles.length; j++) {
+                const a = _cam.particles[i], b = _cam.particles[j];
+                const dist = Math.hypot(a.x - b.x, a.y - b.y);
+                if (dist < 80) {
+                    ctx.beginPath();
+                    ctx.moveTo(a.x, a.y);
+                    ctx.lineTo(b.x, b.y);
+                    ctx.strokeStyle = `rgba(60,140,255,${0.08 * (1 - dist / 80)})`;
+                    ctx.lineWidth = 0.5;
+                    ctx.stroke();
+                }
+            }
+        }
+
+        _cam.animFrame = requestAnimationFrame(animate);
+    }
+    animate();
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     // Dock panel clicks
     document.querySelectorAll('.dock-panel[data-dock]').forEach(tile => {
         tile.addEventListener('click', () => openExpandPanels(tile.dataset.dock));
     });
-    // Close button
-    const closeBtn = document.getElementById('expand-close');
+    // Close button (vertical overlay)
+    const closeBtn = document.getElementById('dock-overlay-close');
     if (closeBtn) closeBtn.addEventListener('click', closeExpandPanels);
     // ESC key
     document.addEventListener('keydown', e => {
         if (e.key === 'Escape' && activeDock) closeExpandPanels();
+        if (e.key === 'Escape' && _cam.active) _camClose();
     });
+    // Todo list: add button & enter key
+    const todoAddBtn = document.getElementById('todo-add-btn');
+    const todoInput = document.getElementById('todo-input');
+    if (todoAddBtn) todoAddBtn.addEventListener('click', _addTodo);
+    if (todoInput) todoInput.addEventListener('keydown', e => { if (e.key === 'Enter') _addTodo(); });
+    // Init todo dock badge
+    _updateTodoDock();
     // Init deadlines
     refreshDeadlines();
+
+    // Camera vision toggle (dock button + exit button)
+    const camBtn = document.getElementById('dock-cam-btn');
+    if (camBtn) camBtn.addEventListener('click', _camToggle);
+    const camExitBtn = document.getElementById('cam-exit-btn');
+    if (camExitBtn) camExitBtn.addEventListener('click', _camClose);
 });
 
 // ── Master refresh ───────────────────────────────────────────────
@@ -3999,6 +5662,7 @@ async function refreshAll() {
             refreshServiceHealth().catch(e => console.warn('refreshServiceHealth error:', e)),
             refreshWeather().catch(e => console.warn('refreshWeather error:', e)),
             refreshCICD().catch(e => console.warn('refreshCICD error:', e)),
+            refreshClaudeUsage().catch(e => console.warn('refreshClaudeUsage error:', e)),
             refreshLLMStatus().catch(e => console.warn('refreshLLMStatus error:', e)),
             refreshSystemInfo().catch(e => console.warn('refreshSystemInfo error:', e)),
             refreshGCPPods().catch(e => console.warn('refreshGCPPods error:', e)),
@@ -4012,6 +5676,161 @@ async function refreshAll() {
         _refreshing = false;
         countdown = REFRESH_INTERVAL / 1000;  // Always reset even on error
     }
+}
+
+// ── Splash Screen Boot Sequence ──────────────────────────────────
+// Ties splash progress to REAL data fetches so the dashboard is fully
+// populated before the slide-in reveal.
+async function _runBootSequence() {
+    const splash = document.getElementById('splash-overlay');
+    const splashStatus = document.getElementById('splash-status');
+    const splashBar = document.getElementById('splash-bar-fill');
+    if (!splash) return;
+
+    const _setProgress = (pct, text) => {
+        if (splashBar) splashBar.style.width = pct + '%';
+        if (splashStatus) splashStatus.textContent = text;
+    };
+
+    // Helper: run a batch of fetches, catch errors silently
+    const _batch = (fns) => Promise.all(fns.map(fn => fn().catch(e => {
+        console.warn('[BOOT]', fn.name || 'fetch', 'error:', e);
+    })));
+
+    try {
+        // ── Stage 1: Core status ──
+        _setProgress(10, 'CONNECTING TO CORE');
+        await _batch([refreshStatus, refreshLLMStatus]);
+
+        // ── Stage 2: System metrics ──
+        _setProgress(25, 'LOADING SYSTEM METRICS');
+        await _batch([refreshSystemInfo, refreshServiceHealth]);
+
+        // ── Stage 3: Infrastructure ──
+        _setProgress(45, 'MAPPING INFRASTRUCTURE');
+        await _batch([refreshGCP, refreshGCPPods]);
+        if (typeof gcpGlobe !== 'undefined' && gcpGlobe) gcpGlobe.triggerScan();
+
+        // ── Stage 4: Data feeds ──
+        _setProgress(65, 'SYNCING DATA FEEDS');
+        await _batch([refreshEmail, refreshBulletins, refreshRevenue]);
+
+        // ── Stage 5: Remaining panels ──
+        _setProgress(82, 'LOADING DASHBOARDS');
+        await _batch([refreshWeather, refreshCICD, refreshClaudeUsage, refreshAgents, refreshDeadlines]);
+
+        // ── Stage 6: Done ──
+        _setProgress(100, 'SYSTEMS ONLINE');
+
+    } catch (err) {
+        console.error('[BOOT] Boot sequence error:', err);
+        _setProgress(100, 'PARTIAL BOOT — ENTERING');
+    }
+
+    // Brief hold at 100% so the user sees "SYSTEMS ONLINE"
+    await new Promise(r => setTimeout(r, 600));
+
+    // ── Dismiss splash & reveal dashboard ──
+    splash.classList.add('dismissed');
+    document.body.classList.add('boot-animate');
+    void document.body.offsetHeight; // force reflow
+    document.body.classList.remove('booting');
+    setTimeout(() => { splash.remove(); }, 1200);
+
+    // Mark first refresh as done so the countdown doesn't re-trigger immediately
+    _refreshing = false;
+    countdown = REFRESH_INTERVAL / 1000;
+    console.log('[BOOT] Dashboard revealed — all data loaded');
+
+    // ── Morning Briefing Prompt ──────────────────────────────────────
+    // After boot, offer the user a daily briefing. Business summary only
+    // appears if they accept. Prompt auto-dismisses after 20 seconds.
+    setTimeout(() => _offerMorningBriefing(), 2200);
+}
+
+function _offerMorningBriefing() {
+    const container = document.getElementById('dialogue-options');
+    if (!container) return;
+
+    // Flag so voice pipeline can intercept yes/no
+    window._briefingPromptActive = true;
+
+    // Time-aware greeting
+    const _hour = new Date().getHours();
+    const _tod = _hour < 12 ? 'morning' : _hour < 18 ? 'afternoon' : 'evening';
+    const _greetLine = `Good ${_tod}, Sir. Shall I run the daily briefing?`;
+
+    // Show briefing prompt as dialogue options below the orb
+    container.innerHTML = '';
+    const prompt = document.createElement('div');
+    prompt.className = 'briefing-prompt';
+    prompt.innerHTML = `
+        <div class="briefing-prompt-text">${_greetLine}</div>
+        <div class="briefing-prompt-btns">
+            <button class="dialogue-opt briefing-yes" id="briefing-accept">YES — RUN BRIEFING</button>
+            <button class="dialogue-opt briefing-no" id="briefing-decline">NO — SKIP</button>
+        </div>
+    `;
+    container.appendChild(prompt);
+
+    // Speak the prompt — only if not already speaking or processing
+    if (typeof voice !== 'undefined' && voice._speak) {
+        const busy = voice._processingQuery || voice.speaking || voice._chatMode;
+        if (!busy) {
+            voice._speak(_greetLine);
+        }
+    }
+
+    // Auto-dismiss after 20s
+    const autoDismiss = setTimeout(() => {
+        _dismissBriefingPrompt();
+    }, 20000);
+
+    document.getElementById('briefing-accept').onclick = () => {
+        clearTimeout(autoDismiss);
+        window._briefingPromptActive = false;
+        _dismissBriefingPrompt();
+        _runMorningBriefing();
+    };
+    document.getElementById('briefing-decline').onclick = () => {
+        clearTimeout(autoDismiss);
+        window._briefingPromptActive = false;
+        _dismissBriefingPrompt();
+        if (typeof logConvo === 'function') logConvo('Briefing declined', 'system');
+    };
+}
+
+function _dismissBriefingPrompt() {
+    window._briefingPromptActive = false;
+    const container = document.getElementById('dialogue-options');
+    if (container) container.innerHTML = '';
+}
+
+function _runMorningBriefing() {
+    // Show the business summary box
+    const revBox = document.getElementById('revenue-summary-bar');
+    if (revBox) {
+        revBox.style.display = '';
+        // Auto-hide after 60 seconds
+        setTimeout(() => { revBox.style.display = 'none'; }, 60000);
+    }
+
+    // Send the briefing query through the normal chat pipeline
+    // Specific to Sir Luke's systems — no generic market/stock data
+    if (typeof voice !== 'undefined') {
+        voice.history.push({ role: 'user', content: 'Give me the daily briefing' });
+        voice._sendMessage(
+            'Run my daily briefing. Cover ONLY these topics in a concise spoken summary: '
+            + '1) Grow with Freya app — GCP pod health, replica status, any deployment issues. '
+            + '2) Revenue — MRR, subscriber count, trial conversions from RevenueCat. '
+            + '3) CI/CD — recent build pass/fail status. '
+            + '4) Service uptime — any services currently down or degraded. '
+            + '5) Upcoming deadlines from the roadmap. '
+            + '6) Weather today. '
+            + 'Do NOT include stock markets, S&P 500, crypto, or any financial markets. This is a personal project briefing only.'
+        );
+    }
+    if (typeof logConvo === 'function') logConvo('Daily briefing requested', 'system');
 }
 
 // ── Boot ─────────────────────────────────────────────────────────
@@ -4039,7 +5858,11 @@ setInterval(() => {
     document.getElementById('refresh-timer').textContent = `Next refresh: ${countdown}s`;
     if (countdown <= 0) refreshAll();
 }, 1000);
-refreshAll();
+
+// Boot sequence fetches all data behind the splash screen, then reveals UI.
+// No separate refreshAll() needed — the splash handles the initial load.
+_refreshing = true; // prevent countdown from triggering refreshAll during boot
+_runBootSequence();
 
 // ── SSE: Proactive Notifications from Scheduler ─────────────────
 (function initSSE() {
@@ -4079,13 +5902,23 @@ refreshAll();
         };
 
         function _deliverSSE(data) {
-            // Show panel if provided
+            // Show panel only if user is not already looking at analysis data.
+            // SSE notifications must never silently destroy an active panel.
             if (data.panel && typeof voice !== 'undefined' && voice._renderAnalysisPanel) {
-                voice._renderAnalysisPanel(data.panel);
+                const wingL = document.getElementById('analysis-wing-left');
+                const panelActive = wingL && wingL.classList.contains('active');
+                if (!panelActive) {
+                    voice._renderAnalysisPanel(data.panel);
+                }
             }
-            // Speak the message if requested
+            // Speak the message if requested — but never talk over an active conversation
             if (data.speak && data.message && typeof voice !== 'undefined') {
-                voice._speak(data.message);
+                const busy = voice._processingQuery || voice.speaking || voice._chatMode;
+                if (!busy) {
+                    voice._speak(data.message);
+                } else {
+                    console.log('[SSE] Skipped speech (busy):', data.message.slice(0, 60));
+                }
             }
             // Log it
             if (typeof logConvo === 'function') {

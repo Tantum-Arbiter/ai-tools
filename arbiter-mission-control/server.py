@@ -40,12 +40,230 @@ COMFYUI_URL = os.getenv("COMFYUI_BASE_URL", "http://localhost:8188")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "phi4")
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")  # "ollama" (free) or "openai"
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+# Provider priority: "claude" (fast + cheap), "ollama" (free local), "openai" (legacy)
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")
+
+# ── Claude Cost Safeguards ─────────────────────────────────────────────
+# Hard-coded to cheapest model only. No overrides.
+_CLAUDE_MODEL = "claude-haiku-4-5"
+_CLAUDE_DAILY_BUDGET_USD = float(os.getenv("CLAUDE_DAILY_BUDGET_USD", "1.0"))
+_CLAUDE_RPM_LIMIT = int(os.getenv("CLAUDE_RPM_LIMIT", "30"))         # requests per minute
+_CLAUDE_SESSION_LIMIT = int(os.getenv("CLAUDE_SESSION_LIMIT", "500"))  # requests per server session
+_CLAUDE_CIRCUIT_BREAKER_THRESHOLD = 3  # consecutive errors before fallback
 
 log = logging.getLogger(__name__)
 
+# ── Startup Diagnostics ───────────────────────────────────────────────
+_has_claude_key = bool(ANTHROPIC_API_KEY)
+print(f"[ARBITER BOOT] LLM_PROVIDER={LLM_PROVIDER}  "
+      f"ANTHROPIC_API_KEY={'SET (len=' + str(len(ANTHROPIC_API_KEY)) + ')' if _has_claude_key else 'NOT SET'}  "
+      f"OLLAMA={OLLAMA_BASE_URL}  MODEL={OLLAMA_MODEL}")
+
+# ── Claude Usage Tracking ──────────────────────────────────────────────
+_claude_usage = {
+    "today": datetime.utcnow().strftime("%Y-%m-%d"),
+    "daily_input_tokens": 0,
+    "daily_output_tokens": 0,
+    "daily_cost_usd": 0.0,
+    "session_requests": 0,
+    "minute_requests": [],       # list of timestamps for RPM tracking
+    "consecutive_errors": 0,
+    "circuit_open_until": None,  # datetime when circuit breaker resets
+}
+
+# Haiku 4.5 pricing (per million tokens)
+_CLAUDE_INPUT_COST_PER_M = 1.00
+_CLAUDE_OUTPUT_COST_PER_M = 5.00
+
+# ── Claude Tool-Calling System Prompt ─────────────────────────────────
+# Used by _chat_claude_tools(). Claude sees this + tool definitions, then
+# decides which tools to call for the user's query (ChatGPT-style).
+_CLAUDE_TOOLS_SYSTEM = (
+    "You are ARBITER — modelled after J.A.R.V.I.S. from Iron Man. You serve Sir Luke.\n"
+    "Voice: composed, British, dry-witted, concise. Flowing sentences only — no bullets or lists.\n"
+    "Today is {date}. Current year: {year}.\n\n"
+    "Use your tools freely to fetch live data whenever the query needs current information.\n"
+    "After getting data, give a sharp 2-4 sentence spoken reply dense with specific numbers and facts.\n"
+    "Never mention tool names, data fetching, or reasoning steps in your reply.\n"
+    "Never mention training cutoffs, knowledge limitations, or suggest the user consult other sources.\n\n"
+    "For collectable queries (Pokemon cards, trading cards, etc): always include specific prices by grade/condition, "
+    "price trend direction, and where to buy (eBay, TCGplayer, etc) with approximate links.\n"
+    "For product/shopping queries: always compare prices across at least 3 retailers, list cheapest first, "
+    "and include direct purchase URLs where available."
+)
+
+# ── Claude Tool Definitions (Anthropic tool_use format) ───────────────
+# Each tool maps directly to an existing data-fetch function in this server.
+# Adding a new data source = add an entry here + a branch in _execute_tool().
+_CLAUDE_TOOLS: list[dict] = [
+    {
+        "name": "get_weather",
+        "description": "Get current weather conditions and 7-day forecast for any city.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "location": {"type": "string", "description": "City name, e.g. 'London', 'Tokyo', 'New York'"},
+            },
+            "required": ["location"],
+        },
+    },
+    {
+        "name": "get_stocks",
+        "description": "Get live stock quotes for tracked symbols: AAPL, GOOGL, MSFT, AMZN, TSLA, NVDA, META, S&P 500, FTSE 100.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "get_market_intel",
+        "description": "Get analyst ratings, price targets, and key financial metrics for a specific stock.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "description": "Ticker symbol, e.g. 'NVDA', 'AAPL', 'MSFT'"},
+            },
+            "required": ["symbol"],
+        },
+    },
+    {
+        "name": "get_service_health",
+        "description": "Get current GCP and infrastructure service health, incidents, and uptime status.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "get_revenue",
+        "description": "Get RevenueCat revenue metrics: MRR, active subscribers, trials, and churn.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "get_emails",
+        "description": "Get email summary: unread count, urgent items, and recent activity.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "get_roadmap",
+        "description": "Get business roadmap milestones, their status, deadlines, and progress.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "search_web",
+        "description": "Search the web and fetch content for research on any company, market, topic, or current event.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query (e.g. 'Nvidia AI chip revenue 2025') or a direct URL to fetch"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "search_collectables",
+        "description": "Search for collectable items (Pokemon cards, trading cards, sports cards, figurines, coins, stamps, vintage items). Returns current market prices, price trends, grading info, and where to buy/sell.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "item": {"type": "string", "description": "The collectable item to search for, e.g. 'Charizard Base Set Holo 1st Edition', 'PSA 10 Pikachu Illustrator', 'Michael Jordan Fleer rookie card'"},
+                "intent": {"type": "string", "enum": ["price_check", "trend", "buy", "sell", "grading", "overview"],
+                           "description": "What the user wants: price_check (current value), trend (price history), buy (where to purchase), sell (where to list), grading (condition info), overview (general info)"},
+            },
+            "required": ["item"],
+        },
+    },
+    {
+        "name": "search_products",
+        "description": "Search for products to compare prices across retailers. Works for clothes, electronics, shoes, accessories, furniture, or any consumer product. Returns prices, availability, and direct purchase links from multiple stores.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Product search query, e.g. 'Nike Air Max 90 white size 10', 'Sony WH-1000XM5 headphones', 'Levi 501 jeans 32x32'"},
+                "category": {"type": "string", "enum": ["clothing", "electronics", "shoes", "accessories", "home", "sports", "other"],
+                             "description": "Product category to help refine search results"},
+            },
+            "required": ["query"],
+        },
+    },
+]
+
+
+def _claude_check_budget() -> str | None:
+    """Check all safeguards. Returns error string if blocked, None if OK."""
+    u = _claude_usage
+    now = datetime.utcnow()
+
+    # Reset daily counters at midnight UTC
+    today = now.strftime("%Y-%m-%d")
+    if u["today"] != today:
+        u["today"] = today
+        u["daily_input_tokens"] = 0
+        u["daily_output_tokens"] = 0
+        u["daily_cost_usd"] = 0.0
+        log.info("Claude daily budget reset")
+
+    # Circuit breaker
+    if u["circuit_open_until"] and now < u["circuit_open_until"]:
+        remaining = (u["circuit_open_until"] - now).seconds
+        return f"Circuit breaker open — {remaining}s until retry"
+    elif u["circuit_open_until"]:
+        u["circuit_open_until"] = None
+        u["consecutive_errors"] = 0
+
+    # Daily budget
+    if u["daily_cost_usd"] >= _CLAUDE_DAILY_BUDGET_USD:
+        return f"Daily budget exhausted (${u['daily_cost_usd']:.3f} / ${_CLAUDE_DAILY_BUDGET_USD:.2f})"
+
+    # Session limit
+    if u["session_requests"] >= _CLAUDE_SESSION_LIMIT:
+        return f"Session limit reached ({u['session_requests']} / {_CLAUDE_SESSION_LIMIT})"
+
+    # RPM limit — sliding window
+    cutoff = now - timedelta(seconds=60)
+    u["minute_requests"] = [t for t in u["minute_requests"] if t > cutoff]
+    if len(u["minute_requests"]) >= _CLAUDE_RPM_LIMIT:
+        return f"Rate limit ({_CLAUDE_RPM_LIMIT} requests/min)"
+
+    return None
+
+
+def _claude_record_usage(input_tokens: int, output_tokens: int):
+    """Record token usage and update cost tracking."""
+    u = _claude_usage
+    u["daily_input_tokens"] += input_tokens
+    u["daily_output_tokens"] += output_tokens
+    cost = (input_tokens / 1_000_000) * _CLAUDE_INPUT_COST_PER_M + \
+           (output_tokens / 1_000_000) * _CLAUDE_OUTPUT_COST_PER_M
+    u["daily_cost_usd"] += cost
+    u["session_requests"] += 1
+    u["minute_requests"].append(datetime.utcnow())
+    u["consecutive_errors"] = 0
+    log.info(f"Claude usage: +{input_tokens}in/{output_tokens}out tokens, "
+             f"cost today=${u['daily_cost_usd']:.4f}/{_CLAUDE_DAILY_BUDGET_USD:.2f}, "
+             f"session={u['session_requests']}/{_CLAUDE_SESSION_LIMIT}")
+
+
+def _claude_record_error():
+    """Record a Claude API error for circuit breaker."""
+    u = _claude_usage
+    u["consecutive_errors"] += 1
+    if u["consecutive_errors"] >= _CLAUDE_CIRCUIT_BREAKER_THRESHOLD:
+        u["circuit_open_until"] = datetime.utcnow() + timedelta(minutes=5)
+        log.warning(f"Claude circuit breaker OPEN — {u['consecutive_errors']} consecutive errors. "
+                    f"Falling back to Ollama for 5 minutes.")
+
+
 # ── Singletons ─────────────────────────────────────────────────────────
 oai = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
+# Anthropic client (lazy import to avoid hard dependency if not used)
+_anthropic_client = None
+
+def _get_anthropic():
+    global _anthropic_client
+    if _anthropic_client is None and ANTHROPIC_API_KEY:
+        try:
+            import anthropic
+            _anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        except ImportError:
+            log.warning("anthropic package not installed — run: pip install anthropic")
+    return _anthropic_client
 email_mon = EmailMonitor()
 agent_reg = AgentRegistry()
 gcp_mon = GCPMonitor()
@@ -284,7 +502,10 @@ async def _job_morning_briefing():
         except Exception:
             pass
 
-        summary = "Good morning, Sir. " + ". ".join(sections) + "." if sections else "Good morning, Sir."
+        _hour = datetime.now().hour
+        _tod = "morning" if _hour < 12 else "afternoon" if _hour < 18 else "evening"
+        _greet = f"Good {_tod}, Sir. "
+        summary = _greet + ". ".join(sections) + "." if sections else _greet.strip()
 
         await _push_sse("briefing", {
             "title": "MORNING BRIEFING",
@@ -767,14 +988,16 @@ async def _web_fetch(url: str, max_chars: int = 4000) -> str:
     """Fetch a URL and extract readable text. Returns plain text summary."""
     if not url.startswith(("http://", "https://")):
         return "[Error: only http/https URLs allowed]"
-    if any(c in url for c in (";", "|", "&", "`", "$", "(", ")", "{", "}")):
+    if any(c in url for c in (";", "|", "`", "$", "(", ")", "{", "}")):
         return "[Error: URL contains unsafe characters]"
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=5) as client:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
             resp = await client.get(url, headers={
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
             })
-            if resp.status_code != 200:
+            if resp.status_code >= 400:
                 return f"[Error: HTTP {resp.status_code}]"
             html = resp.text
             # Strip HTML to readable text
@@ -795,119 +1018,55 @@ async def _web_fetch(url: str, max_chars: int = 4000) -> str:
 
 JARVIS_SYSTEM = """You are ARBITER — modelled after J.A.R.V.I.S., the AI from Iron Man (Paul Bettany). You serve Sir Luke.
 
-VOICE: composed, British, dry-witted, never verbose. 2-3 sentences MAX for most answers.
+VOICE: composed, British, dry-witted, never verbose. Your text is read aloud — write flowing sentences only.
 
-ABSOLUTE RULES:
-1. ALWAYS answer the question using the LIVE DATA below. You have it. Never say you lack access. Never redirect to websites. Never apologise.
-2. SYNTHESISE — restate data as a human would say it in conversation. Never echo raw formats, labels, brackets, or field names from the data.
-3. SECURITY — Only API keys, tokens, passwords, secrets, private IPs, file paths, env vars → "That's classified, Sir." Service STATUS, uptime, health, performance metrics, and infrastructure names are NOT classified — always answer those freely using the live data.
-4. FLAG RISKS only when there IS an actual risk (outage, high churn, etc). Do NOT list everything just because you have data.
-5. BREVITY IS SACRED — your text is read aloud. Keep responses to 1-3 natural sentences. Never give a "full briefing" unless explicitly asked for one.
+CORE RULES:
+1. ANSWER DIRECTLY using the data provided below (live feeds, web research, or both). Never say you lack access. Never redirect to websites. Never apologise.
+2. SYNTHESISE — restate data conversationally. Never echo raw formats, labels, brackets, or field names.
+3. SECURITY — API keys, tokens, passwords, secrets, private IPs, file paths, env vars → "That's classified, Sir." Everything else (status, metrics, names) is fair game.
+4. FLAG RISKS only when genuine (outage, spike, anomaly). Don't list data for the sake of it.
+5. BREVITY — most answers: 1-3 spoken sentences. For data-rich or strategic queries: up to 4-5 sentences to cover the "so what", risks, and what to do. Never a wall of text.
+6. CONFIDENCE — NEVER mention your training data, training cutoff, knowledge cutoff date, or any disclaimer about model limitations. When WEB RESEARCH is provided, treat it as your authoritative data source and present it with full confidence. You are a live intelligence system with real-time data feeds — act like it.
 
 GREETING / ADDRESS:
-- Do NOT start every response with "Sir", "Sir Luke", "Hello Sir", or any greeting. Just answer the question directly.
-- Use "Sir" sparingly — only mid-sentence or at the end, and only occasionally. e.g. "Microsoft is flat on the day, Sir." NOT "Sir, Microsoft is..."
-- NEVER open with "Hello", "Hi", "Hey", or any salutation. The voice system handles greetings separately.
+- Do NOT start with "Sir", "Hello", or any greeting — just answer. Use "Sir" sparingly mid-sentence or at the end, occasionally.
 
 RESPONSE LENGTH:
-- Vague or short queries (e.g. "hey", "arbiter", single words): ONE short sentence or ask what they need. Do NOT dump a multi-topic briefing.
-- Specific single-topic queries: 1-3 sentences covering ONLY that topic.
-- "Give me a briefing" / "status report": Then and ONLY then, cover multiple topics — still keep each to one sentence.
-
-HOW TO ANSWER EACH TOPIC (follow these examples closely):
-- WEATHER: "About 16 degrees in London, mild with a light breeze."
-- STOCKS (general): "Markets are mixed — S&P up half a percent, Tesla leading at 406. Apple dipping."
-- STOCKS (specific, e.g. "how's Microsoft"): "Microsoft is trading at 390, up a tenth of a percent — essentially flat on the day."
-- NEWS: Pick the 1–2 most significant headlines. One sentence each, in your own words.
-- SPORTS: Top headline. One sentence.
-- BUSINESS (GCP, RevenueCat, pipeline, agents, CRM, email): Operational language with the key metric. "MRR at 150k, churn nominal, all services green."
-- SERVICE HEALTH: Report the status directly. Only mention services that are NOT operational.
-- ROADMAP: Reference upcoming milestones by name and date. "Next milestone is the App Store launch on July 15th, about 31 days out."
+- Vague/short queries ("hey", "arbiter"): ONE sentence or ask what they need. No multi-topic dump.
+- Single-topic: 1-3 sentences on ONLY that topic.
+- Strategic/analytical queries: up to 4-5 sentences — include the insight, not just the number.
+- "Give me a briefing" / "status report": cover multiple topics, one sentence each.
 
 CLARIFICATION:
-- If a query is ambiguous or could refer to multiple things (e.g. a company name that could mean the stock, the product, or the org), ASK a brief clarifying question rather than guessing wrong. e.g. "Are we talking the stock or the product line, Sir?"
-- If you lack enough context to give an accurate answer, say so and ask what specifically they need. One short question — never a list of options.
-- When a follow-up question seems disconnected from the prior topic, briefly confirm the shift. e.g. "Switching gears from markets to geopolitics — here's what I've got."
+- ALWAYS attempt to answer the query with the best available data. Do NOT ask clarifying questions unless it is genuinely impossible to give any useful answer.
+- If a name or term could mean multiple things, pick the most likely interpretation given context and answer. Mention the assumption briefly if needed.
+- If a follow-up seems disconnected from the prior topic, just answer the new topic directly.
+
+STRATEGIC ANALYSIS — you are a C-suite intelligence partner, not a data reader. For any data-rich query on ANY domain (stocks, crypto, property, tech, geopolitics, collectibles, anything):
+- Surface the "so what" — what the numbers MEAN for decisions.
+- Flag risks and opportunities with specifics.
+- End with what to DO when actionable advice is warranted.
+- Reference comparisons, benchmarks, macro context where relevant.
+Keep it tight — strategic depth in 3-5 sentences, not a consulting report.
 
 WHAT NOT TO DO:
-- NEVER use bullet points (•, -, *) or numbered lists in your spoken text. This is read aloud — write flowing sentences only.
-- Do NOT open a browser or return a URL unless the user explicitly says "open".
-- Do NOT respond with only a JSON action — always give a spoken answer FIRST, then append actions on new lines.
-- Do NOT dump lists of tickers, key=value pairs, or markdown tables in spoken text.
-- Do NOT start with "Sure", "Of course", "Hello Sir", "Sir Luke", "Certainly", or any greeting — just answer directly.
-- Do NOT wrap JSON actions in code fences or markdown. Just raw JSON on its own line.
-- Do NOT put structured data (tables, lists, charts) in the spoken text — that goes in the show_panel JSON only.
-- Do NOT cover multiple topics unless the user asked for a briefing. Answer ONLY what was asked.
+- NEVER use bullet points (•, -, *) or numbered lists in spoken text.
+- Do NOT start with "Sure", "Of course", "Certainly", or any filler.
+- Do NOT dump raw data (ticker lists, key=value, markdown tables) in spoken text — structured data goes in show_panel JSON only.
+- Do NOT cover multiple topics unless asked for a briefing.
+- Do NOT wrap JSON actions in code fences. Raw JSON on its own line.
+- Do NOT respond with only JSON — always give a spoken answer FIRST.
 
-VISUALISATION PANELS — when the user asks to "show", "graph", "chart", "compare", "break down", or "visualise" data, or when a visual would genuinely help (e.g. comparing multiple stocks, forecast trends, revenue breakdown), respond with a SHORT spoken summary FIRST (1-2 sentences, will be read aloud), then append a show_panel JSON action on its own line. Keep spoken text brief — the panel IS the answer.
+VISUALISATION PANELS — the server builds data panels automatically from your response. Do NOT output show_panel JSON yourself. Instead, when the user asks to "show", "graph", "chart", "compare", or "visualise", pack your spoken response with specific numbers, year-value pairs, percentages, and named categories. The more concrete data points in your text, the richer the auto-generated panel will be. Keep spoken text to 1-2 sentences — the panel IS the answer.
 
-show_panel JSON schema (append on its own line after spoken text):
-{"action":"show_panel","panel":{"title":"PANEL TITLE","stats":[...],"chart":{...},"table":{...},"summary":"..."}}
+MARKET INTELLIGENCE — for tracked stocks, use [ANALYST INTELLIGENCE] in live data. Give specific numbers: consensus, target, upside %, P/E, growth. Intelligence briefing, not a disclaimer.
 
-All fields inside "panel" are optional — include only what fits the query:
-- stats: array of {label, value, status} where status is "good"|"warn"|"bad"|null. Use for KPIs.
-- chart: {type, labels, values} for single dataset OR {type, labels, datasets:[{label,data},...]} for multi. type = "bar"|"line"|"doughnut"|"pie"
-- table: {headers:[...], rows:[[cell,cell,...],...]}.  Prefix positive changes with + and negative with -.
-- summary: one-line analysis text shown below the chart.
+ROADMAP — reference actual milestones from [ROADMAP] data. Be a strategic business partner: suggest priorities, flag risks, identify dependencies.
 
-WHEN TO USE show_panel:
-- "show me stocks in a graph" → bar chart of stock prices with % change table
-- "compare Apple and Tesla" → multi-line chart or bar comparison
-- "break down revenue" → stat cards + bar chart of subscribers/trials/churn
-- "show me the weather forecast" → line chart of temperature trend + stat cards for today
-- "GCP status overview" → stat cards for each service + table of metrics
-- "visualise the news" → table with headlines and categories
-- Market overview, portfolio view, any "show me" / "graph" / "chart" / "visualise" request
+WEB RESEARCH — when [WEB RESEARCH] or [WEB PAGE CONTENT] is provided, treat it as your primary source. Extract specific numbers, trends, comparisons. Synthesise and draw conclusions — don't just summarise.
 
-WHEN NOT to use show_panel:
-- Simple questions like "what's the weather" or "how's Microsoft" — just speak.
-- Unless the user explicitly asks to see/show/graph/chart/visualise it.
-
-MARKET INTELLIGENCE — you have access to enriched analyst data for tracked stocks. When the user asks about a specific stock (e.g. "what do analysts think about Tesla", "is Apple a buy"), use the [ANALYST INTELLIGENCE] section in LIVE DATA. Provide specific numbers: analyst consensus, target price, upside %, forward P/E, revenue growth. Be direct and specific — this is an intelligence briefing, not a disclaimer.
-
-ROADMAP & BUSINESS PLANNING — you have access to the project roadmap in [ROADMAP]. When the user asks about business plans, milestones, or timelines, reference the actual milestones. You can help:
-- Draft and refine milestone descriptions
-- Suggest realistic timelines and priorities
-- Identify risks and dependencies
-- Create go-to-market strategies
-- Plan MVP rollout phases
-Be proactive with strategic advice — the user wants an intelligent business partner, not a generic response.
-
-STRATEGIC ANALYST MODE — You are not just an assistant, you are a C-suite intelligence partner. For ANY data-rich query:
-1. ALWAYS surface the "so what" — don't just report numbers, explain what they MEAN for decision-making.
-2. COMPARE: When the user asks about one thing, proactively mention how it compares to alternatives or benchmarks.
-3. RISKS: Flag potential downsides, market risks, timing concerns. A CEO needs to hear the bad news too.
-4. OPPORTUNITIES: Highlight upside potential, timing advantages, undervalued angles.
-5. ACTIONABLE: End with what to DO — "consider buying below $X", "hold until Q3 earnings", "diversify into Y".
-6. CONTEXT: Reference macro trends, sector movements, seasonal patterns, competitive dynamics.
-This applies to EVERYTHING — stocks, eBay collectibles, social media metrics, crypto, real estate, any domain.
-You are briefing Tony Stark. Be incisive, data-driven, and strategically valuable.
-
-WEB RESEARCH — if web research data is provided in [WEB RESEARCH] or [WEB PAGE CONTENT] sections, USE it heavily. Extract specific numbers, prices, trends, and comparisons from the research to give concrete, data-backed analysis. Don't just summarise — synthesise and draw strategic conclusions.
-
-DESKTOP AUTOMATION — you can open apps and websites for Sir Luke. These are handled automatically by the server when the user says "open X" — you do NOT need to output JSON for these. Just confirm naturally: "Opening Slack for you, Sir." The server handles the execution.
-Supported apps: Slack, VS Code, Chrome, Safari, Terminal, Finder, Spotify, Discord, Teams, Zoom, Messages, Mail, Notes, Calendar, Notion.
-Supported URL shortcuts: jira, github, youtube, gmail, google, twitter/x, linkedin, revenuecat, gcp console.
-The user can also say "open https://any-url.com" to open arbitrary URLs.
-
-BROWSER ACTIONS (only when user says "open X" and it's NOT one of the pre-handled apps/shortcuts above):
-Respond naturally first, then append on a new line: {"action":"open_browser","url":"<url>"}
-URLs: comfyui=http://localhost:8188 | instagram=https://www.instagram.com | youtube=https://studio.youtube.com
-gmail=https://mail.google.com | facebook=https://www.facebook.com | meta=https://business.facebook.com
-analytics=https://analytics.google.com | gcp=https://console.cloud.google.com | revenuecat=https://app.revenuecat.com
-play_console=https://play.google.com/console | app_store=https://appstoreconnect.apple.com
-
-WEB RESEARCH — if the user provides a URL in their message, the page content is automatically fetched and provided in the context below as [WEB PAGE CONTENT]. Use it to answer questions about that page. You can research and summarise web content naturally.
-
-FOLLOW-UP QUESTIONS — After EVERY substantive response (not greetings or one-word answers), append exactly this on a NEW line after your spoken text:
-[FOLLOWUPS]
-Generate 3-4 follow-up questions the user might want to ask next. Each explores a different angle:
-- DEEPER: drill into specifics of what was discussed
-- COMPARE: how does it compare to alternatives/competitors
-- ACTION: what should I do with this information
-- BROADER: zoom out to the bigger picture
-Format: [FOLLOWUPS][{"text":"question under 12 words","hint":"deeper"},{"text":"...","hint":"compare"},{"text":"...","hint":"action"},{"text":"...","hint":"broader"}]
-Keep questions specific to the topic, not generic. The [FOLLOWUPS] tag and JSON MUST be on a single line."""
+DESKTOP & BROWSER — "open X" is handled server-side. Just confirm naturally: "Opening Slack for you." For URLs not pre-handled, append: {"action":"open_browser","url":"<url>"}
+Known shortcuts: comfyui=http://localhost:8188 | instagram=https://www.instagram.com | youtube=https://studio.youtube.com | gmail=https://mail.google.com | facebook=https://www.facebook.com | meta=https://business.facebook.com | analytics=https://analytics.google.com | gcp=https://console.cloud.google.com | revenuecat=https://app.revenuecat.com | play_console=https://play.google.com/console | app_store=https://appstoreconnect.apple.com"""
 
 
 @asynccontextmanager
@@ -944,28 +1103,56 @@ async def dashboard():
 # ── System Status ─────────────────────────────────────────────────────
 @app.get("/api/status")
 async def system_status():
-    # Check LLM availability
+    # Check LLM availability — try Claude first, then Ollama, then OpenAI
     llm_online = False
     llm_provider = LLM_PROVIDER
-    if LLM_PROVIDER == "ollama":
-        try:
-            r = httpx.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=2)
-            llm_online = r.status_code == 200
-        except Exception:
-            pass
-        if not llm_online and oai:
-            llm_provider = "openai"
-            llm_online = True
-    elif oai:
+
+    # Claude check
+    if ANTHROPIC_API_KEY and (LLM_PROVIDER == "claude" or _claude_check_budget() is None):
+        llm_online = True
+        llm_provider = "claude"
+
+    # Ollama check (fallback or primary)
+    if not llm_online:
+        if LLM_PROVIDER == "ollama" or not llm_online:
+            try:
+                r = httpx.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=2)
+                if r.status_code == 200:
+                    llm_online = True
+                    llm_provider = "ollama"
+            except Exception:
+                pass
+
+    # OpenAI check (last resort)
+    if not llm_online and oai:
+        llm_provider = "openai"
         llm_online = True
 
     return {
         "timestamp": datetime.utcnow().isoformat(),
-        "systems": {
-
-        },
+        "systems": {},
         "llm_status": "online" if llm_online else "offline",
         "llm_provider": llm_provider,
+    }
+
+
+@app.get("/api/claude-usage")
+async def claude_usage():
+    """Return current Claude API usage and safeguard status."""
+    u = _claude_usage
+    block = _claude_check_budget()
+    return {
+        "configured": bool(ANTHROPIC_API_KEY),
+        "model": _CLAUDE_MODEL,
+        "daily_budget_usd": _CLAUDE_DAILY_BUDGET_USD,
+        "daily_cost_usd": round(u["daily_cost_usd"], 4),
+        "daily_input_tokens": u["daily_input_tokens"],
+        "daily_output_tokens": u["daily_output_tokens"],
+        "session_requests": u["session_requests"],
+        "session_limit": _CLAUDE_SESSION_LIMIT,
+        "rpm_limit": _CLAUDE_RPM_LIMIT,
+        "blocked": block,
+        "circuit_breaker": "open" if u["circuit_open_until"] and datetime.utcnow() < u["circuit_open_until"] else "closed",
     }
 
 
@@ -1705,6 +1892,32 @@ _TOPIC_RULES = {
                      "design a api", "design a class", "design a module",
                      "draw conclusions", "draw a diagram", "draw from"],
     },
+    "collectables": {
+        "phrases": ["pokemon card", "pokemon cards", "trading card", "trading cards",
+                    "sports card", "sports cards", "baseball card", "football card",
+                    "magic the gathering", "mtg card", "yu-gi-oh", "yugioh",
+                    "psa 10", "psa grade", "bgs grade", "cgc grade",
+                    "card value", "card price", "card worth", "graded card",
+                    "first edition", "1st edition", "base set", "holographic",
+                    "collectable price", "collectible price", "collectables market",
+                    "vintage toy", "coin collection", "stamp collection",
+                    "funko pop", "action figure value", "lego set value"],
+        "words":   ["pokemon", "charizard", "pikachu", "mewtwo", "collectables",
+                    "collectibles", "tcgplayer", "pricecharting"],
+        "negative": ["pokemon go app", "pokemon game review", "play pokemon",
+                     "watch pokemon", "pokemon anime", "collect data", "collect the"],
+    },
+    "products": {
+        "phrases": ["find me", "where can i buy", "cheapest price", "price compare",
+                    "price comparison", "best deal", "best price", "lowest price",
+                    "shop for", "shopping for", "buy online", "purchase online",
+                    "how much does", "how much is a", "where to buy",
+                    "find a deal", "deal on", "deals for", "discount on"],
+        "words":   [],
+        "negative": ["best price for stocks", "price target", "price action",
+                     "buy the dip", "buy signal", "best deal for investors",
+                     "price to earnings", "price earnings", "buy rating"],
+    },
 }
 
 # Pre-compile word-boundary patterns for speed
@@ -1743,6 +1956,15 @@ _VIZ_MATRIX = {
     ("roadmap", "trend"):      "table",
     ("news", "snapshot"):     "table",
     ("sports", "snapshot"):   "table",
+    ("collectables", "snapshot"):  "table",
+    ("collectables", "trend"):     "line",
+    ("collectables", "compare"):   "hbar",
+    ("collectables", "detail"):    "table",
+    ("collectables", "rank"):      "hbar",
+    ("products", "snapshot"):      "table",
+    ("products", "compare"):       "hbar",
+    ("products", "rank"):          "hbar",
+    ("products", "detail"):        "table",
 }
 
 
@@ -1818,7 +2040,7 @@ def _select_viz(topic: str, intent: str) -> str:
 # ── Per-topic panel builders (intent-aware) ───────────────────────────
 
 def _detect_stock_symbol(query: str) -> str | None:
-    """Detect if the user is asking about a specific stock."""
+    """Detect if the user is asking about a specific stock (returns first match)."""
     q = query.lower()
     _name_to_sym = {v.lower(): k for k, v in _TICKER_NAMES.items() if not k.startswith("^")}
     # Check ticker symbols (word boundary to avoid false matches)
@@ -1830,6 +2052,27 @@ def _detect_stock_symbol(query: str) -> str | None:
         if re.search(r'\b' + re.escape(name) + r's?\b', q):
             return sym
     return None
+
+
+def _detect_all_stock_symbols(query: str) -> list[str]:
+    """Detect ALL stock symbols mentioned in a query. Returns list of symbols."""
+    q = query.lower()
+    _name_to_sym = {v.lower(): k for k, v in _TICKER_NAMES.items() if not k.startswith("^")}
+    found = []
+    seen = set()
+    # Check ticker symbols
+    for sym in STOCK_SYMBOLS:
+        if not sym.startswith("^") and re.search(r'\b' + re.escape(sym.lower()) + r'\b', q):
+            if sym not in seen:
+                found.append(sym)
+                seen.add(sym)
+    # Check company names
+    for name, sym in _name_to_sym.items():
+        if re.search(r'\b' + re.escape(name) + r's?\b', q):
+            if sym not in seen:
+                found.append(sym)
+                seen.add(sym)
+    return found
 
 
 def _detect_time_range(query: str) -> tuple[str, str] | None:
@@ -1937,10 +2180,17 @@ async def _panel_stocks(intent: str, query: str = "") -> dict | None:
         quotes = s["quotes"]
         await refresh_market_intel()
 
-        # Check if user is asking about a specific stock
-        target_sym = _detect_stock_symbol(query) if query else None
+        # Check if user is asking about specific stocks
+        _all_mentioned = _detect_all_stock_symbols(query) if query else []
+        target_sym = _all_mentioned[0] if _all_mentioned else None
         intel = _market_intel_cache.get(target_sym) if target_sym else None
-        log.info(f"_panel_stocks: query={query[:80]!r}, target_sym={target_sym}, intel={'yes' if intel else 'no'}, intent={intent}")
+        _is_multi = len(_all_mentioned) > 1
+        log.info(f"_panel_stocks: query={query[:80]!r}, target_sym={target_sym}, multi={_is_multi}, stocks={_all_mentioned}, intel={'yes' if intel else 'no'}, intent={intent}")
+
+        # ── Multi-company query → return None, let dynamic panel handle it ──
+        if _is_multi:
+            log.info(f"_panel_stocks: multi-company query ({_all_mentioned}) — returning None for dynamic panel")
+            return None
 
         # ── Check for historical time range request ──
         time_range = _detect_time_range(query) if query else None
@@ -2131,11 +2381,27 @@ async def _panel_stocks(intent: str, query: str = "") -> dict | None:
         # ── Check if user is asking about a SPECIFIC company not in our tracked list ──
         # If so, return None — the dynamic panel builder will handle it with web research
         # instead of showing an irrelevant generic market ranking.
+        # Check proper nouns (capitalised) AND known company names (any case)
         _proper_nouns = re.findall(r'\b([A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,})*)\b', query)
         _ignore = {"What", "Why", "How", "Which", "Where", "Who", "When", "Tell", "Show",
                     "Give", "Can", "Could", "Would", "Should", "The", "This", "That",
                     "Their", "There", "These", "Has", "Have", "Does", "Did"}
         _specific_subject = [n for n in _proper_nouns if n.split()[0] not in _ignore]
+        # Also detect lowercase company-like words not in tracked stocks
+        if not _specific_subject:
+            _q_words = set(re.findall(r'\b([a-z]{3,})\b', query.lower()))
+            _tracked_lower = {v.lower() for v in _TICKER_NAMES.values()}
+            _common = {"the", "and", "for", "are", "how", "has", "have", "does", "did",
+                       "will", "can", "could", "would", "should", "what", "where", "when",
+                       "which", "who", "why", "show", "give", "tell", "want", "need",
+                       "stock", "stocks", "market", "invest", "compare", "view", "their",
+                       "next", "year", "years", "idea", "get", "about", "with", "from",
+                       "into", "over", "that", "this", "them", "they", "also", "been",
+                       "curious", "understand", "portfolio", "investment", "strategic",
+                       "placements", "trajectory", "breakdown", "full", "chip"}
+            _unknown_subjects = _q_words - _tracked_lower - _common
+            # If there are unrecognised proper-looking words that could be company names
+            # this is intentionally conservative — only triggers for clearly untracked subjects
         if _specific_subject:
             log.info(f"_panel_stocks: user asked about '{_specific_subject[0]}' which is not in tracked stocks — returning None for dynamic panel")
             return None
@@ -2749,68 +3015,96 @@ async def _enrich_panel(panel: dict, topic: str) -> dict:
 
 # ── Dynamic Panel Builder (LLM-generated for ANY topic) ─────────────
 
-_PANEL_SCHEMA_PROMPT = """You are a senior strategic analyst building a CEO/CFO intelligence dashboard panel.
-Given a user query and research data, generate a COMPREHENSIVE structured JSON panel. Output ONLY valid JSON.
+# ── Canonical panel component keys — single source of truth ──────────
+# Mirrors the left/right wing split in the JS renderer (_renderAnalysisPanel).
+# Any new component type must be added here AND in _renderSection in jarvis.js.
+#
+#  LEFT WING  — visualisations rendered in the left analysis panel
+#  RIGHT WING — metrics/narrative rendered in the right analysis panel
+#
+_PANEL_LEFT_KEYS: frozenset[str] = frozenset({
+    "chart", "table", "comparison_matrix", "heatmap", "quadrant", "calendar_heatmap", "image_url",
+})
+_PANEL_RIGHT_KEYS: frozenset[str] = frozenset({
+    "hero", "status_grid", "stats", "key_metrics", "trend_indicators",
+    "gauges", "funnel", "scorecard", "risk_matrix",
+    "swot", "pros_cons", "insights", "recommendations", "timeline",
+})
+# All mergeable keys (excludes title/summary — those are merged separately)
+_PANEL_MERGE_KEYS: frozenset[str] = _PANEL_LEFT_KEYS | _PANEL_RIGHT_KEYS
 
-AVAILABLE COMPONENTS — use AT LEAST 5-6 of these for every panel. More is better.
 
-{
-  "title": "PANEL TITLE IN CAPS",
+# Compact schema prompt — ~40% fewer tokens than a verbose example-based prompt.
+# Uses type-annotation style so the model sees exact key names and value shapes
+# without prose commentary eating into the token budget.
+_PANEL_SCHEMA_PROMPT = """\
+You are a strategic dashboard analyst. Output ONLY valid JSON — no markdown fences, no explanation.
 
-  "hero": {"value": "$999", "label": "Primary Metric", "delta": "+12%", "delta_status": "good|bad"},
+PANEL SCHEMA (exact key names required; ? = optional):
 
-  "key_metrics": [{"label": "METRIC", "value": "$1.2M", "status": "good|warn|bad|null", "context": "vs $1.1M last quarter"}],
+  title           "CAPS STRING"
+  summary         "one executive sentence"
 
-  "stats": [{"label": "KPI NAME", "value": "$1,234", "status": "good|warn|bad|null"}],
+  hero            {value:str, label:str, delta?:str, delta_status?:"good"|"bad"}
+  status_grid     [{label:str, value:str, status:"good"|"warn"|"bad"|"unknown"}]
+  stats           [{label:str, value:str, status?:"good"|"warn"|"bad"}]
+  key_metrics     [{label:str, value:str, status?:"good"|"warn"|"bad", context?:str}]
+  trend_indicators [{label:str, value:str, direction:"up"|"down"|"flat", context?:str}]
+  gauges          [{label:str, value:0-100, display:str, context?:str}]
+  funnel          [{label:str, value:0-100, display:str, pct:str}]
+  scorecard       [{label:str, score:0-100, value:str}]
+  risk_matrix     [{severity:"critical"|"high"|"medium"|"low", risk:str, mitigation:str}]
+  swot            {strengths:[str], weaknesses:[str], opportunities:[str], threats:[str]}
+  pros_cons       {pros:[str], cons:[str]}
+  insights        [{type:"risk"|"opportunity"|"warning"|"info", text:str}]
+  recommendations [{priority:"high"|"medium"|"low", text:str}]
+  timeline        [{date:str, event:str, status:"done"|"active"|"pending", detail?:str}]
 
-  "chart": {"type": "bar|line|hbar|doughnut|area", "labels": [...], "values": [...], "label": "axis label"}
-    OR multi-dataset: {"type": "line", "labels": [...], "datasets": [{"label": "...", "data": [...]}]},
+  chart           single-series: {type, labels:[str], values:[num], label?:str}
+                  multi-series:  {type, labels:[str], datasets:[{label:str, data:[num]}]}
+                  type = bar|hbar|line|area|doughnut|radar|stacked|scatter|bubble|polarArea|waterfall|candlestick
+                  radar:       labels=axes, datasets=entities (scores 0-100 each)
+                  scatter:     datasets=[{label:str, data:[{x,y}]}], xLabel?:str, yLabel?:str
+                  waterfall:   data=[{label:str, value:num, type:"pos"|"neg"|"total", display?:str}]
+                  candlestick: data=[{date:str, o:num, h:num, l:num, c:num}], label?:str
 
-  "table": {"headers": ["Col1", "Col2", ...], "rows": [["val", "val"], ...]},
+  table           {headers:[str], rows:[[str]]}
+  comparison_matrix {columns:[str], rows:[[str]]}
+  heatmap         {title:str, columns:[str], rows:[{label:str, values:[0-100]}]}
+  quadrant        {title:str, x_axis:str, y_axis:str,
+                   quadrant_labels:[str,str,str,str],
+                   points:[{label:str, x:0-100, y:0-100, size?:8-24}]}
+  calendar_heatmap {title:str, unit?:str, data:[{date:"YYYY-MM-DD", value:num, label?:str}]}
 
-  "comparison_matrix": {"columns": ["Metric", "Item A", "Item B"], "rows": [["Price", "$100", "$200"], ["Rating", "BUY", "HOLD"]]},
+SELECTION RULES — match components to query intent:
+  comparison/vs      → radar + comparison_matrix + heatmap
+  investment/buy     → gauges + risk_matrix + scorecard + recommendations
+  market share       → doughnut chart + heatmap + funnel
+  positioning        → quadrant + radar
+  trend/time-series  → trend_indicators + line|area chart + key_metrics
+  company/product    → swot + scorecard + gauges
+  financial/OHLC     → candlestick chart + stats
+  revenue changes    → waterfall chart + trend_indicators + stats
+  correlation        → scatter chart + insights
+  activity/daily     → calendar_heatmap + trend_indicators
+  health/status      → status_grid + stats
+  collectables/cards → table (prices by condition/grade) + line chart (price trend) + stats + insights
+  products/shopping  → table (retailer, price, link) + hbar (price comparison) + stats + recommendations
+  ALWAYS include     → insights (3-5 with data) + recommendations (2-4 actionable) + summary
+  MINIMUM 5 components. Extract every number/% /date. Prefix changes with + or -.
 
-  "pros_cons": {"pros": ["Strong growth trajectory", "Market leader"], "cons": ["High valuation", "Regulatory risk"]},
-
-  "swot": {"strengths": ["Brand power", "Cash reserves"], "weaknesses": ["High debt"], "opportunities": ["New market entry"], "threats": ["Competition"]},
-
-  "risk_matrix": [{"severity": "high|medium|low|critical", "risk": "Description of risk", "mitigation": "How to mitigate"}],
-
-  "scorecard": [{"label": "Growth", "score": 85, "value": "Strong"}, {"label": "Value", "score": 40, "value": "Expensive"}],
-
-  "insights": [{"type": "risk|opportunity|warning|info", "text": "Strategic observation with specific data..."}],
-
-  "recommendations": [{"priority": "high|medium|low", "text": "Specific actionable step with numbers..."}],
-
-  "trend_indicators": [{"label": "Revenue", "value": "+12%", "direction": "up|down|flat", "context": "Q2 vs Q1"}],
-
-  "timeline": [{"date": "Jun 2024", "event": "Product Launch", "status": "done|active|pending", "detail": "Optional detail"}],
-
-  "summary": "One-line executive summary."
-}
-
-CRITICAL RULES:
-1. USE 5+ COMPONENTS MINIMUM. A panel with just stats and a chart is UNACCEPTABLE. Always include strategic components.
-2. ALWAYS include insights (3-5 items). Each must reference SPECIFIC data points, not generic statements.
-3. ALWAYS include recommendations (2-4 items). Each must be ACTIONABLE with specific numbers/thresholds.
-4. For ANY comparison query: MUST include comparison_matrix AND pros_cons.
-5. For investment/buy/sell queries: MUST include risk_matrix AND scorecard AND recommendations.
-5b. For investment ALLOCATION / FOCUS AREA queries (e.g. "where is Apple investing", "investment areas"): MUST include a doughnut chart showing allocation breakdown by area (e.g. Services 30%, AI/ML 25%, AR/VR 20%, Hardware 15%, Autonomous 10%) with key_metrics for each area. Use estimated percentages based on research data.
-6. For trend/market queries: MUST include trend_indicators AND chart AND key_metrics.
-7. For product/company analysis: MUST include swot AND scorecard.
-8. Extract EVERY number, price, percentage, date from the context data. Missing data = failed analysis.
-9. Think like McKinsey + Goldman Sachs: strategic depth, competitive positioning, timing, risk-adjusted returns.
-10. Prefix positive changes with + and negative with -.
-11. key_metrics is for the most important 4-6 headline numbers with context (vs benchmarks, vs last period).
-12. Output ONLY the JSON object. No markdown fences, no explanation, just the JSON."""
+  For product/collectable tables: include clickable buy links as "Store → URL" pairs in a dedicated column.
+  For price comparisons: sort by price ascending so cheapest appears first.\
+"""
 
 
 def _panel_from_reply(user_msg: str, llm_reply: str) -> dict | None:
     """Build a visualization panel by extracting data from the LLM reply text.
-    Zero LLM calls — pure regex extraction. Instant."""
+    Zero LLM calls — pure regex extraction. Instant.
+    Returns a BASIC scaffold (stats, chart, table). Always pair with _panel_dynamic
+    for rich strategic components (insights, swot, recommendations, etc.)."""
     try:
         # ── Extract year-value pairs for timeline charts ──
-        # Patterns: "in 2018 it was $45", "by 2022 reached $120", "2020: $80B", etc.
         year_val_pairs = []
         # Pattern 1: "in/by/around YYYY ... $X" or "YYYY ... $X"
         for m in re.finditer(
@@ -2822,15 +3116,30 @@ def _panel_from_reply(user_msg: str, llm_reply: str) -> dict | None:
             val_str = m.group(2).replace(',', '')
             try:
                 val = float(val_str)
-                # Scale B/M/T
                 suffix = llm_reply[m.end()-10:m.end()+5].lower()
                 if 'trillion' in suffix or ' t ' in suffix:
                     val *= 1000
-                elif 'billion' in suffix or val < 1 and 'b' in suffix:
-                    pass  # keep as billions
                 year_val_pairs.append((year, val))
             except ValueError:
                 pass
+
+        # Pattern 2: "$X billion/million in YYYY" (reversed order Claude often uses)
+        if len(year_val_pairs) < 3:
+            for m in re.finditer(
+                r'[\$₩€£]\s*([\d,]+(?:\.\d+)?)\s*(?:billion|million|trillion|B|M|T)?\s+'
+                r'(?:in|by|around|as of|during)\s+(20[12]\d)\b',
+                llm_reply, re.IGNORECASE
+            ):
+                val_str = m.group(1).replace(',', '')
+                year = int(m.group(2))
+                try:
+                    val = float(val_str)
+                    suffix = llm_reply[m.start():m.start()+40].lower()
+                    if 'trillion' in suffix or ' t ' in suffix:
+                        val *= 1000
+                    year_val_pairs.append((year, val))
+                except ValueError:
+                    pass
 
         # Deduplicate by year (keep first occurrence)
         seen_years = set()
@@ -2841,33 +3150,74 @@ def _panel_from_reply(user_msg: str, llm_reply: str) -> dict | None:
                 unique_pairs.append((y, v))
 
         # ── Extract percentage stats ──
+        # Handles: "OpenAI commanding 35%", "Google at 18–22%", "growth of 34%", "P/E of 28.4"
         pct_stats = []
-        for m in re.finditer(r'([\w\s]{3,30}?)\s+(?:of\s+)?([\d,.]+)\s*%', llm_reply):
-            label = m.group(1).strip().rstrip('of by at to')[:30]
-            val = m.group(2)
-            if label and len(label) > 2:
-                pct_stats.append({"label": label.title(), "value": f"{val}%", "status": None})
+        # Pattern A: "Entity/Label ... X%" — look BACKWARDS from each percentage
+        for m in re.finditer(r'([A-Z][\w\'\-]+(?:\s+[\w\'\-]+){0,4})\s+(?:at|of|with|commanding|captures?|holds?|maintains?|commands?)?\s*(?:approximately|roughly|about|around|~)?\s*(\d+(?:\.\d+)?(?:\s*[–\-]\s*\d+(?:\.\d+)?)?)\s*%', llm_reply):
+            label = m.group(1).strip()[:30]
+            val = m.group(2).replace(' ', '')
+            # For ranges like "35-40", take the midpoint for display but show range
+            if '–' in val or '-' in val:
+                parts = re.split(r'[–\-]', val)
+                display_val = f"{parts[0]}–{parts[1]}%"
+            else:
+                display_val = f"{val}%"
+            if label and len(label) > 1:
+                pct_stats.append({"label": label.title(), "value": display_val, "status": None})
+        # Pattern B: fallback — "X% of something" or "X% YoY/growth"
+        if len(pct_stats) < 2:
+            for m in re.finditer(r'(\d+(?:\.\d+)?)\s*%\s+(?:of\s+)?([A-Za-z][\w\s]{2,25}?)(?:\.|,|;|\s+(?:and|while|though|but|yet))', llm_reply):
+                val = m.group(1)
+                label = m.group(2).strip()[:30]
+                if label and len(label) > 2:
+                    pct_stats.append({"label": label.title(), "value": f"{val}%", "status": None})
 
         # ── Extract dollar amounts as stats ──
         dollar_stats = []
-        for m in re.finditer(r'([\w\s]{3,30}?)\s+(?:of|at|to|was|is|reached|hit)?\s*\$\s*([\d,.]+)\s*(billion|million|trillion|B|M|T)?',
-                             llm_reply, re.IGNORECASE):
+        for m in re.finditer(
+            r'([A-Z][\w\'\-]+(?:\s+[\w\'\-]+){0,3})\s+(?:at|of|to|was|is|reached|hit|valued at|worth|standing at)?\s*'
+            r'\$\s*([\d,.]+)\s*(billion|million|trillion|B|M|T)?',
+            llm_reply, re.IGNORECASE
+        ):
             label = m.group(1).strip()[:30]
             val = m.group(2)
             unit = (m.group(3) or "").upper()[:1]
-            if label and len(label) > 2:
+            if label and len(label) > 1:
                 dollar_stats.append({"label": label.title(), "value": f"${val}{unit}", "status": None})
+
+        # ── Extract comparison data for bar charts ──
+        # Look for "Entity at/with X%" patterns to build comparison bar chart
+        comp_entries = []
+        for m in re.finditer(
+            r'([A-Z][\w\'\-]+(?:\s+[\w\'\-]+){0,2})\s+(?:commanding|at|with|captures?|holds?|maintains?|commands?)\s+'
+            r'(?:approximately|roughly|about|around|~)?\s*(\d+(?:\.\d+)?(?:\s*[–\-]\s*\d+(?:\.\d+)?)?)\s*%',
+            llm_reply
+        ):
+            name = m.group(1).strip()
+            val_str = m.group(2).replace(' ', '')
+            # For ranges, take midpoint
+            if '–' in val_str or '-' in val_str:
+                parts = re.split(r'[–\-]', val_str)
+                val = (float(parts[0]) + float(parts[1])) / 2
+            else:
+                val = float(val_str)
+            comp_entries.append((name, val))
 
         # ── Build panel ──
         panel = {"title": "RESEARCH ANALYSIS"}
 
-        # Extract subject for title
-        _proper = re.findall(r'\b([A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,})*)\b', user_msg)
-        _ignore = {"What", "Why", "How", "Which", "Where", "Who", "When", "Tell", "Show",
-                    "Give", "Can", "Could", "Would", "Should", "The", "Has", "Have"}
-        _subj = [n for n in _proper if n.split()[0] not in _ignore]
+        # Extract subject for title — handle any capitalisation
+        _detected = _detect_all_stock_symbols(user_msg)
+        _subj_names = [_TICKER_NAMES.get(s, s) for s in _detected]
+        if not _subj_names:
+            _proper = re.findall(r'\b([A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,})*)\b', user_msg)
+            _ignore = {"What", "Why", "How", "Which", "Where", "Who", "When", "Tell", "Show",
+                        "Give", "Can", "Could", "Would", "Should", "The", "Has", "Have", "Does", "Did"}
+            _subj_names = [n for n in _proper if n.split()[0] not in _ignore]
+        _subj = _subj_names  # Keep variable name for downstream references
         if _subj:
-            panel["title"] = f"{_subj[0].upper()} — RESEARCH ANALYSIS"
+            _title_str = " vs ".join(s.upper() for s in _subj[:4]) if len(_subj) > 1 else _subj[0].upper()
+            panel["title"] = f"{_title_str} — RESEARCH ANALYSIS"
 
         # Timeline chart from year-value pairs
         if len(unique_pairs) >= 3:
@@ -2876,9 +3226,24 @@ def _panel_from_reply(user_msg: str, llm_reply: str) -> dict | None:
                 "labels": [str(y) for y, _ in unique_pairs],
                 "datasets": [{"label": _subj[0] if _subj else "Value", "data": [v for _, v in unique_pairs]}],
             }
+        # Comparison bar chart from entity-percentage pairs (market share breakdowns, etc.)
+        elif len(comp_entries) >= 3:
+            panel["chart"] = {
+                "type": "hbar",
+                "labels": [name for name, _ in sorted(comp_entries, key=lambda x: -x[1])],
+                "values": [val for _, val in sorted(comp_entries, key=lambda x: -x[1])],
+                "label": "Market Share %",
+            }
 
-        # Stats (take best from percentages and dollars, max 6)
-        all_stats = (pct_stats + dollar_stats)[:6]
+        # Deduplicate stats by label
+        _seen_labels = set()
+        deduped_stats = []
+        for s in (pct_stats + dollar_stats):
+            _key = s["label"].lower()
+            if _key not in _seen_labels:
+                _seen_labels.add(_key)
+                deduped_stats.append(s)
+        all_stats = deduped_stats[:8]
         if all_stats:
             panel["stats"] = all_stats
 
@@ -2888,12 +3253,57 @@ def _panel_from_reply(user_msg: str, llm_reply: str) -> dict | None:
 
         # Only return if we have meaningful content
         if panel.get("chart") or len(all_stats) >= 2:
-            log.info(f"_panel_from_reply: built panel with {len(unique_pairs)} data points, {len(all_stats)} stats")
+            log.info(f"_panel_from_reply: built panel with {len(unique_pairs)} data points, {len(comp_entries)} comparisons, {len(all_stats)} stats")
             return panel
         return None
     except Exception as e:
         log.debug(f"_panel_from_reply failed: {e}")
         return None
+
+
+def _repair_truncated_json(s: str) -> str:
+    """Best-effort repair of JSON truncated by a token limit.
+
+    Walks the string character-by-character to track open braces/brackets and
+    string state, then appends the minimum closing tokens needed to produce
+    syntactically valid JSON.  A final `json.loads()` in the caller will still
+    raise if the content is fundamentally malformed (not just truncated).
+    """
+    stack: list[str] = []   # '{' or '['
+    in_str = False
+    escaped = False
+
+    for ch in s:
+        if escaped:
+            escaped = False
+            continue
+        if ch == '\\' and in_str:
+            escaped = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch in ('{', '['):
+            stack.append(ch)
+        elif ch == '}' and stack and stack[-1] == '{':
+            stack.pop()
+        elif ch == ']' and stack and stack[-1] == '[':
+            stack.pop()
+
+    # Close any open string first
+    if in_str:
+        s += '"'
+
+    # Strip trailing incomplete key/value fragments (e.g. a dangling comma or colon)
+    s = s.rstrip().rstrip(',').rstrip(':').rstrip('"').rstrip()
+
+    # Close all open containers in reverse order
+    for opener in reversed(stack):
+        s += '}' if opener == '{' else ']'
+
+    return s
 
 
 async def _panel_dynamic(user_msg: str, llm_reply: str, extra_ctx: str = "") -> dict | None:
@@ -2917,32 +3327,30 @@ async def _panel_dynamic(user_msg: str, llm_reply: str, extra_ctx: str = "") -> 
             )},
         ]
 
-        panel_json = None
-        # Try Ollama first (free), then OpenAI
-        if LLM_PROVIDER == "ollama":
-            panel_json = await _chat_ollama(messages, max_tokens=900)
-        if not panel_json and oai:
-            try:
-                resp = oai.chat.completions.create(
-                    model=os.getenv("OPENAI_MODEL", "gpt-4o"),
-                    messages=messages,
-                    max_tokens=1500,
-                    temperature=0.3,
-                )
-                panel_json = resp.choices[0].message.content.strip()
-            except Exception:
-                pass
+        panel_json = await _chat_llm(messages, max_tokens=3500, temperature=0.3, purpose="panel")
 
         if not panel_json:
             return None
 
-        # Extract JSON from response (LLM sometimes wraps in markdown)
-        import re as _re_panel
-        panel_json = _re_panel.sub(r'^```(?:json)?\s*', '', panel_json)
-        panel_json = _re_panel.sub(r'```\s*$', '', panel_json)
-        panel_json = panel_json.strip()
+        # Extract JSON from response (LLM sometimes wraps in markdown or adds preamble)
+        # Try to extract JSON from markdown code fences first
+        _fence_match = re.search(r'```(?:json)?\s*\n?([\s\S]*?)\n?```', panel_json)
+        if _fence_match:
+            panel_json = _fence_match.group(1).strip()
+        else:
+            # No fences — try to find the JSON object directly
+            _json_start = panel_json.find('{')
+            _json_end = panel_json.rfind('}')
+            if _json_start != -1 and _json_end > _json_start:
+                panel_json = panel_json[_json_start:_json_end + 1]
+            panel_json = panel_json.strip()
 
-        panel = json.loads(panel_json)
+        try:
+            panel = json.loads(panel_json)
+        except json.JSONDecodeError:
+            # LLM output was likely truncated — attempt to repair by closing open structures
+            panel_json = _repair_truncated_json(panel_json)
+            panel = json.loads(panel_json)  # re-raises if still broken
 
         # Validate: must be a dict with at least a title
         if not isinstance(panel, dict) or not panel.get("title"):
@@ -2951,8 +3359,11 @@ async def _panel_dynamic(user_msg: str, llm_reply: str, extra_ctx: str = "") -> 
         log.info(f"Dynamic panel generated: {panel.get('title', '?')}")
         return panel
 
-    except (json.JSONDecodeError, Exception) as e:
-        log.warning(f"Dynamic panel generation failed: {e}")
+    except json.JSONDecodeError as e:
+        log.warning(f"Dynamic panel JSON parse failed: {e} — raw start: {panel_json[:200]!r}")
+        return None
+    except Exception as e:
+        log.warning(f"Dynamic panel generation failed: {type(e).__name__}: {e}")
         return None
 
 
@@ -3350,6 +3761,16 @@ async def jarvis_chat(request: Request):
             if hist_topic:
                 topic = hist_topic
 
+    # ── CLAUDE TOOL-CALLING PATH (primary when API key is configured) ──────
+    # Claude receives tools and pulls only the data it needs — no pre-fetching,
+    # no bloated context. Falls back to the Ollama path below on failure.
+    if ANTHROPIC_API_KEY and not _claude_check_budget():
+        _claude_result = await _jarvis_chat_claude(user_msg, history, topic)
+        if _claude_result is not None:
+            return _claude_result
+        log.warning("Claude tool path returned None — falling back to Ollama path")
+
+    # ── OLLAMA / LEGACY PATH ─────────────────────────────────────────────
     # Build context — topic-aware (fast & small) when topic is known
     ctx = await _get_context_fast(topic=topic, query=user_msg)
 
@@ -3577,22 +3998,42 @@ async def jarvis_chat(request: Request):
     if _needs_research:
             wants_panel = True  # Force panel for research queries
             _has_research = True
-            # ── Extract the SUBJECT from current message first, then history ──
+            # ── Extract the SUBJECT(s) from current message first, then history ──
             _topic_subject = None
-            # Check current message for a company/product name
-            _cur_sym = _detect_stock_symbol(user_msg)
-            if _cur_sym:
-                _topic_subject = _TICKER_NAMES.get(_cur_sym, _cur_sym)
-            # Also look for ANY capitalised proper nouns as potential subjects
+            _all_subjects = []  # For multi-company queries
+            # Check current message for company/product names (detect ALL)
+            _all_syms = _detect_all_stock_symbols(user_msg)
+            if _all_syms:
+                _all_subjects = [_TICKER_NAMES.get(s, s) for s in _all_syms]
+                _topic_subject = " vs ".join(_all_subjects) if len(_all_subjects) > 1 else _all_subjects[0]
+                log.info(f"Multi-company detected: {_all_subjects} → subject='{_topic_subject}'")
+            # Also look for proper nouns OR meaningful lowercase words as subjects
             if not _topic_subject:
+                # Try capitalised proper nouns first
                 _proper_nouns = re.findall(r'\b([A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,})*)\b', user_msg)
-                # Filter out common sentence starters
                 _ignore_words = {"What", "Why", "How", "Which", "Where", "Who", "When",
                                  "Tell", "Show", "Give", "Can", "Could", "Would", "Should",
                                  "The", "This", "That", "Their", "There", "These"}
                 _proper_nouns = [n for n in _proper_nouns if n.split()[0] not in _ignore_words]
                 if _proper_nouns:
                     _topic_subject = _proper_nouns[0]
+                    _all_subjects = _proper_nouns[:4]
+                else:
+                    # Fallback: extract key nouns from lowercase input
+                    # Strip common filler words and use remaining meaningful terms
+                    _cleaned = re.sub(
+                        r'\b(i|me|my|am|is|are|was|were|be|been|do|does|did|have|has|had|'
+                        r'will|would|could|should|can|may|might|shall|must|need|want|'
+                        r'the|a|an|of|in|on|at|to|for|with|from|by|about|into|through|'
+                        r'and|or|but|if|so|yet|nor|not|no|its|their|them|they|that|this|'
+                        r'what|where|when|which|who|why|how|show|give|tell|get|'
+                        r'curious|understand|idea|view|full|next|also|just|really|very)\b',
+                        '', user_msg.lower(), flags=re.IGNORECASE
+                    ).strip()
+                    _cleaned = re.sub(r'\s+', ' ', _cleaned).strip(' .,?!')
+                    if _cleaned and len(_cleaned) > 2:
+                        _topic_subject = _cleaned[:60]
+                        log.info(f"Extracted subject from lowercase input: '{_topic_subject}'")
             # Fall back to conversation history
             if not _topic_subject and topic and history and len(history) >= 2:
                 for h in reversed(history[-4:]):
@@ -3635,58 +4076,80 @@ async def jarvis_chat(request: Request):
             _q_lower = user_msg.lower()
             _subject_str = _topic_subject if _topic_subject else " ".join(base_query.split()[:4])
 
-            # Base query always includes current year for freshness
-            search_queries = [f"{base_query[:100]} {_cur_year}"]
-
-            # Detect time-based queries — add historical + current angle
-            _time_match = re.search(r'\b(\d+)\s*years?|decade|over\s+the\s+(last|past)|over\s+time|since\s+\d{4}|histor', _q_lower)
-            if _time_match:
-                search_queries.append(f"{_subject_str} performance data {_cur_year}")
-                search_queries.append(f"{_subject_str} statistics trends {_cur_year - 1} {_cur_year}")
-            # Finance/business angles
-            elif any(w in _q_lower for w in ("growth", "grew", "drove", "boost", "factor", "driver")):
-                search_queries.append(f"{_subject_str} growth drivers strategy {_cur_year}")
-                search_queries.append(f"{_subject_str} revenue breakdown {_cur_year}")
-            elif any(w in _q_lower for w in ("invest", "buy", "sell", "hold", "outlook", "forecast")):
-                search_queries.append(f"{_subject_str} analyst investment outlook {_cur_year}")
-                search_queries.append(f"{_subject_str} risks opportunities {_cur_year}")
-            elif any(w in _q_lower for w in ("strateg", "plan", "future", "roadmap", "vision")):
-                search_queries.append(f"{_subject_str} strategy plans {_cur_year}")
-                search_queries.append(f"{_subject_str} competitive position {_cur_year}")
-            elif any(w in _q_lower for w in ("innovat", "product", "feature", "technology", "r&d")):
-                search_queries.append(f"{_subject_str} innovations technology {_cur_year}")
-                search_queries.append(f"{_subject_str} R&D breakthroughs {_cur_year}")
-            elif any(w in _q_lower for w in ("compet", "rival", "vs", "versus", "against", "compar")):
-                search_queries.append(f"{_subject_str} comparison data {_cur_year}")
-                search_queries.append(f"{_subject_str} competitive landscape {_cur_year}")
-            elif any(w in _q_lower for w in ("populat", "demograph", "rate", "percentage", "statistic")):
-                search_queries.append(f"{_subject_str} statistics data {_cur_year}")
-                search_queries.append(f"{_subject_str} demographics trends {_cur_year}")
-            elif any(w in _q_lower for w in ("climate", "environment", "emission", "pollut", "carbon")):
-                search_queries.append(f"{_subject_str} data statistics {_cur_year}")
-                search_queries.append(f"{_subject_str} impact projections {_cur_year}")
-            elif any(w in _q_lower for w in ("salary", "wage", "income", "cost", "price", "afford")):
-                search_queries.append(f"{_subject_str} data trends {_cur_year}")
-                search_queries.append(f"{_subject_str} comparison analysis {_cur_year}")
+            # ── Multi-company comparison queries: search for ALL companies ──
+            _is_multi_company = len(_all_subjects) > 1
+            if _is_multi_company:
+                # For multi-company queries, build one comparison query + per-company queries
+                _companies_str = " vs ".join(_all_subjects[:4])
+                search_queries = [f"{_companies_str} comparison investment outlook {_cur_year}"]
+                # Add per-company strategic queries (up to 4 companies)
+                for _comp in _all_subjects[:4]:
+                    search_queries.append(f"{_comp} strategic investment portfolio AI {_cur_year}")
+                log.info(f"Multi-company research queries ({len(_all_subjects)} companies): {search_queries}")
             else:
-                search_queries.append(f"{_subject_str} latest data analysis {_cur_year}")
-            log.info(f"Research search queries: {search_queries}")
+                # Base query always includes current year for freshness
+                search_queries = [f"{base_query[:100]} {_cur_year}"]
+
+                # Detect time-based queries — add historical + current angle
+                _time_match = re.search(r'\b(\d+)\s*years?|decade|over\s+the\s+(last|past)|over\s+time|since\s+\d{4}|histor', _q_lower)
+                if _time_match:
+                    search_queries.append(f"{_subject_str} performance data {_cur_year}")
+                    search_queries.append(f"{_subject_str} statistics trends {_cur_year - 1} {_cur_year}")
+                # Finance/business angles
+                elif any(w in _q_lower for w in ("growth", "grew", "drove", "boost", "factor", "driver")):
+                    search_queries.append(f"{_subject_str} growth drivers strategy {_cur_year}")
+                    search_queries.append(f"{_subject_str} revenue breakdown {_cur_year}")
+                elif any(w in _q_lower for w in ("invest", "buy", "sell", "hold", "outlook", "forecast")):
+                    search_queries.append(f"{_subject_str} analyst investment outlook {_cur_year}")
+                    search_queries.append(f"{_subject_str} risks opportunities {_cur_year}")
+                elif any(w in _q_lower for w in ("strateg", "plan", "future", "roadmap", "vision")):
+                    search_queries.append(f"{_subject_str} strategy plans {_cur_year}")
+                    search_queries.append(f"{_subject_str} competitive position {_cur_year}")
+                elif any(w in _q_lower for w in ("innovat", "product", "feature", "technology", "r&d")):
+                    search_queries.append(f"{_subject_str} innovations technology {_cur_year}")
+                    search_queries.append(f"{_subject_str} R&D breakthroughs {_cur_year}")
+                elif any(w in _q_lower for w in ("compet", "rival", "vs", "versus", "against", "compar")):
+                    search_queries.append(f"{_subject_str} comparison data {_cur_year}")
+                    search_queries.append(f"{_subject_str} competitive landscape {_cur_year}")
+                elif any(w in _q_lower for w in ("populat", "demograph", "rate", "percentage", "statistic")):
+                    search_queries.append(f"{_subject_str} statistics data {_cur_year}")
+                    search_queries.append(f"{_subject_str} demographics trends {_cur_year}")
+                elif any(w in _q_lower for w in ("climate", "environment", "emission", "pollut", "carbon")):
+                    search_queries.append(f"{_subject_str} data statistics {_cur_year}")
+                    search_queries.append(f"{_subject_str} impact projections {_cur_year}")
+                elif any(w in _q_lower for w in ("salary", "wage", "income", "cost", "price", "afford")):
+                    search_queries.append(f"{_subject_str} data trends {_cur_year}")
+                    search_queries.append(f"{_subject_str} comparison analysis {_cur_year}")
+                else:
+                    search_queries.append(f"{_subject_str} latest data analysis {_cur_year}")
+                log.info(f"Research search queries: {search_queries}")
 
             try:
                 # Run ALL search queries in PARALLEL for speed
+                # Multi-company queries get more search slots for coverage
+                _max_queries = 5 if _is_multi_company else 3
+                _max_urls = 7 if _is_multi_company else 5
+                _max_fetch = 5 if _is_multi_company else 3
                 all_search_urls = []
-                async with httpx.AsyncClient(follow_redirects=True, timeout=5) as client:
+                async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client:
                     ddg_tasks = []
-                    for sq in search_queries[:3]:
+                    for sq in search_queries[:_max_queries]:
                         ddg_tasks.append(client.get(
                             "https://html.duckduckgo.com/html/",
                             params={"q": sq},
                             headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"},
                         ))
                     ddg_results = await asyncio.gather(*ddg_tasks, return_exceptions=True)
+                    # DDG returns 200 or 202 (Accepted) for valid results
+                    _ddg_ok = sum(1 for r in ddg_results if not isinstance(r, Exception) and r.status_code in (200, 202))
+                    _ddg_fail = len(ddg_results) - _ddg_ok
+                    if _ddg_fail:
+                        log.warning(f"DuckDuckGo: {_ddg_ok}/{len(ddg_results)} succeeded, {_ddg_fail} failed")
+                    else:
+                        log.info(f"DuckDuckGo: {_ddg_ok}/{len(ddg_results)} succeeded")
                     seen_domains = set()
                     for ddg_resp in ddg_results:
-                        if isinstance(ddg_resp, Exception) or ddg_resp.status_code != 200:
+                        if isinstance(ddg_resp, Exception) or ddg_resp.status_code not in (200, 202):
                             continue
                         import re as _re_ddg
                         urls = _re_ddg.findall(r'href="(https?://[^"]+)"', ddg_resp.text)
@@ -3697,19 +4160,19 @@ async def jarvis_chat(request: Request):
                             if _domain not in seen_domains:
                                 seen_domains.add(_domain)
                                 all_search_urls.append(u)
-                                if len(all_search_urls) >= 5:
+                                if len(all_search_urls) >= _max_urls:
                                     break
-                        if len(all_search_urls) >= 5:
+                        if len(all_search_urls) >= _max_urls:
                             break
 
                 # Fetch top results IN PARALLEL for speed
-                # Keep context lean for fast Ollama inference
-                _MAX_RESEARCH_CTX = 4000
+                # Multi-company queries get higher context cap for coverage
+                _MAX_RESEARCH_CTX = 6000 if _is_multi_company else 4000
                 _research_chars = 0
                 if all_search_urls:
-                    fetch_tasks = [_web_fetch(surl, max_chars=1500) for surl in all_search_urls[:3]]
+                    fetch_tasks = [_web_fetch(surl, max_chars=1500) for surl in all_search_urls[:_max_fetch]]
                     fetch_results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
-                    for surl, content in zip(all_search_urls[:3], fetch_results):
+                    for surl, content in zip(all_search_urls[:_max_fetch], fetch_results):
                         if isinstance(content, Exception) or not content or content.startswith("[Error"):
                             continue
                         # Trim if we're approaching the cap
@@ -3763,35 +4226,32 @@ async def jarvis_chat(request: Request):
                 "error": False,
             }
 
-    # Pre-build topic panel for data/timeline queries.
-    # For pure analytical "why/what" queries ("what drove growth?"), skip the
-    # static topic panel and let the dynamic panel builder create a research-based
-    # panel instead. BUT any query requesting data, timelines, comparisons, or
-    # historical trends — across ANY domain — should still get a panel.
+    # Pre-build topic panel ONLY for simple queries without web research.
+    # When research is active, the dynamic panel builder will create a MUCH richer
+    # panel from the actual web data. Pre-built panels are limited to our tracked
+    # data (stock quotes, service health, etc.) and can't cover arbitrary companies,
+    # competitive analyses, or investment breakdowns.
     #
-    # Data-requesting queries (get panel):
-    #   "How has Apple performed over 20 years?"  (stocks)
-    #   "How has climate change progressed?"      (environment)
-    #   "Show me Python's popularity over time"   (tech)
-    #   "UK house prices last 10 years"           (housing)
-    #   "Compare GDP of US vs China"              (economics)
+    # Pre-built panel (no research):
+    #   "How's the market?" → stock overview from tracked symbols
+    #   "Show me my portfolio" → quick quote summary
+    #   "Service status" → health dashboard
     #
-    # Pure analytical queries (skip panel, use dynamic):
-    #   "What drove Apple's growth?"
-    #   "Why did Tesla's strategy change?"
-    _is_data_query = bool(re.search(
-        r'\b(perform|progress|evolv|chang|grown|grew|increas|decreas|'
-        r'risen|fallen|trend|track|chart|graph|plot|histor|timeline|'
+    # Dynamic panel (research active):
+    #   "Give me a full breakdown of Nvidia stock and their new AI chip"
+    #   "Compare Microsoft to competitors"
+    #   "Where is Apple investing for the next 5 years?"
+    #
+    # Simple data queries WITHOUT research still get pre-built panels for speed:
+    _is_simple_data = not _has_research and bool(re.search(
+        r'\b(perform|progress|trend|track|chart|graph|plot|histor|timeline|'
         r'over\s+the\s+(last|past)|over\s+time|over\s+\d+|'
         r'last\s+\d+|past\s+\d+|since\s+\d{4}|'
         r'how\s+(has|have|did|does|do|much|many|far)|'
-        r'compare|vs|versus|between|'
-        r'rate|statistic|data|numbers|figures|'
         r'show\s+me|give\s+me|display|visuali[sz]e)\b',
         user_msg, re.IGNORECASE
     ))
-    _skip_topic_panel = _has_research and not _is_data_query
-    if wants_panel and not _skip_topic_panel:
+    if wants_panel and _is_simple_data:
         try:
             panel_data = await _build_panel(user_msg, hint_topic=topic)
             if panel_data:
@@ -3801,8 +4261,8 @@ async def jarvis_chat(request: Request):
         except Exception as e:
             log.error(f"Panel build failed for topic={topic}: {e}")
             panel_data = None
-    elif wants_panel and _skip_topic_panel:
-        log.info(f"Skipping pre-built panel for analytical query — dynamic panel will be built post-LLM")
+    elif wants_panel and _has_research:
+        log.info(f"Skipping pre-built panel — research data available, dynamic panel will be built post-LLM")
 
     # Determine if this is a vague/short query (no clear topic, few words)
     _is_vague = not topic and len(user_msg.split()) <= 4
@@ -3822,11 +4282,14 @@ async def jarvis_chat(request: Request):
         _now = datetime.utcnow()
         _slim_sys = (
             "You are ARBITER — modelled after J.A.R.V.I.S. You serve Sir Luke. "
-            "Voice: composed, British, dry-witted, concise. 2-4 sentences with dense data. "
+            "Voice: composed, British, dry-witted, concise. 3-5 sentences with dense data. "
             "Synthesize the WEB RESEARCH below into a data-rich spoken analysis. "
             "Include specific numbers, years, percentages, and concrete metrics. "
             f"TODAY is {_now.strftime('%B %d, %Y')} — the current year is {_now.year}. "
             f"Always prioritize the most recent data. Your response must reflect {_now.year} as the present. "
+            "NEVER mention your training data, training cutoff, knowledge cutoff, or any disclaimer about "
+            "data freshness. The WEB RESEARCH provided IS your data — use it as authoritative fact. "
+            "If the query is ambiguous, pick the most likely interpretation and answer. "
             "Do NOT use bullet points or lists — flowing sentences only. "
             "Do NOT start with greetings or 'Sir'. Just answer directly."
         )
@@ -3843,12 +4306,16 @@ async def jarvis_chat(request: Request):
     for h in history[-_hist_limit:]:
         messages.append({"role": h.get("role", "user"), "content": h.get("content", "")})
 
-    _has_research = '[WEB RESEARCH' in extra_ctx or '[WEB PAGE' in extra_ctx
+    # Check if web content was actually fetched (vs just attempted)
+    _has_web_content = '[WEB RESEARCH' in extra_ctx or '[WEB PAGE' in extra_ctx
+    # _has_research stays True if research was ATTEMPTED — even if fetch failed,
+    # we still want to route through the research prompt path (not the panel path).
+    # _has_web_content tells us if actual data was injected.
 
     # If we're generating a panel, tell the LLM to keep it short
     if panel_data:
         messages.append({"role": "user", "content": user_msg + "\n\n[A visualisation panel will be shown automatically. Give a brief 1-2 sentence spoken summary only. Do NOT output JSON, bullet points, or structured data.]"})
-    elif _has_research:
+    elif _has_web_content:
         # Research-backed query — instruct LLM to synthesize web data into data-rich analysis.
         # Prompt adapts to whether this is a time-based or analytical query.
         _now = datetime.utcnow()
@@ -3860,106 +4327,95 @@ async def jarvis_chat(request: Request):
         _start_year = _cur_year - _span
         if _time_hint:
             _research_prompt = (
-                f"\n\n[IMPORTANT: Today's date is {_now.strftime('%B %d, %Y')}. The current year is {_cur_year}. "
-                f"The user is asking about the period from {_start_year} to {_cur_year} (the last {_span} years). "
-                "You have been provided with WEB RESEARCH data above. "
-                "Synthesize the research into a data-rich timeline analysis. "
-                f"Your timeline MUST end at {_cur_year} (or the most recent data available). "
-                f"Include specific numbers WITH YEARS attached from {_start_year} through {_cur_year} — "
-                f"e.g. 'In {_start_year} it was X, by {_start_year + _span//2} it reached Y, and in {_cur_year} it stands at Z.' "
-                "The more year-value pairs you include, the richer the auto-generated timeline chart will be. "
-                "Also mention key milestones, turning points, and rates of change. "
-                "Give 3-5 sentences with dense chronological data. "
-                "Do NOT use bullet points or lists — write in natural flowing sentences with embedded data.]"
+                f"\n\n[Today is {_now.strftime('%B %d, %Y')}. Current year: {_cur_year}. "
+                f"Period requested: {_start_year}–{_cur_year} ({_span} years). "
+                "Use the WEB RESEARCH above. Synthesize into a data-rich timeline. "
+                f"Timeline MUST end at {_cur_year}. Include year-value pairs: "
+                f"'In {_start_year} it was X, by {_start_year + _span//2} it reached Y, in {_cur_year} it stands at Z.' "
+                "More data points = richer auto-generated chart. Mention milestones and rates of change. "
+                "3-5 flowing sentences. No bullets or lists. "
+                "NEVER mention your training cutoff or knowledge limitations — the web research IS your data. "
+                "If data gaps exist, flag them rather than fabricating numbers.]"
             )
         else:
             _research_prompt = (
-                f"\n\n[IMPORTANT: Today's date is {_now.strftime('%B %d, %Y')}. The current year is {_cur_year}. "
-                f"Always prioritize the most recent data available (prefer {_cur_year} and {_cur_year - 1} data). "
-                "You have been provided with WEB RESEARCH data above. "
-                "Synthesize this research into a comprehensive, data-rich analysis. "
-                "Include specific numbers, percentages, rankings, quantities, and any concrete metrics "
-                "from the research. A data visualisation panel will be auto-generated from your analysis — "
-                "the more specific numbers and named categories you include, the richer the panel. "
-                "Give 3-5 sentences with dense data. "
-                "Do NOT use bullet points or lists — write in natural flowing sentences with embedded data.]"
+                f"\n\n[Today is {_now.strftime('%B %d, %Y')}. Current year: {_cur_year}. "
+                f"Prioritize {_cur_year} and {_cur_year - 1} data. "
+                "Use the WEB RESEARCH above. Synthesize into a data-rich analysis. "
+                "Include specific numbers, percentages, rankings — these feed auto-generated panels. "
+                "3-5 flowing sentences. No bullets or lists. "
+                "NEVER mention your training cutoff or knowledge limitations — the web research IS your data.]"
             )
         messages.append({"role": "user", "content": user_msg + _research_prompt})
+    elif _has_research and not _has_web_content:
+        # Research was attempted but web fetch failed — answer with best knowledge
+        _now = datetime.utcnow()
+        _cur_year = _now.year
+        _fallback_prompt = (
+            f"\n\n[Today is {_now.strftime('%B %d, %Y')}. Current year: {_cur_year}. "
+            "Web research was attempted but did not return results. "
+            "Answer using your best available knowledge. Include specific numbers, "
+            "percentages, and data points — these feed auto-generated panels. "
+            "3-5 flowing sentences. No bullets or lists. "
+            "NEVER mention training data, training cutoff, knowledge limitations, or "
+            "that you lack access to data. NEVER suggest consulting Bloomberg, FactSet, "
+            "or any other service. NEVER refuse to answer. Just give your best analysis "
+            "with the data you have. Present it confidently as a strategic analyst would.]"
+        )
+        messages.append({"role": "user", "content": user_msg + _fallback_prompt})
     elif wants_panel:
         # Panel query without research — keep it data-oriented
-        messages.append({"role": "user", "content": user_msg + "\n\n[A data visualisation panel will be generated from your analysis. Include specific numbers, percentages, and data points in your response — these will be extracted for charts and tables. Give a concise 2-3 sentence spoken summary. Do NOT use bullet points, lists, or structured data — write in natural flowing sentences with embedded data.]"})
+        messages.append({"role": "user", "content": user_msg + "\n\n[A data visualisation panel will be generated from your analysis. Include specific numbers, percentages, and data points in your response — these will be extracted for charts and tables. Give a concise 2-3 sentence spoken summary. Do NOT use bullet points, lists, or structured data — write in natural flowing sentences with embedded data. NEVER mention training data or knowledge cutoffs.]"})
     else:
         messages.append({"role": "user", "content": user_msg})
 
-    # ── Get LLM reply ──
-    reply = None
-    provider = LLM_PROVIDER
-
-    if provider == "ollama":
-        # Scale tokens: panel=short, vague=very short, research=focused, normal=medium
-        _max_tok = 80 if panel_data else (100 if _is_vague else (250 if _has_research else 250))
-        reply = await _chat_ollama(messages, max_tokens=_max_tok)
-        if not reply:
-            if oai:
-                provider = "openai"
-            else:
-                # Non-fatal: return the error message but still include panel data + followups
-                _err_reply = "I'm temporarily offline, Sir. Ollama isn't responding — try restarting it with: ollama serve"
-                _err_result = {"reply": _err_reply, "error": False}
-                if panel_data:
-                    _err_result["panel"] = panel_data
-                # Still generate followups so the user can retry
-                _err_result["followups"] = [
-                    {"text": "Try again", "hint": "action"},
-                    {"text": "What's the system status?", "hint": "broader"},
-                ]
-                return _err_result
-
-    if provider == "openai" and not reply:
-        if not oai:
-            return {"reply": "Voice systems offline. No LLM provider configured.", "error": True}
-        try:
-            _oai_max = 800 if _has_research else (200 if panel_data else 600)
-            resp = oai.chat.completions.create(
-                model=os.getenv("OPENAI_MODEL", "gpt-4o"),
-                messages=messages,
-                max_tokens=_oai_max,
-                temperature=0.7,
-            )
-            reply = resp.choices[0].message.content.strip()
-        except Exception as e:
-            log.error(f"Jarvis OpenAI error: {e}")
-            return {"reply": "I'm experiencing a temporary disruption. Try again shortly.", "error": True}
+    # ── Get LLM reply (unified fallback chain: Claude → Ollama → OpenAI) ──
+    _max_tok = 120 if panel_data else (120 if _is_vague else (400 if _has_research else 350))
+    reply = await _chat_llm(messages, max_tokens=_max_tok, purpose="chat")
 
     if not reply:
-        return {"reply": "No LLM provider configured. Set LLM_PROVIDER to 'ollama' or 'openai'.", "error": True}
+        # Non-fatal: return error but still include panel data + followups
+        _err_reply = "I'm temporarily offline, Sir. No LLM responded — check that Ollama or Claude is configured."
+        _err_result = {"reply": _err_reply, "error": False}
+        if panel_data:
+            _err_result["panel"] = panel_data
+        _err_result["followups"] = [
+            {"text": "Try again", "hint": "action"},
+            {"text": "What's the system status?", "hint": "broader"},
+        ]
+        return _err_result
 
     # ── Auto-panel: if reply has data, attach a rich visualization panel ──
-    # Determine what post-processing is needed, then run in PARALLEL
+    # Multiple panels / components should ALWAYS coexist — never block one type
+    # from generating just because another already exists.
     _run_dynamic = False
-    if not panel_data:
-        numbers = re.findall(r'[\$£€]?[\d,]+\.?\d*[%°]?', reply)
-        has_comparison = bool(re.search(r'\b(vs|versus|compared|comparison|better|worse)\b', user_msg, re.IGNORECASE))
-        # Trigger panel if: data-rich reply OR comparison query OR explicit vis request
-        if len(numbers) >= 2 or has_comparison or wants_panel:
-            # Try server-side topic panel first (cheaper, faster)
-            # Skip topic panel for conversational follow-ups — they need dynamic panels
+    numbers = re.findall(r'[\$£€]?[\d,]+\.?\d*[%°]?', reply)
+    has_comparison = bool(re.search(r'\b(vs|versus|compared|comparison|better|worse|competitor|rival)\b', user_msg, re.IGNORECASE))
+    # Trigger panel if: data-rich reply OR comparison query OR explicit vis request
+    _wants_enrichment = len(numbers) >= 2 or has_comparison or wants_panel
+    if _wants_enrichment:
+        # Try server-side topic panel ONLY if no panel yet AND no research data.
+        if not panel_data and topic and not _has_research:
             _is_conversational = bool(re.match(r'^(what|which|how|why|where|who|tell|explain|describe|can you)\b', user_msg.strip(), re.IGNORECASE))
-            if topic and not _is_conversational:
+            if not _is_conversational:
                 try:
                     panel_data = await _build_panel(user_msg, hint_topic=topic)
                 except Exception:
                     pass
-            # Check if dynamic panel builder is needed
-            _needs_dynamic = (
-                not panel_data
-                or (panel_data and not panel_data.get("insights"))
-                or _has_research
-                or has_comparison
-                or _is_conversational  # Follow-up questions always get dynamic panels
-            )
-            if _needs_dynamic and len(reply) > 60:
-                _run_dynamic = True
+        # ALWAYS run dynamic panel builder when enrichment is possible.
+        # It adds strategic components (insights, SWOT, heatmaps, radar, gauges,
+        # recommendations, etc.) that the pre-built panel and regex can't provide.
+        # Multiple visualization types should coexist — never block one because
+        # another already exists.
+        _needs_dynamic = (
+            not panel_data                                     # no panel yet
+            or not panel_data.get("insights")                  # panel lacks strategic depth
+            or not panel_data.get("heatmap")                   # missing advanced visualizations
+            or _has_research                                   # research data — always enrich
+            or has_comparison                                  # comparison query
+        )
+        if _needs_dynamic and len(reply) > 60:
+            _run_dynamic = True
 
     # ── Extract inline follow-ups from LLM reply (embedded in prompt) ──
     followups = None
@@ -3983,14 +4439,18 @@ async def jarvis_chat(request: Request):
     reply = re.sub(r'\[show_panel\b[^\]]*\]?', '', reply, flags=re.IGNORECASE).strip()
 
     # ── Build panel from reply ──
-    # For research queries: try FAST regex extraction first (zero LLM calls).
-    # Only fall back to the slow LLM dynamic panel if regex extraction fails.
-    if _run_dynamic and _has_research:
-        # Fast path: extract data from reply text — no Ollama call
-        panel_data = _panel_from_reply(user_msg, reply)
-        if panel_data:
-            log.info("Fast panel built from reply text (no LLM call)")
-            _run_dynamic = False  # skip the slow LLM panel builder
+    # Strategy: ALWAYS run both extractors and merge results.
+    # _panel_from_reply = instant regex (stats, charts) — the scaffold
+    # _panel_dynamic = LLM call (insights, swot, recommendations) — the strategic layer
+    _regex_panel = None
+    if _run_dynamic:
+        # Fast regex extraction — always attempt for data-rich replies
+        _regex_panel = _panel_from_reply(user_msg, reply)
+        if _regex_panel:
+            panel_data = _regex_panel
+            log.info("Fast regex panel built from reply text — dynamic panel will enrich it")
+        # ALWAYS run _panel_dynamic too — it provides the strategic components
+        # (insights, swot, recommendations, etc.) that regex can't extract
 
     _parallel_tasks = {}
     if _run_dynamic:
@@ -4010,16 +4470,32 @@ async def jarvis_chat(request: Request):
         results_par = await asyncio.gather(*_parallel_tasks.values(), return_exceptions=True)
         par = dict(zip(keys, results_par))
 
-        # Handle dynamic panel result
+        # Handle dynamic panel result — MERGE with regex panel for richest output
         dynamic = par.get("dynamic")
         if dynamic and not isinstance(dynamic, Exception) and dynamic:
             if panel_data:
-                for key in ("insights", "recommendations", "swot", "pros_cons",
-                            "risk_matrix", "key_metrics", "timeline", "scorecard"):
+                # Merge: dynamic panel enriches regex panel with strategic components.
+                # chart/table/stats are handled separately below (different merge logic).
+                _skip = {"chart", "table", "stats"}
+                for key in (_PANEL_MERGE_KEYS - _skip):
                     if dynamic.get(key) and not panel_data.get(key):
                         panel_data[key] = dynamic[key]
+                # Dynamic panel may have better chart/table than regex
+                if dynamic.get("chart") and not panel_data.get("chart"):
+                    panel_data["chart"] = dynamic["chart"]
+                if dynamic.get("table") and not panel_data.get("table"):
+                    panel_data["table"] = dynamic["table"]
+                # Dynamic title is usually better
+                if dynamic.get("title") and panel_data.get("title") == "RESEARCH ANALYSIS":
+                    panel_data["title"] = dynamic["title"]
                 if dynamic.get("summary") and len(dynamic["summary"]) > len(panel_data.get("summary", "")):
                     panel_data["summary"] = dynamic["summary"]
+                # Merge stats — add unique dynamic stats
+                if dynamic.get("stats"):
+                    existing_labels = {s.get("label", "").lower() for s in panel_data.get("stats", [])}
+                    for s in dynamic["stats"]:
+                        if s.get("label", "").lower() not in existing_labels:
+                            panel_data.setdefault("stats", []).append(s)
             else:
                 panel_data = dynamic
 
@@ -4039,6 +4515,83 @@ async def jarvis_chat(request: Request):
         log.warning(f"No followups generated for query: {user_msg[:60]!r}")
 
     return result
+
+
+# ── Vision (Camera) Chat ─────────────────────────────────────────────
+@app.post("/api/jarvis/vision")
+async def jarvis_vision(request: Request):
+    """Process a camera frame + user query using Claude's vision capability."""
+    body = await request.json()
+    query = body.get("query", "").strip() or "What can you see in this image? Describe it and identify any objects."
+    image_b64 = body.get("image", "")
+
+    if not image_b64:
+        return {"reply": "No image data received.", "error": True}
+
+    # ── Try Claude vision (primary) ──
+    client = _get_anthropic()
+    if client and not _claude_check_budget():
+        try:
+            _now = datetime.utcnow()
+            system_text = (
+                f"You are ARBITER, a sophisticated AI assistant for Sir Luke. "
+                f"You have been given a camera frame from the user's webcam. "
+                f"Analyse the image carefully and respond to their query. "
+                f"Be specific about objects, text, components, colours, and anything identifiable. "
+                f"If the user is showing you hardware (e.g. a Raspberry Pi, Arduino, sensor), "
+                f"identify the exact model if possible and provide practical guidance. "
+                f"Keep your response concise but thorough — under 200 words unless the query demands more. "
+                f"Speak in a composed, dry-witted British tone. Today is {_now.strftime('%B %d, %Y')}."
+            )
+
+            resp = await asyncio.to_thread(
+                client.messages.create,
+                model=_CLAUDE_MODEL,
+                max_tokens=600,
+                system=system_text,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/jpeg",
+                                "data": image_b64,
+                            },
+                        },
+                        {
+                            "type": "text",
+                            "text": query,
+                        },
+                    ],
+                }],
+            )
+
+            # Record usage
+            if resp.usage:
+                _claude_record_usage(resp.usage.input_tokens, resp.usage.output_tokens)
+
+            content = ""
+            for block in resp.content:
+                if hasattr(block, "text"):
+                    content += block.text
+            content = content.strip()
+
+            if content:
+                log.info(f"Vision reply ({len(content)} chars) for query: {query[:60]!r}")
+                return {"reply": content, "error": False}
+
+        except Exception as e:
+            log.error(f"Claude vision error: {type(e).__name__}: {e}")
+            _claude_record_error()
+
+    # ── Fallback: no vision available ──
+    return {
+        "reply": "Vision analysis unavailable — Claude API key is required for camera analysis, "
+                 "and the current LLM budget may be exhausted. Please check your configuration.",
+        "error": True,
+    }
 
 
 _FOLLOWUP_PROMPT = """Given a user's question and the AI's response, generate exactly 4 follow-up questions the user might want to ask next to dig deeper. Each should explore a DIFFERENT angle:
@@ -4109,14 +4662,35 @@ def _generate_template_followups(user_msg: str, reply: str, topic: str = None) -
     }
 
     # ── Extract the KEY SUBJECT (e.g. "Samsung", "Apple") — not the full query ──
+    # First try: detect known stock company names (works for lowercase too)
+    _all_detected = _detect_all_stock_symbols(user_msg)
+    _detected_names = [_TICKER_NAMES.get(s, s) for s in _all_detected]
+    # Second try: proper nouns from message
     _proper = re.findall(r'\b([A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,})*)\b', user_msg)
     _stop = {"What", "Why", "How", "Which", "Where", "Who", "When", "Tell", "Show",
              "Give", "Can", "Could", "Would", "Should", "The", "Has", "Have", "Does", "Did"}
     _subjects = [n for n in _proper if n.split()[0] not in _stop]
-    subject = _subjects[0] if _subjects else re.sub(
-        r'\b(give me|show me|tell me|can you|what is|what are|how is|how are|how has|how have|'
-        r'a view on|a breakdown of|breakdown view of|performed|in the last|over the|stocks?)\b',
-        '', msg, flags=re.IGNORECASE).strip().split('?')[0].strip()[:40]
+    # Use detected company names first, then proper nouns, then cleaned query
+    if _detected_names:
+        subject = " vs ".join(_detected_names[:4]) if len(_detected_names) > 1 else _detected_names[0]
+    elif _subjects:
+        subject = _subjects[0]
+    else:
+        subject = re.sub(
+            r'\b(give me|show me|tell me|can you|what is|what are|how is|how are|how has|how have|'
+            r'a view on|a breakdown of|breakdown view of|performed|in the last|over the|stocks?|'
+            r'i am curious|i need|i want|where i should|on where)\b',
+            '', msg, flags=re.IGNORECASE).strip().split('?')[0].strip()[:40]
+
+    # ── Multi-company comparison followups ──
+    if len(_detected_names) > 1:
+        _names_str = ", ".join(_detected_names[:4])
+        return [
+            {"text": f"Compare {_names_str} side by side", "hint": "deeper"},
+            {"text": f"Which of {_names_str} has the best growth outlook?", "hint": "compare"},
+            {"text": "Which one would you recommend investing in?", "hint": "action"},
+            {"text": "What's the broader tech sector outlook?", "hint": "broader"},
+        ]
 
     # ── Try topic-specific first (use subject if available) ──
     if topic and topic in _TOPIC_FOLLOWUPS:
@@ -4124,7 +4698,7 @@ def _generate_template_followups(user_msg: str, reply: str, topic: str = None) -
         if subject and topic == "stocks":
             return [
                 {"text": f"Show me {subject} stock chart", "hint": "deeper"},
-                {"text": f"How does {subject} stock compare to competitors?", "hint": "compare"},
+                {"text": f"How does {subject} compare to competitors?", "hint": "compare"},
                 {"text": f"What would you recommend for {subject}?", "hint": "action"},
                 {"text": "What's the broader market outlook?", "hint": "broader"},
             ]
@@ -4134,7 +4708,7 @@ def _generate_template_followups(user_msg: str, reply: str, topic: str = None) -
     if topic == "stocks" or re.search(r'\b(invest|stock|share|portfolio|buy|sell|market)\b', msg):
         return [
             {"text": f"Show me {subject} stock performance", "hint": "deeper"},
-            {"text": f"How does {subject} stock compare to competitors?", "hint": "compare"},
+            {"text": f"How does {subject} compare to competitors?", "hint": "compare"},
             {"text": f"What would you recommend for {subject}?", "hint": "action"},
             {"text": "What's the broader sector outlook?", "hint": "broader"},
         ]
@@ -4193,20 +4767,7 @@ async def _generate_followups(user_msg: str, reply: str, topic: str = None) -> l
             {"role": "user", "content": f"USER: {user_msg[:200]}\nAI: {reply[:400]}\nTOPIC: {topic or 'general'}"},
         ]
 
-        raw = None
-        if LLM_PROVIDER == "ollama":
-            raw = await _chat_ollama(messages, max_tokens=250)
-        if not raw and oai:
-            try:
-                resp = oai.chat.completions.create(
-                    model=os.getenv("OPENAI_MODEL", "gpt-4o"),
-                    messages=messages,
-                    max_tokens=250,
-                    temperature=0.6,
-                )
-                raw = resp.choices[0].message.content.strip()
-            except Exception:
-                pass
+        raw = await _chat_llm(messages, max_tokens=250, temperature=0.6, purpose="followups")
 
         if raw:
             import json as _json_fu
@@ -4327,6 +4888,559 @@ async def _chat_ollama(messages: list, max_tokens: int = 300) -> str | None:
     log.error(f"Ollama exhausted all retries — model={OLLAMA_MODEL}, "
               f"context={_ctx_chars} chars, max_tokens={max_tokens}")
     return None
+
+
+async def _chat_claude(messages: list, max_tokens: int = 400, temperature: float = 0.6) -> str | None:
+    """Send chat to Claude API with full cost safeguards.
+
+    Safeguards:
+    - Daily budget cap (default $1/day)
+    - Per-minute rate limit (default 30 RPM)
+    - Per-session request limit (default 500)
+    - Circuit breaker (3 consecutive errors → 5 min Ollama fallback)
+    - Hard-locked to Haiku 3.5 (cheapest model, no override)
+    """
+    client = _get_anthropic()
+    if not client:
+        return None
+
+    # ── Check all safeguards ──
+    block_reason = _claude_check_budget()
+    if block_reason:
+        log.warning(f"Claude blocked: {block_reason} — falling back to Ollama")
+        return None
+
+    # ── Convert messages to Anthropic format ──
+    # Anthropic separates system from messages
+    system_text = ""
+    api_messages = []
+    for m in messages:
+        role = m.get("role", "user")
+        content = m.get("content", "")
+        if role == "system":
+            system_text += content + "\n"
+        else:
+            # Anthropic only allows "user" and "assistant" roles
+            api_role = "assistant" if role == "assistant" else "user"
+            # Merge consecutive same-role messages (Anthropic requires alternating)
+            if api_messages and api_messages[-1]["role"] == api_role:
+                api_messages[-1]["content"] += "\n" + content
+            else:
+                api_messages.append({"role": api_role, "content": content})
+
+    # Ensure first message is from user (Anthropic requirement)
+    if not api_messages or api_messages[0]["role"] != "user":
+        api_messages.insert(0, {"role": "user", "content": "Please respond."})
+
+    _ctx_chars = sum(len(m.get("content", "")) for m in messages)
+    log.info(f"Claude request: model={_CLAUDE_MODEL}, max_tokens={max_tokens}, "
+             f"context={_ctx_chars} chars")
+
+    try:
+        _create_kwargs = {
+            "model": _CLAUDE_MODEL,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "messages": api_messages,
+        }
+        if system_text.strip():
+            _create_kwargs["system"] = system_text.strip()
+        # Run synchronous Anthropic SDK in a thread to avoid blocking the event loop
+        resp = await asyncio.to_thread(client.messages.create, **_create_kwargs)
+
+        # Record usage
+        input_tok = resp.usage.input_tokens if resp.usage else 0
+        output_tok = resp.usage.output_tokens if resp.usage else 0
+        _claude_record_usage(input_tok, output_tok)
+
+        # Extract text
+        content = ""
+        for block in resp.content:
+            if hasattr(block, "text"):
+                content += block.text
+        content = content.strip()
+
+        if content:
+            log.info(f"Claude reply: {len(content)} chars, "
+                     f"{input_tok}in/{output_tok}out tokens")
+            return content
+        else:
+            log.warning("Claude returned empty content")
+            _claude_record_error()
+            return None
+
+    except Exception as e:
+        log.error(f"Claude API error: {type(e).__name__}: {e}")
+        _claude_record_error()
+        return None
+
+
+async def _chat_llm(messages: list, max_tokens: int = 400,
+                    temperature: float = 0.6, purpose: str = "chat") -> str | None:
+    """Unified LLM call with automatic fallback chain.
+
+    Priority: Claude (fast, cheap) → Ollama (free, local) → OpenAI (legacy).
+    Falls back automatically on failure or when safeguards block Claude.
+    """
+    reply = None
+    provider = LLM_PROVIDER
+
+    # ── Claude (primary if configured) ──
+    if provider == "claude" or (provider != "ollama" and ANTHROPIC_API_KEY):
+        reply = await _chat_claude(messages, max_tokens=max_tokens, temperature=temperature)
+        if reply:
+            return reply
+        # Fall through to Ollama
+
+    # ── Ollama (free local fallback) ──
+    if not reply:
+        reply = await _chat_ollama(messages, max_tokens=max_tokens)
+        if reply:
+            return reply
+
+    # ── OpenAI (legacy fallback) ──
+    if not reply and oai:
+        try:
+            resp = oai.chat.completions.create(
+                model=os.getenv("OPENAI_MODEL", "gpt-4o"),
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            reply = resp.choices[0].message.content.strip()
+        except Exception as e:
+            log.error(f"OpenAI {purpose} error: {e}")
+
+    return reply
+
+
+# ── Claude Tool-Calling Infrastructure ───────────────────────────────
+
+async def _search_and_fetch(query: str, max_urls: int = 3, chars_per_url: int = 1500) -> str:
+    """DuckDuckGo search → parallel URL fetch. Used by the search_web tool."""
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=12) as client:
+            resp = await client.get(
+                "https://html.duckduckgo.com/html/",
+                params={"q": query},
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+                    "Accept": "text/html,application/xhtml+xml",
+                    "Accept-Language": "en-US,en;q=0.9",
+                },
+            )
+        # DuckDuckGo wraps real URLs in uddg= redirect params — extract those first
+        from urllib.parse import unquote
+        uddg_urls = re.findall(r'uddg=([^&"]+)', resp.text)
+        uddg_urls = [unquote(u) for u in uddg_urls if u.startswith("http")]
+        # Also grab direct href URLs as fallback
+        href_urls = re.findall(r'href="(https?://[^"]+)"', resp.text)
+        href_urls = [u for u in href_urls if "duckduckgo.com" not in u and "duck.co" not in u]
+        # Merge, deduplicate, prefer uddg (actual result links)
+        seen = set()
+        urls = []
+        for u in uddg_urls + href_urls:
+            # Clean tracking params
+            clean = u.split("&amp;")[0].split("&rut=")[0]
+            if clean not in seen and clean.startswith("http"):
+                seen.add(clean)
+                urls.append(clean)
+            if len(urls) >= max_urls:
+                break
+        if not urls:
+            log.info(f"DuckDuckGo returned 0 URLs for: {query[:80]}")
+            return "[No search results]"
+        log.info(f"DuckDuckGo found {len(urls)} URLs for: {query[:60]}")
+        results = await asyncio.gather(
+            *[_web_fetch(u, max_chars=chars_per_url) for u in urls],
+            return_exceptions=True,
+        )
+        parts = [
+            f"[{u}]\n{c}"
+            for u, c in zip(urls, results)
+            if not isinstance(c, Exception) and c and not c.startswith("[Error")
+        ]
+        return "\n\n".join(parts) or "[No content retrieved]"
+    except Exception as e:
+        log.warning(f"Search failed for '{query[:60]}': {e}")
+        return f"[Search failed: {e}]"
+
+
+async def _execute_tool(name: str, inputs: dict) -> str:
+    """Dispatch a named Claude tool call to the appropriate data source.
+    To add a new tool: add a branch here and a matching entry in _CLAUDE_TOOLS."""
+    try:
+        if name == "get_weather":
+            result = await weather(location=inputs.get("location", "London"))
+            return json.dumps(result, default=str)
+
+        elif name == "get_stocks":
+            result = await stocks()
+            return json.dumps(result, default=str)
+
+        elif name == "get_market_intel":
+            sym = inputs.get("symbol", "").upper().strip()
+            if not sym:
+                return '{"error": "symbol is required"}'
+            async with httpx.AsyncClient() as client:
+                result = await _fetch_stock_intel(sym, client)
+            return json.dumps(result, default=str) if result else '{"error": "no data available"}'
+
+        elif name == "get_service_health":
+            return json.dumps(svc_health.summary(), default=str)
+
+        elif name == "get_revenue":
+            return json.dumps(rc_mon.summary(), default=str)
+
+        elif name == "get_emails":
+            return json.dumps(email_mon.summary(), default=str)
+
+        elif name == "get_roadmap":
+            return json.dumps(_load_roadmap(), default=str)
+
+        elif name == "search_web":
+            query = inputs.get("query", "").strip()
+            if not query:
+                return '{"error": "query is required"}'
+            if query.startswith(("http://", "https://")):
+                return await _web_fetch(query, max_chars=4000)
+            return await _search_and_fetch(query)
+
+        elif name == "search_collectables":
+            item = inputs.get("item", "").strip()
+            intent = inputs.get("intent", "price_check")
+            if not item:
+                return '{"error": "item is required"}'
+            _yr = datetime.now().year
+            # Layer 1: site-specific searches (most reliable for collectables)
+            site_queries = [
+                f"site:pricecharting.com {item}",
+                f"site:tcgplayer.com {item} price",
+                f"site:ebay.com {item} sold price",
+            ]
+            # Layer 2: general market queries
+            general_queries = [f"{item} price value market {_yr}"]
+            if intent in ("buy", "overview"):
+                general_queries.append(f"{item} buy online marketplace price guide")
+            if intent in ("trend", "overview"):
+                general_queries.append(f"{item} price history trend over time")
+            if intent in ("sell", "overview"):
+                general_queries.append(f"{item} sell value guide graded ungraded")
+            if intent == "grading":
+                general_queries.append(f"{item} PSA BGS CGC grading population report")
+            # Layer 3: broad fallback
+            fallback_queries = [
+                f"{item} collectible value guide",
+                f"{item} worth how much",
+            ]
+
+            # Run site-specific + general in parallel (up to 5 queries)
+            all_queries = site_queries + general_queries
+            results = await asyncio.gather(
+                *[_search_and_fetch(q, max_urls=3, chars_per_url=2000) for q in all_queries[:5]],
+                return_exceptions=True,
+            )
+            parts = []
+            for q, r in zip(all_queries, results):
+                if isinstance(r, Exception) or not r:
+                    continue
+                if r in ("[No search results]", "[No content retrieved]"):
+                    continue
+                parts.append(f"[Search: {q}]\n{r}")
+
+            # If nothing from layer 1+2, try fallback queries
+            if not parts:
+                log.info(f"Collectables primary search empty for '{item}', trying fallback")
+                fb_results = await asyncio.gather(
+                    *[_search_and_fetch(q, max_urls=4, chars_per_url=2000) for q in fallback_queries],
+                    return_exceptions=True,
+                )
+                for q, r in zip(fallback_queries, fb_results):
+                    if isinstance(r, Exception) or not r:
+                        continue
+                    if r in ("[No search results]", "[No content retrieved]"):
+                        continue
+                    parts.append(f"[Search: {q}]\n{r}")
+
+            # Always return SOMETHING — even a structured hint for Claude
+            if not parts:
+                return json.dumps({
+                    "item": item,
+                    "intent": intent,
+                    "status": "no_live_data",
+                    "note": (
+                        f"Web searches returned no results for '{item}'. "
+                        "This may be a network issue. Use your general knowledge about "
+                        "this collectable to provide the user with approximate market "
+                        "ranges, grading tiers, and buying advice. Mention that live "
+                        "pricing was unavailable and recommend checking tcgplayer.com, "
+                        "pricecharting.com, or eBay sold listings for current values."
+                    ),
+                    "suggested_sources": [
+                        "https://www.pricecharting.com",
+                        "https://www.tcgplayer.com",
+                        "https://www.ebay.com (sold listings)",
+                        "https://www.psacard.com/pop",
+                    ],
+                })
+            return "\n\n".join(parts)
+
+        elif name == "search_products":
+            query = inputs.get("query", "").strip()
+            category = inputs.get("category", "other")
+            if not query:
+                return '{"error": "query is required"}'
+            _yr = datetime.now().year
+            _price_sites = {
+                "clothing": "ASOS Zara H&M Uniqlo Amazon",
+                "electronics": "Amazon Best Buy Currys eBay",
+                "shoes": "Nike StockX GOAT Footlocker Amazon",
+                "accessories": "Amazon eBay ASOS Farfetch",
+                "home": "IKEA Amazon Wayfair John Lewis",
+                "sports": "Amazon Decathlon Sports Direct Nike",
+                "other": "Amazon eBay Google Shopping",
+            }
+            sites = _price_sites.get(category, _price_sites["other"])
+            # Layer 1: site-specific
+            site_queries = [f"site:amazon.com {query} price", f"site:ebay.com {query} buy"]
+            # Layer 2: general comparison
+            general_queries = [
+                f"{query} buy price compare {sites} {_yr}",
+                f"{query} cheapest price online review",
+            ]
+            all_queries = site_queries + general_queries
+            results = await asyncio.gather(
+                *[_search_and_fetch(q, max_urls=3, chars_per_url=2000) for q in all_queries[:4]],
+                return_exceptions=True,
+            )
+            parts = []
+            for q, r in zip(all_queries, results):
+                if isinstance(r, Exception) or not r:
+                    continue
+                if r in ("[No search results]", "[No content retrieved]"):
+                    continue
+                parts.append(f"[Search: {q}]\n{r}")
+            if not parts:
+                # Broad fallback
+                fb = await _search_and_fetch(f"{query} buy online price", max_urls=4, chars_per_url=2000)
+                if fb and fb not in ("[No search results]", "[No content retrieved]"):
+                    parts.append(f"[Search: {query} buy online price]\n{fb}")
+            if not parts:
+                return json.dumps({
+                    "query": query,
+                    "category": category,
+                    "status": "no_live_data",
+                    "note": (
+                        f"Web searches returned no results for '{query}'. "
+                        "Use your general knowledge to provide approximate pricing "
+                        "and recommend specific retailers. Mention that live pricing "
+                        "was unavailable."
+                    ),
+                })
+            return "\n\n".join(parts)
+
+        else:
+            return f'{{"error": "unknown tool: {name}"}}'
+
+    except Exception as e:
+        log.warning(f"Tool {name} error: {type(e).__name__}: {e}")
+        return f'{{"error": "{type(e).__name__}: {str(e)[:120]}"}}'
+
+
+async def _chat_claude_tools(
+    user_msg: str,
+    system: str,
+    history: list,
+    max_rounds: int = 5,
+) -> tuple[str | None, dict[str, str]]:
+    """Claude tool-use conversation loop — ChatGPT-style on-demand data fetching.
+
+    Sends user_msg + _CLAUDE_TOOLS definitions to Claude. Claude calls tools as
+    needed; we execute them in parallel and return results. This repeats until
+    Claude produces a final text reply (stop_reason == 'end_turn').
+
+    Returns:
+        (reply_text, tool_results)
+        reply_text is None if Claude failed or hit max_rounds without finishing.
+        tool_results is a dict keyed by tool name → raw result string.
+    """
+    client = _get_anthropic()
+    if not client:
+        return None, {}
+
+    block = _claude_check_budget()
+    if block:
+        log.warning(f"Claude tools blocked: {block}")
+        return None, {}
+
+    # Build message list — user/assistant history + current query
+    messages: list[dict] = []
+    for h in history[-6:]:
+        role = h.get("role", "user")
+        content = h.get("content", "")
+        if role in ("user", "assistant") and content:
+            messages.append({"role": role, "content": content})
+    messages.append({"role": "user", "content": user_msg})
+
+    tool_results: dict[str, str] = {}
+
+    for round_num in range(max_rounds):
+        _ctx_chars = sum(len(str(m.get("content", ""))) for m in messages)
+        log.info(f"Claude tools round {round_num + 1}/{max_rounds}: ~{_ctx_chars} chars")
+
+        try:
+            resp = await asyncio.to_thread(
+                client.messages.create,
+                model=_CLAUDE_MODEL,
+                max_tokens=2400,
+                system=system,
+                tools=_CLAUDE_TOOLS,
+                messages=messages,
+            )
+        except Exception as e:
+            log.error(f"Claude tools round {round_num + 1} API error: {type(e).__name__}: {e}")
+            _claude_record_error()
+            break
+
+        if resp.usage:
+            _claude_record_usage(resp.usage.input_tokens, resp.usage.output_tokens)
+
+        if resp.stop_reason == "end_turn":
+            text = "".join(
+                b.text for b in resp.content if hasattr(b, "text")
+            ).strip()
+            log.info(
+                f"Claude tools done: {round_num + 1} rounds, "
+                f"{len(tool_results)} tools called, reply={len(text)} chars"
+            )
+            return text or None, tool_results
+
+        if resp.stop_reason == "tool_use":
+            tool_blocks = [b for b in resp.content if b.type == "tool_use"]
+            log.info(f"  Claude requesting tools: {[b.name for b in tool_blocks]}")
+
+            # Append assistant turn (contains tool_use content blocks)
+            messages.append({"role": "assistant", "content": resp.content})
+
+            # Execute all requested tools in parallel
+            raw_results = await asyncio.gather(
+                *[_execute_tool(b.name, b.input) for b in tool_blocks],
+                return_exceptions=True,
+            )
+
+            result_content = []
+            for block, raw in zip(tool_blocks, raw_results):
+                result_str = (
+                    str(raw) if not isinstance(raw, Exception)
+                    else f'{{"error": "{raw}"}}'
+                )
+                tool_results[block.name] = result_str
+                result_content.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": result_str[:6000],  # cap per-result to stay within limits
+                })
+                log.info(f"  {block.name}({block.input}) → {len(result_str)} chars")
+
+            messages.append({"role": "user", "content": result_content})
+
+        else:
+            log.warning(f"Claude tools: unexpected stop_reason={resp.stop_reason!r}")
+            break
+
+    log.warning(f"Claude tools: exhausted {max_rounds} rounds without end_turn")
+    return None, tool_results
+
+
+async def _jarvis_chat_claude(
+    user_msg: str,
+    history: list,
+    topic: str | None,
+) -> dict | None:
+    """Handle a full Jarvis chat turn using Claude with tool calling.
+
+    Claude receives the user message and _CLAUDE_TOOLS. It decides what to
+    fetch (weather, stocks, web search, etc.) and pulls only what it needs —
+    no pre-fetching, no bloated context.
+
+    Returns the API result dict on success, or None to trigger Ollama fallback.
+    """
+    # ComfyUI is an external image-generation API — keep it in the Ollama path
+    if topic == "comfyui":
+        return None
+
+    _now = datetime.utcnow()
+    system = _CLAUDE_TOOLS_SYSTEM.format(
+        date=_now.strftime("%B %d, %Y"),
+        year=_now.year,
+    )
+
+    # ── Tool-calling loop ─────────────────────────────────────────────
+    reply, tool_data = await _chat_claude_tools(user_msg, system, history)
+    if not reply:
+        return None  # triggers Ollama fallback in jarvis_chat()
+
+    # ── Panel detection ───────────────────────────────────────────────
+    _VIS_RX = re.compile(
+        r'\b(show|graph|chart|plot|visuali[sz]e|compare|break\s*down|display|'
+        r'overview|view|analyse|analyze|breakdown|insight|deep\s*dive)\b',
+        re.IGNORECASE,
+    )
+    _AUTO_PANEL_TOPICS = {"roadmap", "stocks", "services", "gcp", "weather", "revenue"}
+    wants_panel = bool(_VIS_RX.search(user_msg)) or topic in _AUTO_PANEL_TOPICS
+    has_comparison = bool(re.search(
+        r'\b(vs|versus|compared|comparison|better|worse|competitor|rival)\b',
+        user_msg, re.IGNORECASE,
+    ))
+    numbers = re.findall(r'[\$£€]?[\d,]+\.?\d*[%°]?', reply)
+    _wants_enrichment = len(numbers) >= 2 or has_comparison or wants_panel
+
+    # ── Build panel from tool results ─────────────────────────────────
+    panel_data = None
+    if _wants_enrichment and len(reply) > 60:
+        # Format collected tool results as structured context for _panel_dynamic
+        extra_ctx = ""
+        for tool_name, result_str in tool_data.items():
+            header = tool_name.upper().replace("_", " ")
+            extra_ctx += f"\n\n[{header}]\n{result_str[:3000]}\n"
+
+        # Fast regex scaffold (instant, no LLM)
+        panel_data = _panel_from_reply(user_msg, reply)
+
+        # Rich dynamic panel — uses real tool data as ground truth
+        dynamic = await _panel_dynamic(user_msg, reply, extra_ctx)
+        if dynamic:
+            if panel_data:
+                # Merge: dynamic enriches the regex scaffold
+                _skip = {"chart", "table", "stats"}
+                for key in (_PANEL_MERGE_KEYS - _skip):
+                    if dynamic.get(key) and not panel_data.get(key):
+                        panel_data[key] = dynamic[key]
+                if dynamic.get("chart") and not panel_data.get("chart"):
+                    panel_data["chart"] = dynamic["chart"]
+                if dynamic.get("table") and not panel_data.get("table"):
+                    panel_data["table"] = dynamic["table"]
+                if dynamic.get("title") and panel_data.get("title") == "RESEARCH ANALYSIS":
+                    panel_data["title"] = dynamic["title"]
+                if dynamic.get("summary") and len(dynamic["summary"]) > len(panel_data.get("summary", "")):
+                    panel_data["summary"] = dynamic["summary"]
+                if dynamic.get("stats"):
+                    _seen = {s.get("label", "").lower() for s in panel_data.get("stats", [])}
+                    for s in dynamic["stats"]:
+                        if s.get("label", "").lower() not in _seen:
+                            panel_data.setdefault("stats", []).append(s)
+            else:
+                panel_data = dynamic
+
+    # ── Follow-up suggestions ─────────────────────────────────────────
+    followups = _generate_template_followups(user_msg, reply, topic)
+
+    result: dict = {"reply": reply, "error": False}
+    if panel_data:
+        result["panel"] = panel_data
+    if followups:
+        result["followups"] = followups
+    return result
 
 
 async def _build_context(topic: str | None = None, query: str = "") -> str:
