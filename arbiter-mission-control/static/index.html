@@ -88,13 +88,13 @@
             </div>
         </aside>
 
-        <!-- VERTICAL EXPAND OVERLAY (slides up from dock on click) -->
-        <div class="dock-overlay" id="dock-overlay">
-            <div class="dock-overlay-header">
-                <span class="dock-overlay-title" id="dock-overlay-title"></span>
-                <button class="expand-close" id="dock-overlay-close">✕</button>
+        <!-- FULL-PAGE PANEL VIEWPORT (transitions in when a dock tile is clicked) -->
+        <div class="panel-viewport" id="panel-viewport">
+            <div class="panel-viewport-header">
+                <span class="panel-viewport-title" id="panel-viewport-title"></span>
+                <button class="panel-close-btn" id="panel-close-btn">✕</button>
             </div>
-            <div class="dock-overlay-body" id="dock-overlay-body"></div>
+            <div class="panel-viewport-body" id="panel-viewport-body"></div>
         </div>
 
         <!-- ═══ CAMERA VISION ══════════════════════════════════════ -->
@@ -178,8 +178,8 @@
                 <span class="chat-panel-title">⌨ HANDS-ON</span>
                 <div class="chat-panel-actions">
                     <span class="session-badge" id="session-badge" title="Cached queries this session">0</span>
-                    <button class="chat-action-btn" id="btn-sessions" title="View saved sessions">📁</button>
-                    <button class="chat-action-btn" id="btn-report" title="Build report">📊</button>
+                    <button class="chat-action-btn" id="btn-sessions" title="View saved sessions"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></button>
+                    <button class="chat-action-btn" id="btn-report" title="Build report"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 20V10M12 20V4M6 20v-6"/></svg></button>
                     <button class="chat-action-btn session-new" id="btn-new-session" title="Start fresh">⟳</button>
                     <button class="chat-panel-close" id="chat-panel-close" title="Return to voice mode">✕</button>
                 </div>
@@ -398,10 +398,34 @@
         <!-- CEO Orchestration -->
         <div id="dock-panel-ceo" class="dock-panel-inner">
             <div class="ceo-orch">
+                <!-- Master CEO card -->
+                <div class="ceo-master-card" id="ceo-master-card">
+                    <div class="ceo-master-icon"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 20h20l-2-8-4 4-4-8-4 8-4-4z"/><path d="M5 20v2h14v-2"/></svg></div>
+                    <div class="ceo-master-info">
+                        <div class="ceo-master-status ready"><span class="ceo-dot"></span> ONLINE</div>
+                        <div class="ceo-master-name">CEO ORCHESTRATOR</div>
+                        <div class="ceo-master-role">Strategic Command Layer</div>
+                        <div class="ceo-master-desc">Routes directives to specialised sub-agents. Coordinates multi-model responses across research, marketing, sales, engineering & analytics.</div>
+                    </div>
+                    <div class="ceo-master-stats">
+                        <div class="ceo-master-stat"><span class="ceo-master-stat-val" id="ceo-stat-routes">0</span><span class="ceo-master-stat-lbl">ROUTES</span></div>
+                        <div class="ceo-master-stat"><span class="ceo-master-stat-val" id="ceo-stat-reads">0</span><span class="ceo-master-stat-lbl">READS</span></div>
+                    </div>
+                </div>
+
+                <!-- Broadcast input -->
                 <div class="ceo-broadcast-row">
                     <input type="text" class="ceo-broadcast-input" id="ceo-broadcast-input" placeholder="Broadcast a directive to all agents..." autocomplete="off" />
                     <button class="ceo-broadcast-btn" id="ceo-broadcast-btn" title="Send to all agents">⌁ BROADCAST</button>
                 </div>
+
+                <!-- Connection lines -->
+                <div class="ceo-connections"><div class="ceo-conn-line"></div><div class="ceo-conn-spread"></div></div>
+
+                <!-- Sub-agent heading -->
+                <div class="ceo-section-header">SUB-AGENTS</div>
+
+                <!-- Agent grid -->
                 <div class="ceo-agent-grid" id="ceo-agent-grid"></div>
             </div>
         </div>
@@ -445,11 +469,27 @@
     <!-- ═══ SESSION REPORT OVERLAY ═══ -->
     <div class="report-overlay" id="report-overlay">
         <div class="report-header">
-            <span class="report-title">📊 SESSION REPORT</span>
+            <span class="report-title"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:6px"><path d="M18 20V10M12 20V4M6 20v-6"/></svg>SESSION REPORT</span>
             <span class="report-meta" id="report-meta"></span>
-            <button class="report-close" id="report-close">✕ CLOSE</button>
+            <button class="report-close" id="report-close">✕</button>
         </div>
         <div class="report-body" id="report-body"></div>
+    </div>
+
+    <!-- ═══ LOCK SCREEN OVERLAY ═══ -->
+    <div class="lock-overlay" id="lock-overlay">
+        <div class="lock-status" id="lock-status">LOCKED</div>
+        <div class="lock-prompt" id="lock-prompt">Voice or type passcode to unlock</div>
+        <div class="lock-passcode-row" id="lock-passcode-row">
+            <input type="password" class="lock-input" id="lock-input" placeholder="Enter passcode" maxlength="4" autocomplete="off" />
+            <button class="lock-submit" id="lock-submit">UNLOCK</button>
+        </div>
+        <div class="lock-dots" id="lock-dots">
+            <span class="lock-dot" id="lock-dot-0"></span>
+            <span class="lock-dot" id="lock-dot-1"></span>
+            <span class="lock-dot" id="lock-dot-2"></span>
+            <span class="lock-dot" id="lock-dot-3"></span>
+        </div>
     </div>
 
     <!-- Hidden panels for JS compat -->
@@ -460,6 +500,6 @@
         <div id="panel-systems"></div>
     </div>
 
-    <script src="/static/jarvis.js?v=20260619a"></script>
+    <script src="/static/jarvis.js?v=20260619b"></script>
 </body>
 </html>

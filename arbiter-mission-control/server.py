@@ -454,7 +454,7 @@ def _make_reminder_handler(message: str):
 # ── Built-in scheduled jobs ──────────────────────────────────────────
 
 async def _job_morning_briefing():
-    """Daily 8:00 AM briefing: weather, stocks, emails, agenda."""
+    """Daily 8:00 AM briefing: weather, emails, agenda. No stocks/markets."""
     try:
         ctx = await _get_context_fast()
         # Build a multi-section panel
@@ -471,20 +471,6 @@ async def _job_morning_briefing():
                 panel_stats.append({"label": "Temperature", "value": f"{temp}°C", "status": None})
                 panel_stats.append({"label": "Feels Like", "value": f"{feels}°C", "status": None})
                 sections.append(f"{temp}°C in London, feels like {feels}°C")
-        except Exception:
-            pass
-
-        # Stocks
-        try:
-            s = await stocks()
-            if s.get("quotes"):
-                movers = sorted(s["quotes"], key=lambda q: abs(q.get("changePct", 0) or 0), reverse=True)[:3]
-                for q in movers:
-                    name = _TICKER_NAMES.get(q["symbol"], q["symbol"])
-                    pct = q.get("changePct", 0) or 0
-                    status = "good" if pct >= 0 else "bad"
-                    panel_stats.append({"label": name, "value": f"{pct:+.1f}%", "status": status})
-                sections.append(f"Top movers: {', '.join(m['symbol'] for m in movers)}")
         except Exception:
             pass
 
@@ -811,7 +797,7 @@ async def _job_insight_scan():
 
 
 scheduler.add("insight_scan", "Proactive Insights", "0,5,10,15,20,25,30,35,40,45,50,55 * * * *",
-              _job_insight_scan, enabled=True)
+              _job_insight_scan, enabled=False)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1099,6 +1085,12 @@ async def dashboard():
     html_path = Path(__file__).parent / "static" / "index.html"
     return HTMLResponse(html_path.read_text())
 
+@app.get("/panel/{panel_key}", response_class=HTMLResponse)
+async def panel_route(panel_key: str):
+    """Serve the same SPA for panel deep-links — JS handles routing."""
+    html_path = Path(__file__).parent / "static" / "index.html"
+    return HTMLResponse(html_path.read_text())
+
 
 # ── System Status ─────────────────────────────────────────────────────
 @app.get("/api/status")
@@ -1253,7 +1245,7 @@ CEO_AGENTS = {
         "role": "Intel Gatherer",
         "model": "gemini-2.5-pro",
         "provider": "gemini",
-        "icon": "🔍",
+        "icon": "search",
         "colour": "#00e5ff",
         "description": "Market signals, research briefs, sources & strategic content",
         "system_prompt": (
@@ -1269,8 +1261,8 @@ CEO_AGENTS = {
         "role": "Market Voice",
         "model": "gpt-4.1",
         "provider": "openai",
-        "icon": "📢",
-        "colour": "#ff6ec7",
+        "icon": "megaphone",
+        "colour": "#ff4081",
         "description": "Strategy → content angles, campaigns & publish-ready drafts",
         "system_prompt": (
             "You are ARBITER's CMO agent — the marketing voice for Sir Luke's brand. "
@@ -1285,7 +1277,7 @@ CEO_AGENTS = {
         "role": "Revenue Ops",
         "model": "gpt-4.1",
         "provider": "openai",
-        "icon": "💰",
+        "icon": "trending-up",
         "colour": "#ffd700",
         "description": "Qualifies leads, drafts outreach & tracks follow-up opportunities",
         "system_prompt": (
@@ -1300,7 +1292,7 @@ CEO_AGENTS = {
         "role": "Technical Vision",
         "model": "gpt-4.1",
         "provider": "openai",
-        "icon": "⚙️",
+        "icon": "cpu",
         "colour": "#76ff03",
         "description": "Verifies technical plans, architecture & engineering vision",
         "system_prompt": (
@@ -1315,7 +1307,7 @@ CEO_AGENTS = {
         "role": "Signal Layer",
         "model": "gemini-2.5-pro",
         "provider": "gemini",
-        "icon": "📊",
+        "icon": "bar-chart",
         "colour": "#b388ff",
         "description": "Performance, trends, records & operational signal quality",
         "system_prompt": (
@@ -3548,7 +3540,8 @@ async def _panel_dynamic(user_msg: str, llm_reply: str, extra_ctx: str = "") -> 
 
 async def _panel_executive_dashboard() -> dict | None:
     """Build a multi-source executive dashboard for general/briefing queries.
-    Combines revenue, stocks, services, and roadmap into a rich dual-wing view."""
+    Combines revenue, services, and roadmap into a rich dual-wing view.
+    No stocks/markets — this is a personal project briefing."""
     sections = []
     all_stats = []
 
@@ -3564,30 +3557,6 @@ async def _panel_executive_dashboard() -> dict | None:
             all_stats.append({"label": "Subscribers", "value": f"{subs:,}", "status": "good"})
             if churned > 0:
                 all_stats.append({"label": "Churned", "value": f"{churned}", "status": "bad"})
-    except Exception:
-        pass
-
-    # ── Stock snapshot (hbar) ──
-    try:
-        s = await stocks()
-        quotes = s.get("quotes", [])
-        items = []
-        for q in quotes:
-            sym = q.get("symbol", "")
-            if sym.startswith("^"):
-                continue
-            pct = q.get("regularMarketChangePercent", 0) or 0
-            items.append({"name": _TICKER_NAMES.get(sym, sym), "pct": round(pct, 2)})
-        if items:
-            items.sort(key=lambda x: x["pct"], reverse=True)
-            sections.append({
-                "chart": {
-                    "type": "hbar",
-                    "labels": [i["name"] for i in items],
-                    "values": [i["pct"] for i in items],
-                    "label": "Daily Change %",
-                },
-            })
     except Exception:
         pass
 
@@ -3638,7 +3607,7 @@ async def _panel_executive_dashboard() -> dict | None:
         insights = await _analyze_insights()
         for ins in insights[:3]:
             all_stats.append({
-                "label": f"💡 {ins['title']}",
+                "label": f"▸ {ins['title']}",
                 "value": ins["severity"].upper(),
                 "status": "bad" if ins["severity"] == "high" else "warn" if ins["severity"] == "medium" else None,
             })
@@ -3729,8 +3698,8 @@ async def _panel_roadmap(intent: str) -> dict | None:
         now = datetime.utcnow()
         status_map = {"planned": None, "in_progress": "good", "completed": "good",
                       "at_risk": "bad", "blocked": "bad"}
-        cat_icons = {"launch": "🚀", "milestone": "📌", "campaign": "📣",
-                     "review": "📋"}
+        cat_icons = {"launch": "◆", "milestone": "◇", "campaign": "▸",
+                     "review": "▹"}
 
         # Stats summary
         total = len(milestones)

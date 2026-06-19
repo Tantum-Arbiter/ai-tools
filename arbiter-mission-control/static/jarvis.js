@@ -6,6 +6,38 @@
 const REFRESH_INTERVAL = 60_000;
 let countdown = REFRESH_INTERVAL / 1000;
 
+// ── SVG Icon Library (replaces emojis) ──────────────────────────
+const _SVG = (name, size = 16) => {
+    const icons = {
+        search:       `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>`,
+        megaphone:    `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 11l18-5v12L3 13v-2z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/></svg>`,
+        'trending-up':`<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>`,
+        cpu:          `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg>`,
+        'bar-chart':  `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 20V10M12 20V4M6 20v-6"/></svg>`,
+        camera:       `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>`,
+        scale:        `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v18"/><path d="M1 6l5 6 5-6"/><path d="M13 6l5 6 5-6"/></svg>`,
+        globe:        `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>`,
+        play:         `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>`,
+        rocket:       `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"/><path d="M12 15l-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"/><path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0"/><path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"/></svg>`,
+        pin:          `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>`,
+        broadcast:    `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"/><path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.4"/><circle cx="12" cy="12" r="2"/><path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.4"/><path d="M19.1 4.9C23 8.8 23 15.1 19.1 19"/></svg>`,
+        clipboard:    `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/></svg>`,
+        droplet:      `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/></svg>`,
+        wind:         `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9.59 4.59A2 2 0 1 1 11 8H2m10.59 11.41A2 2 0 1 0 14 16H2m15.73-8.27A2.5 2.5 0 1 1 19.5 12H2"/></svg>`,
+        sun:          `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>`,
+        'cloud-sun':  `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v2M4.93 4.93l1.41 1.41M20 12h2M17.66 4.93l-1.41 1.41M16 12a4 4 0 0 0-8 0"/><path d="M17.5 21H9a5 5 0 0 1 .5-9.97 7 7 0 0 1 13 3.47A4.5 4.5 0 0 1 17.5 21z"/></svg>`,
+        cloud:        `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>`,
+        'cloud-rain': `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/><line x1="8" y1="21" x2="8" y2="23"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="16" y1="21" x2="16" y2="23"/></svg>`,
+        snowflake:    `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="2" x2="12" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/><line x1="19.07" y1="4.93" x2="4.93" y2="19.07"/></svg>`,
+        'cloud-fog':  `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/><line x1="4" y1="22" x2="20" y2="22"/></svg>`,
+        zap:          `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>`,
+        thermometer:  `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/></svg>`,
+        bell:         `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>`,
+        crown:        `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 20h20l-2-8-4 4-4-8-4 8-4-4z"/><path d="M5 20v2h14v-2"/></svg>`,
+    };
+    return icons[name] || `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/></svg>`;
+};
+
 // ════════════════════════════════════════════════════════════════
 //  ORB — Particle Nebula with orbital rings and compass ticks
 // ════════════════════════════════════════════════════════════════
@@ -467,6 +499,7 @@ class VoiceEngine {
         this._pendingStart = null;    // 'passive' | 'active' — queued for onend
         this._silenceTimer = null;
         this._finalTranscript = '';
+        this._suppressRestart = false;  // blocks onend from restarting after briefing dismiss
 
         // Active follow-up options (for voice command selection)
         this._activeFollowups = null;
@@ -477,6 +510,13 @@ class VoiceEngine {
         this._sessionName = null;
         this._reportCharts = [];  // track charts rendered inside the report
 
+        // Lock mode
+        this._locked = false;
+        this._lockTimer = null;
+        this._lockIdleMs = 5 * 60 * 1000; // 5 minutes
+        this._lockCode = '9086';
+        this._lockVoiceDigits = [];        // collected spoken digits
+
         // Audio analyser for real-time mic level → orb waveform
         this._audioCtx = null;
         this._analyser = null;
@@ -485,6 +525,7 @@ class VoiceEngine {
 
         this._initRecognition();
         this._initUI();
+        this._initLock();
 
         // Log boot status to conversation log
         const srAvailable = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
@@ -1045,6 +1086,12 @@ class VoiceEngine {
                 const bl = document.getElementById('btn-listen');
                 if (bl) bl.classList.remove('active');
                 if (text) {
+                    // Lock mode: route to unlock handler
+                    if (this._locked) {
+                        this._handleLockVoice(text);
+                        setTimeout(() => this._requestStart('passive'), 600);
+                        return;
+                    }
                     this._processingQuery = true;
                     this._mode = 'off';
                     this._sendMessage(text);
@@ -1056,10 +1103,11 @@ class VoiceEngine {
                 return;
             }
 
-            // Default: restart passive
-            if (this._mode === 'off' && !this.speaking) {
+            // Default: restart passive (unless suppressed)
+            if (this._mode === 'off' && !this.speaking && !this._suppressRestart) {
                 setTimeout(() => this._requestStart('passive'), 1000);
             }
+            this._suppressRestart = false;
         };
     }
 
@@ -1086,6 +1134,13 @@ class VoiceEngine {
         try { this.recognition.stop(); } catch {}
 
         if (text) {
+            // ── Lock mode intercept — route voice to unlock handler ──
+            if (this._locked) {
+                this._handleLockVoice(text);
+                setTimeout(() => this._requestStart('passive'), 600);
+                return;
+            }
+
             // ── Check for follow-up option selection via voice ──
             // "option 1", "number 2", "continue with option 3", "choose 1", "go with 2"
             const optMatch = text.match(/\b(?:option|number|choose|go\s+with|select|pick)\s*(\d)\b/i)
@@ -1131,6 +1186,349 @@ class VoiceEngine {
                 setTimeout(() => this._requestStart('passive'), 500);
             }, 6000);
         }
+    }
+
+    // ── Lock Mode ─────────────────────────────────────────────────
+    _initLock() {
+        // Inactivity timer — reset on user interaction
+        const resetIdle = () => this._resetLockTimer();
+        ['mousemove', 'mousedown', 'keydown', 'touchstart', 'scroll'].forEach(ev =>
+            document.addEventListener(ev, resetIdle, { passive: true })
+        );
+        this._resetLockTimer();
+
+        // Lock screen UI
+        const lockInput = document.getElementById('lock-input');
+        const lockSubmit = document.getElementById('lock-submit');
+        if (lockInput) {
+            lockInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') this._tryPasscodeUnlock();
+            });
+        }
+        if (lockSubmit) {
+            lockSubmit.addEventListener('click', () => this._tryPasscodeUnlock());
+        }
+    }
+
+    _resetLockTimer() {
+        if (this._locked) return; // don't reset while locked
+        clearTimeout(this._lockTimer);
+        this._lockTimer = setTimeout(() => this._lock(), this._lockIdleMs);
+    }
+
+    _lock() {
+        if (this._locked) return;
+        this._locked = true;
+        this._lockVoiceDigits = [];
+        document.body.classList.add('locked');
+
+        // Close anything open
+        if (typeof activeDock !== 'undefined' && activeDock) closeExpandPanels();
+        this._closeAnalysisWings();
+        this._closeReport();
+        this._hideSessionDrawer();
+        if (this._chatMode) this._exitChatMode();
+
+        // Stop speaking
+        if (this.speaking) this.stopSpeaking();
+
+        // Update lock screen UI
+        const lockPrompt = document.getElementById('lock-prompt');
+        const lockInput = document.getElementById('lock-input');
+        if (lockPrompt) lockPrompt.textContent = 'Voice or type passcode to unlock';
+        if (lockInput) { lockInput.value = ''; lockInput.classList.remove('error'); }
+        this._updateLockDots(0);
+
+        // Keep passive listening for voice unlock
+        this.orb.setState('idle');
+        setTimeout(() => this._requestStart('passive'), 500);
+
+        console.log('[ARBITER] Locked — idle timeout');
+    }
+
+    _unlock() {
+        if (!this._locked) return;
+        this._locked = false;
+        this._lockVoiceDigits = [];
+        document.body.classList.remove('locked');
+        this._updateLockDots(0);
+
+        // Clear passcode input
+        const lockInput = document.getElementById('lock-input');
+        if (lockInput) { lockInput.value = ''; lockInput.classList.remove('error'); lockInput.blur(); }
+
+        // Restart idle timer
+        this._resetLockTimer();
+
+        // Resume passive listening
+        this.orb.setState('idle');
+        setTimeout(() => this._requestStart('passive'), 500);
+
+        console.log('[ARBITER] Unlocked');
+    }
+
+    _tryPasscodeUnlock() {
+        const lockInput = document.getElementById('lock-input');
+        if (!lockInput) return;
+        const val = lockInput.value.trim();
+        if (val === this._lockCode) {
+            this._speak('Welcome back, Sir.');
+            this._unlock();
+        } else {
+            lockInput.classList.add('error');
+            this._flashLockDotsError();
+            setTimeout(() => {
+                lockInput.classList.remove('error');
+                lockInput.value = '';
+                lockInput.focus();
+            }, 800);
+        }
+    }
+
+    // Process a spoken digit during lock mode. Returns true if handled.
+    _handleLockVoice(transcript) {
+        if (!this._locked) return false;
+        const lower = transcript.toLowerCase().trim();
+
+        // Allow "hands on" to show passcode input while locked
+        if (/^(hands[\s-]*on|type|keyboard|passcode|type\s*mode|chat\s*mode)/.test(lower)) {
+            const lockRow = document.getElementById('lock-passcode-row');
+            const lockPrompt = document.getElementById('lock-prompt');
+            const lockInput = document.getElementById('lock-input');
+            if (lockRow) lockRow.style.display = 'flex';
+            if (lockPrompt) lockPrompt.textContent = 'Enter passcode below';
+            if (lockInput) { lockInput.value = ''; lockInput.focus(); }
+            return true;
+        }
+
+        // Map spoken words to digits
+        const digitMap = {
+            'zero': '0', 'oh': '0', 'o': '0', '0': '0',
+            'one': '1', 'won': '1', '1': '1',
+            'two': '2', 'to': '2', 'too': '2', '2': '2',
+            'three': '3', 'tree': '3', '3': '3',
+            'four': '4', 'for': '4', 'fore': '4', '4': '4',
+            'five': '5', '5': '5',
+            'six': '6', 'sicks': '6', '6': '6',
+            'seven': '7', '7': '7',
+            'eight': '8', 'ate': '8', '8': '8',
+            'nine': '9', 'nein': '9', '9': '9',
+        };
+
+        // Also match full number strings like "9086" spoken as one word
+        const digitChars = lower.replace(/[^0-9]/g, '');
+        if (digitChars.length >= 4) {
+            // Fast speech — all digits came at once (e.g. "9086" or "nine zero eight six" as "9086")
+            const entered = digitChars.slice(0, 4);
+            this._updateLockDots(4);
+            if (entered === this._lockCode) {
+                this._speak('Access granted. Welcome back, Sir.');
+                this._lockVoiceDigits = [];
+                setTimeout(() => this._unlock(), 300);
+            } else {
+                this._flashLockDotsError();
+                this._lockVoiceDigits = [];
+                setTimeout(() => {
+                    this._updateLockDots(0);
+                    // Ensure recognition restarts for another attempt
+                    if (!this._running) this._requestStart('passive');
+                }, 900);
+            }
+            return true;
+        }
+
+        // Extract digits from transcript word by word
+        const words = lower.replace(/[.,!?]/g, '').split(/\s+/);
+        let newDigits = false;
+        for (const w of words) {
+            if (digitMap[w] !== undefined) {
+                this._lockVoiceDigits.push(digitMap[w]);
+                newDigits = true;
+            }
+        }
+
+        // If no digits found in speech, ignore silently (don't get stuck)
+        if (!newDigits && digitChars.length === 0) {
+            return true;
+        }
+
+        // Update dots
+        this._updateLockDots(Math.min(this._lockVoiceDigits.length, 4));
+
+        // Check if we have 4 digits
+        if (this._lockVoiceDigits.length >= 4) {
+            const entered = this._lockVoiceDigits.slice(0, 4).join('');
+            this._lockVoiceDigits = [];
+            if (entered === this._lockCode) {
+                this._speak('Access granted. Welcome back, Sir.');
+                setTimeout(() => this._unlock(), 300);
+            } else {
+                this._flashLockDotsError();
+                setTimeout(() => {
+                    this._updateLockDots(0);
+                    if (!this._running) this._requestStart('passive');
+                }, 900);
+            }
+        }
+
+        return true; // always consume input while locked
+    }
+
+    _updateLockDots(count) {
+        for (let i = 0; i < 4; i++) {
+            const dot = document.getElementById(`lock-dot-${i}`);
+            if (dot) {
+                dot.classList.toggle('filled', i < count);
+                dot.classList.remove('error');
+            }
+        }
+    }
+
+    _flashLockDotsError() {
+        for (let i = 0; i < 4; i++) {
+            const dot = document.getElementById(`lock-dot-${i}`);
+            if (dot) { dot.classList.add('error'); dot.classList.remove('filled'); }
+        }
+        setTimeout(() => {
+            for (let i = 0; i < 4; i++) {
+                const dot = document.getElementById(`lock-dot-${i}`);
+                if (dot) dot.classList.remove('error');
+            }
+        }, 800);
+    }
+
+    // ── Navigation command handler (shared by voice + chat) ─────
+    // Returns { speak, log } if handled, or null to pass through to LLM.
+    _handleNavCommand(lower) {
+        // ── Lock commands ──
+        const lockPatterns = [
+            /^(go\s*to\s*sleep|lock\s*(it|up|off|out|screen|down|arbiter)?|sleep\s*mode|good\s*night)\s*(arbiter)?[.!]?$/,
+            /\block\s*(it|off|out|up|down|screen|arbiter)\b/,
+            /\bgo\s*to\s*sleep\b/,
+            /\bsleep\s*mode\b/,
+        ];
+        if (lockPatterns.some(p => p.test(lower))) {
+            this._lock();
+            return { speak: 'Locking down, Sir. Say the code to wake me.', log: 'Locked by command' };
+        }
+
+        // ── Go back / close / dismiss — closes whatever is open ──
+        const backPatterns = [
+            /^(go\s*back|back|return|home|dashboard|main\s*screen)\s*(arbiter)?[.!]?$/,
+            /^(dismiss|close|hide|clear)\s*(panel|panels|view|views|that|it|this|all|everything)?\s*(arbiter)?[.!]?$/,
+            /^(thank\s*you|thanks|cheers|ta)\s*(arbiter)?[.!]?$/,
+            /^that['']?s?\s*(all|enough|it|fine|good)\s*(arbiter)?[.!]?$/,
+            /^(go\s*away|never\s*mind|cancel)\s*(arbiter)?[.!]?$/,
+            /^(exit|leave|escape)\s*(panel|this|view)?\s*(arbiter)?[.!]?$/,
+        ];
+        if (backPatterns.some(p => p.test(lower))) {
+            // Close everything: panels, analysis wings, report, session drawer
+            if (typeof activeDock !== 'undefined' && activeDock) closeExpandPanels();
+            this._closeAnalysisWings();
+            this._closeReport();
+            this._hideSessionDrawer();
+            return { speak: 'Understood, Sir.', log: 'Navigation: returned to dashboard' };
+        }
+
+        // ── Open specific panels by name ──
+        const panelMap = {
+            email:     [/\b(email|mail|inbox)\b/],
+            revenue:   [/\b(revenue|money|mrr|income|earnings|subscri)\b/],
+            content:   [/\b(content|pipeline|posts?)\b/],
+            engage:    [/\b(engage|engagement|analytics)\b/],
+            weather:   [/\b(weather|forecast|temperature|rain)\b/],
+            deadlines: [/\b(deadline|roadmap|milestone)\b/],
+            bulletins: [/\b(bulletin|news|feed)\b/],
+            todo:      [/\b(todo|to.do|tasks?|list)\b/],
+            cicd:      [/\b(ci\s*cd|deploy|build|pipeline|freya)\b/],
+            claude:    [/\b(claude|api\s*usage|token)\b/],
+            ceo:       [/\b(ceo|orchestrat|agents?)\b/],
+        };
+        const openPanelRx = /^(open|show|go\s*to|navigate\s*to|view|pull\s*up|bring\s*up|display|launch)\s+(the\s+)?(.+?)(\s+panel)?(\s+arbiter)?[.!]?$/;
+        const openMatch = lower.match(openPanelRx);
+        if (openMatch) {
+            const target = openMatch[3];
+            for (const [key, patterns] of Object.entries(panelMap)) {
+                if (patterns.some(p => p.test(target))) {
+                    if (typeof openExpandPanels === 'function') openExpandPanels(key);
+                    return { speak: `Opening ${DOCK_EXPAND[key]?.title || key}, Sir.`, log: `Panel opened: ${key}` };
+                }
+            }
+        }
+
+        // ── Mode switching — hands-free ↔ hands-on ──
+        const chatOnPatterns = [
+            /^(hands[\s-]*on|type\s*mode|chat\s*mode|keyboard|text\s*mode|switch\s*to\s*(typing|chat|text|keyboard))\s*(mode)?\s*(arbiter)?[.!]?$/,
+            /^(i\s*want\s*to\s*type|let\s*me\s*type)\s*(arbiter)?[.!]?$/,
+        ];
+        const chatOffPatterns = [
+            /^(hands[\s-]*free|voice\s*mode|listen\s*mode|switch\s*to\s*(voice|listening|hands[\s-]*free))\s*(mode)?\s*(arbiter)?[.!]?$/,
+            /^(stop\s*typing|close\s*chat|exit\s*chat|leave\s*chat)\s*(mode)?\s*(arbiter)?[.!]?$/,
+        ];
+        if (chatOnPatterns.some(p => p.test(lower))) {
+            this._enterChatMode();
+            return { speak: 'Hands-on mode activated, Sir. Type your message below.', log: 'Switched to hands-on mode' };
+        }
+        if (chatOffPatterns.some(p => p.test(lower))) {
+            if (this._chatMode) this._exitChatMode();
+            return { speak: 'Voice mode resumed, Sir. Listening.', log: 'Switched to voice mode' };
+        }
+
+        // ── Session commands ──
+        const sessionPatterns = [
+            { rx: /^(new session|start fresh|clear session|reset session|fresh start)\s*(arbiter)?[.!]?$/, action: 'new' },
+            { rx: /^(build|generate|show|create)\s*(a\s*)?(report|session report)\s*(arbiter)?[.!]?$/, action: 'report' },
+            { rx: /^(show|list|my)\s*(sessions?|previous sessions?|past sessions?)\s*(arbiter)?[.!]?$/, action: 'list' },
+            { rx: /^(close|hide|exit)\s*(report|the report)\s*(arbiter)?[.!]?$/, action: 'close_report' },
+        ];
+        const sessionMatch = sessionPatterns.find(p => p.rx.test(lower));
+        if (sessionMatch) {
+            switch (sessionMatch.action) {
+                case 'new':
+                    this._saveCurrentSession();
+                    this._sessionCache = [];
+                    this._sessionId = Date.now().toString(36);
+                    this._sessionName = null;
+                    this.history = [];
+                    this._updateSessionBadge();
+                    this._closeAnalysisWings();
+                    return { speak: 'New session started, Sir. Previous data has been archived.', log: 'Session reset' };
+                case 'report':
+                    this._buildReport();
+                    return { speak: 'Session report compiled, Sir.', log: 'Report built' };
+                case 'list':
+                    this._showSessionDrawer();
+                    return { speak: 'Here are your previous sessions, Sir.', log: 'Session drawer opened' };
+                case 'close_report':
+                    this._closeReport();
+                    return { speak: 'Report closed.', log: 'Report closed' };
+            }
+        }
+
+        // ── Vision commands — toggle camera ──
+        const visionOnPatterns = [
+            /\b(switch|turn|go)\s*(to|on)\s*(camera|vision|cam)\b/,
+            /\b(open|start|activate|enable)\s*(the\s*)?(camera|vision|cam|webcam)\b/,
+            /\bwhat\s*(do|can)\s*you\s*see\b/,
+            /\bwhat('?s| is)\s*in front of (you|me)\b/,
+            /\blook\s*(at|around)\b/,
+            /\bshow\s*me\s*(your|the)\s*(eyes|vision|camera|view)\b/,
+        ];
+        const visionOffPatterns = [
+            /\b(close|stop|turn off|deactivate|disable|exit)\s*(the\s*)?(camera|vision|cam|webcam)\b/,
+            /\b(camera|vision|cam)\s*(off|close|stop)\b/,
+        ];
+        if (visionOffPatterns.some(p => p.test(lower))) {
+            _camClose();
+            return { speak: 'Vision mode disengaged, Sir.', log: 'Camera closed' };
+        }
+        if (!_cam.active && visionOnPatterns.some(p => p.test(lower))) {
+            _camOpen();
+            return { speak: 'Remote vision activated, Sir.', log: 'Camera activated' };
+        }
+
+        // Not a nav command — let it through to the LLM
+        return null;
     }
 
     // ── Manual toggle (orb click / mic button) ──────────────────
@@ -1364,6 +1762,17 @@ class VoiceEngine {
         // Add user message to chat panel
         this._chatAddMessage(text, 'user');
 
+        // ── Local nav intercept — no API call needed ──
+        const lower = text.toLowerCase().trim();
+        const navResult = this._handleNavCommand(lower);
+        if (navResult) {
+            logConvo(text, 'user');
+            logConvo(navResult.log, 'system');
+            this._chatAddMessage(navResult.speak, 'assistant');
+            this.orb.setState('idle');
+            return;
+        }
+
         // Show thinking indicator
         const thinkEl = document.createElement('div');
         thinkEl.className = 'chat-msg thinking';
@@ -1383,7 +1792,7 @@ class VoiceEngine {
             if (_cam.active && _cam.stream) {
                 const frameB64 = _camCaptureFrame();
                 if (frameB64) {
-                    this._chatAddMessage('[📷 Frame captured]', 'system');
+                    this._chatAddMessage('[FRAME CAPTURED]', 'system');
                     _camScanStart();
                     r = await fetch('/api/jarvis/vision', {
                         method: 'POST',
@@ -1506,7 +1915,7 @@ class VoiceEngine {
         container.innerHTML = '';
         container.classList.remove('picked');
 
-        const hintLabels = { deeper: '🔍 DEEPER', compare: '⚖ COMPARE', action: '▶ ACTION', broader: '🌐 BROADER' };
+        const hintLabels = { deeper: `${_SVG('search',12)} DEEPER`, compare: `${_SVG('scale',12)} COMPARE`, action: `${_SVG('play',12)} ACTION`, broader: `${_SVG('globe',12)} BROADER` };
 
         followups.forEach((fu, i) => {
             const btn = document.createElement('button');
@@ -1581,6 +1990,9 @@ class VoiceEngine {
 
     // ── Send message to LLM ─────────────────────────────────────
     async _sendMessage(text) {
+        // Reset idle lock timer on every interaction
+        this._resetLockTimer();
+
         // Stop any current speech immediately when a new query comes in
         if (this.speaking) this.stopSpeaking();
 
@@ -1602,110 +2014,42 @@ class VoiceEngine {
             if (noPatterns.test(lower)) {
                 window._briefingPromptActive = false;
                 _dismissBriefingPrompt();
+                this._clearDialogueOptions();
                 logConvo(text, 'user');
                 logConvo('Briefing declined', 'system');
-                this.orb.setState('idle');
                 this._processingQuery = false;
-                this._speak('Very well, Sir. Standing by.');
-                setTimeout(() => this._requestStart('passive'), 500);
+                // Stop any current speech (greeting may still be playing)
+                if (this.speaking) this.stopSpeaking();
+                // Kill recognition and prevent onend from restarting it
+                this._suppressRestart = true;
+                this._pendingStart = null;
+                this._mode = 'off';
+                if (this.recognition) {
+                    try { this.recognition.abort(); } catch {}
+                }
+                this.orb.setState('idle');
+                // Brief silence then passive standby — no spoken reply
+                setTimeout(() => this._requestStart('passive'), 3000);
                 return;
             }
-            // Anything else — dismiss prompt and process normally
-            window._briefingPromptActive = false;
-            _dismissBriefingPrompt();
+            // Anything else (including mic picking up TTS audio) — ignore it entirely.
+            // Do NOT forward to the LLM while briefing prompt is active.
+            this.orb.setState('idle');
+            this._processingQuery = false;
+            return;
         }
 
-        // ── Voice intercepts — handle UI commands before hitting the LLM ──
+        // ── Voice intercepts — handle UI commands locally (no LLM cost) ──
         const lower = text.toLowerCase().trim();
-        const dismissPatterns = [
-            /^(dismiss|close|hide|clear)\s*(panel|panels|view|views|that|it|this)?$/,
-            /^(thank\s*you|thanks|cheers|ta)\s*(arbiter)?[.!]?$/,
-            /^that['']?s?\s*(all|enough|it|fine|good)\s*(arbiter)?[.!]?$/,
-            /^(go\s*away|never\s*mind|cancel)\s*(arbiter)?[.!]?$/,
-        ];
-        if (dismissPatterns.some(p => p.test(lower))) {
-            this._closeAnalysisWings();
+        const navResult = this._handleNavCommand(lower);
+        if (navResult) {
             logConvo(text, 'user');
-            logConvo('Panels dismissed.', 'system');
-            this.orb.setState('idle');
-            this._speak('Dismissed, Sir.');
-            this._processingQuery = false;
-            setTimeout(() => this._requestStart('passive'), 500);
-            return;
-        }
-
-        // ── Session voice commands ──
-        const sessionPatterns = [
-            { rx: /^(new session|start fresh|clear session|reset session|fresh start)\s*(arbiter)?[.!]?$/, action: 'new' },
-            { rx: /^(build|generate|show|create)\s*(a\s*)?(report|session report)\s*(arbiter)?[.!]?$/, action: 'report' },
-            { rx: /^(show|list|my)\s*(sessions?|previous sessions?|past sessions?)\s*(arbiter)?[.!]?$/, action: 'list' },
-            { rx: /^(close|hide|exit)\s*(report|the report)\s*(arbiter)?[.!]?$/, action: 'close_report' },
-        ];
-        const sessionMatch = sessionPatterns.find(p => p.rx.test(lower));
-        if (sessionMatch) {
-            logConvo(text, 'user');
+            logConvo(navResult.log, 'system');
             this.orb.setState('idle');
             this._processingQuery = false;
-            switch (sessionMatch.action) {
-                case 'new':
-                    this._saveCurrentSession();
-                    this._sessionCache = [];
-                    this._sessionId = Date.now().toString(36);
-                    this._sessionName = null;
-                    this.history = [];
-                    this._updateSessionBadge();
-                    this._closeAnalysisWings();
-                    this._speak('New session started, Sir. Previous data has been archived.');
-                    logConvo('Session reset', 'system');
-                    break;
-                case 'report':
-                    this._buildReport();
-                    this._speak('Session report compiled. All visualisations and data are assembled.');
-                    break;
-                case 'list':
-                    this._showSessionDrawer();
-                    this._speak('Here are your previous sessions, Sir.');
-                    break;
-                case 'close_report':
-                    this._closeReport();
-                    this._speak('Report closed.');
-                    break;
-            }
-            setTimeout(() => this._requestStart('passive'), 500);
-            return;
-        }
-
-        // ── Vision voice commands — toggle camera ──
-        const visionOnPatterns = [
-            /\b(switch|turn|go)\s*(to|on)\s*(camera|vision|cam)\b/,
-            /\b(open|start|activate|enable)\s*(the\s*)?(camera|vision|cam|webcam)\b/,
-            /\bwhat\s*(do|can)\s*you\s*see\b/,
-            /\bwhat('?s| is)\s*in front of (you|me)\b/,
-            /\blook\s*(at|around)\b/,
-            /\bshow\s*me\s*(your|the)\s*(eyes|vision|camera|view)\b/,
-        ];
-        const visionOffPatterns = [
-            /\b(close|stop|turn off|deactivate|disable|exit)\s*(the\s*)?(camera|vision|cam|webcam)\b/,
-            /\b(camera|vision|cam)\s*(off|close|stop)\b/,
-        ];
-        if (visionOffPatterns.some(p => p.test(lower))) {
-            _camClose();
-            logConvo(text, 'user');
-            this.orb.setState('idle');
-            this._processingQuery = false;
-            this._speak('Vision mode disengaged, Sir.');
-            logConvo('Camera closed', 'system');
-            setTimeout(() => this._requestStart('passive'), 500);
-            return;
-        }
-        if (!_cam.active && visionOnPatterns.some(p => p.test(lower))) {
-            _camOpen();
-            logConvo(text, 'user');
-            this.orb.setState('idle');
-            this._processingQuery = false;
-            this._speak('Remote vision activated, Sir. I can now see what you show me.');
-            logConvo('Camera activated via voice', 'system');
-            setTimeout(() => this._requestStart('passive'), 500);
+            this._speak(navResult.speak, () => {
+                setTimeout(() => this._requestStart('passive'), 500);
+            });
             return;
         }
 
@@ -2207,21 +2551,135 @@ class VoiceEngine {
         const last = new Date(this._sessionCache[count - 1].ts);
         meta.textContent = `${count} queries · ${first.toLocaleTimeString()} – ${last.toLocaleTimeString()} · ${first.toLocaleDateString()}`;
 
-        // Render each cached exchange as a report section
+        // ── HIGH-LEVEL OVERVIEW CARD ──────────────────────────────────
+        // Aggregate all stats, key metrics, and summaries across the session
+        const allStats = [];
+        const allKeyMetrics = [];
+        const allInsights = [];
+        const allRecommendations = [];
+        const allSummaries = [];
+        const topicSet = new Set();
+
+        for (const entry of this._sessionCache) {
+            if (!entry.panel) continue;
+            const sections = entry.panel.sections || [entry.panel];
+            for (const s of sections) {
+                if (s.title) topicSet.add(s.title);
+                if (s.stats && Array.isArray(s.stats)) allStats.push(...s.stats);
+                if (s.key_metrics && Array.isArray(s.key_metrics)) allKeyMetrics.push(...s.key_metrics);
+                if (s.insights && Array.isArray(s.insights)) allInsights.push(...s.insights);
+                if (s.recommendations && Array.isArray(s.recommendations)) allRecommendations.push(...s.recommendations);
+                if (s.summary) allSummaries.push(s.summary);
+            }
+            if (entry.panel.title) topicSet.add(entry.panel.title);
+            if (entry.panel.summary) allSummaries.push(entry.panel.summary);
+        }
+
+        // Overview section — session stats at a glance
+        const overviewSection = document.createElement('div');
+        overviewSection.className = 'report-section';
+
+        const overviewHeader = document.createElement('div');
+        overviewHeader.className = 'report-section-header';
+        overviewHeader.innerHTML = `
+            <span class="report-section-num">◆</span>
+            <span class="report-section-query">SESSION OVERVIEW</span>
+            <span class="report-section-time">${first.toLocaleDateString()}</span>`;
+        overviewSection.appendChild(overviewHeader);
+
+        // Summary stats grid
+        const overviewStats = [
+            { label: 'QUERIES', value: `${count}`, status: null },
+            { label: 'DURATION', value: this._formatDuration(last - first), status: null },
+            { label: 'TOPICS', value: `${topicSet.size}`, status: null },
+            { label: 'DATA POINTS', value: `${allStats.length}`, status: null },
+        ];
+
+        const overviewViz = document.createElement('div');
+        overviewViz.className = 'report-viz-container';
+        this._renderSection(overviewViz, { stats: overviewStats });
+        overviewSection.appendChild(overviewViz);
+
+        // Topic list
+        if (topicSet.size > 0) {
+            const topicEl = document.createElement('div');
+            topicEl.className = 'report-topic-list';
+            topicEl.innerHTML = Array.from(topicSet)
+                .map(t => `<span class="report-topic-tag">${this._escHtml(t)}</span>`).join('');
+            overviewSection.appendChild(topicEl);
+        }
+
+        // Aggregated summaries
+        if (allSummaries.length > 0) {
+            const summaryEl = document.createElement('div');
+            summaryEl.className = 'report-summary-block';
+            // Deduplicate and limit
+            const unique = [...new Set(allSummaries)].slice(0, 6);
+            summaryEl.innerHTML = unique.map(s => `<p class="report-summary-line">▸ ${this._escHtml(s)}</p>`).join('');
+            overviewSection.appendChild(summaryEl);
+        }
+
+        body.appendChild(overviewSection);
+
+        // ── KEY INSIGHTS & RECOMMENDATIONS (aggregated) ───────────────
+        if (allInsights.length > 0 || allRecommendations.length > 0) {
+            const stratSection = document.createElement('div');
+            stratSection.className = 'report-section';
+
+            const stratHeader = document.createElement('div');
+            stratHeader.className = 'report-section-header';
+            stratHeader.innerHTML = `
+                <span class="report-section-num">◇</span>
+                <span class="report-section-query">KEY INSIGHTS & RECOMMENDATIONS</span>`;
+            stratSection.appendChild(stratHeader);
+
+            const stratViz = document.createElement('div');
+            stratViz.className = 'report-viz-container';
+
+            // Deduplicate insights by text
+            const seenInsights = new Set();
+            const uniqueInsights = allInsights.filter(i => {
+                if (seenInsights.has(i.text)) return false;
+                seenInsights.add(i.text); return true;
+            }).slice(0, 8);
+
+            const seenRecs = new Set();
+            const uniqueRecs = allRecommendations.filter(r => {
+                if (seenRecs.has(r.text)) return false;
+                seenRecs.add(r.text); return true;
+            }).slice(0, 6);
+
+            if (uniqueInsights.length > 0) {
+                this._renderSection(stratViz, { insights: uniqueInsights });
+            }
+            if (uniqueRecs.length > 0) {
+                this._renderSection(stratViz, { recommendations: uniqueRecs });
+            }
+            stratSection.appendChild(stratViz);
+            body.appendChild(stratSection);
+        }
+
+        // ── DETAILED RESULTS — one section per exchange (data only) ───
         for (let i = 0; i < count; i++) {
             const entry = this._sessionCache[i];
+            // Skip entries with no panel data and no meaningful reply
+            if (!entry.panel && (!entry.reply || entry.reply.length < 20)) continue;
+
             const section = document.createElement('div');
             section.className = 'report-section';
 
-            // Section header: query
+            // Header — use panel title if available, otherwise truncated query
+            const panelTitle = entry.panel?.title ||
+                (entry.panel?.sections?.[0]?.title) ||
+                entry.query.slice(0, 80);
             const header = document.createElement('div');
             header.className = 'report-section-header';
             header.innerHTML = `<span class="report-section-num">${i + 1}</span>
-                <span class="report-section-query">${this._escHtml(entry.query)}</span>
+                <span class="report-section-query">${this._escHtml(panelTitle)}</span>
                 <span class="report-section-time">${new Date(entry.ts).toLocaleTimeString()}</span>`;
             section.appendChild(header);
 
-            // Reply text
+            // ARBITER's analysis (the reply) — condensed
             if (entry.reply) {
                 const replyEl = document.createElement('div');
                 replyEl.className = 'report-reply';
@@ -2234,7 +2692,6 @@ class VoiceEngine {
                 const vizContainer = document.createElement('div');
                 vizContainer.className = 'report-viz-container';
                 section.appendChild(vizContainer);
-                // Use the existing _renderSection to render all viz types
                 this._renderReportPanel(vizContainer, entry.panel);
             }
 
@@ -2243,6 +2700,15 @@ class VoiceEngine {
 
         overlay.classList.add('active');
         document.body.classList.add('report-active');
+    }
+
+    _formatDuration(ms) {
+        const s = Math.floor(ms / 1000);
+        if (s < 60) return `${s}s`;
+        const m = Math.floor(s / 60);
+        if (m < 60) return `${m}m ${s % 60}s`;
+        const h = Math.floor(m / 60);
+        return `${h}h ${m % 60}m`;
     }
 
     _renderReportPanel(container, panel) {
@@ -2330,6 +2796,23 @@ class VoiceEngine {
         const d = document.createElement('div');
         d.textContent = str;
         return d.innerHTML;
+    }
+
+    // ── Render a single table cell ──────────────────────────────
+    _renderTableCell(tr, cell) {
+        const td = document.createElement('td');
+        const str = String(cell ?? '');
+        if (str.startsWith('+') || str.includes('↑')) td.className = 'at-positive';
+        else if (str.startsWith('-') || str.includes('↓')) td.className = 'at-negative';
+        if (/https?:\/\/\S+/.test(str)) {
+            td.innerHTML = str.replace(
+                /(https?:\/\/[^\s<]+)/g,
+                '<a href="$1" target="_blank" rel="noopener" class="at-link">$1</a>'
+            );
+        } else {
+            td.textContent = str;
+        }
+        tr.appendChild(td);
     }
 
     // ── Render a single panel section ────────────────────────────
@@ -2616,47 +3099,81 @@ class VoiceEngine {
         // ── Table ──
         if (section.table) {
             const t = section.table;
-            const tableWrap = document.createElement('div');
-            tableWrap.className = 'analysis-table-wrap';
-            const table = document.createElement('table');
-            table.className = 'analysis-table';
-            if (t.headers) {
-                const thead = document.createElement('thead');
-                const tr = document.createElement('tr');
-                for (const h of t.headers) {
-                    const th = document.createElement('th');
-                    th.textContent = h;
-                    tr.appendChild(th);
-                }
-                thead.appendChild(tr);
-                table.appendChild(thead);
-            }
-            if (t.rows) {
-                const tbody = document.createElement('tbody');
-                for (const row of t.rows) {
-                    const tr = document.createElement('tr');
-                    for (const cell of row) {
-                        const td = document.createElement('td');
-                        const str = String(cell);
-                        if (str.startsWith('+') || str.includes('↑')) td.className = 'at-positive';
-                        else if (str.startsWith('-') || str.includes('↓')) td.className = 'at-negative';
-                        // Detect URLs and make them clickable
-                        if (/https?:\/\/\S+/.test(str)) {
-                            td.innerHTML = str.replace(
-                                /(https?:\/\/[^\s<]+)/g,
-                                '<a href="$1" target="_blank" rel="noopener" class="at-link">$1</a>'
-                            );
-                        } else {
-                            td.textContent = str;
-                        }
-                        tr.appendChild(td);
+            const colCount = (t.headers || []).length;
+
+            // If table has many columns, split into stacked tables.
+            // Keep column 0 (label/name) as the key in both halves.
+            if (colCount > 5 && t.headers && t.rows) {
+                const mid = Math.ceil(colCount / 2);
+                const slices = [
+                    { headers: t.headers.slice(0, mid), colStart: 0, colEnd: mid },
+                    { headers: [t.headers[0], ...t.headers.slice(mid)], colStart: mid, colEnd: colCount, includeKey: true },
+                ];
+                for (const slice of slices) {
+                    const wrap = document.createElement('div');
+                    wrap.className = 'analysis-table-wrap';
+                    const tbl = document.createElement('table');
+                    tbl.className = 'analysis-table';
+                    const thead = document.createElement('thead');
+                    const htr = document.createElement('tr');
+                    for (const h of slice.headers) {
+                        const th = document.createElement('th');
+                        th.textContent = h;
+                        htr.appendChild(th);
                     }
-                    tbody.appendChild(tr);
+                    thead.appendChild(htr);
+                    tbl.appendChild(thead);
+                    const tbody = document.createElement('tbody');
+                    for (const row of t.rows) {
+                        const tr = document.createElement('tr');
+                        if (slice.includeKey) {
+                            // Include key column (col 0) + slice columns
+                            this._renderTableCell(tr, row[0]);
+                            for (let c = slice.colStart; c < slice.colEnd; c++) {
+                                this._renderTableCell(tr, row[c]);
+                            }
+                        } else {
+                            for (let c = slice.colStart; c < slice.colEnd; c++) {
+                                this._renderTableCell(tr, row[c]);
+                            }
+                        }
+                        tbody.appendChild(tr);
+                    }
+                    tbl.appendChild(tbody);
+                    wrap.appendChild(tbl);
+                    container.appendChild(wrap);
                 }
-                table.appendChild(tbody);
+            } else {
+                // Normal table — fits in container
+                const tableWrap = document.createElement('div');
+                tableWrap.className = 'analysis-table-wrap';
+                const table = document.createElement('table');
+                table.className = 'analysis-table';
+                if (t.headers) {
+                    const thead = document.createElement('thead');
+                    const tr = document.createElement('tr');
+                    for (const h of t.headers) {
+                        const th = document.createElement('th');
+                        th.textContent = h;
+                        tr.appendChild(th);
+                    }
+                    thead.appendChild(tr);
+                    table.appendChild(thead);
+                }
+                if (t.rows) {
+                    const tbody = document.createElement('tbody');
+                    for (const row of t.rows) {
+                        const tr = document.createElement('tr');
+                        for (const cell of row) {
+                            this._renderTableCell(tr, cell);
+                        }
+                        tbody.appendChild(tr);
+                    }
+                    table.appendChild(tbody);
+                }
+                tableWrap.appendChild(table);
+                container.appendChild(tableWrap);
             }
-            tableWrap.appendChild(table);
-            container.appendChild(tableWrap);
         }
 
         // ── Insights list (strategic observations) ──
@@ -3379,7 +3896,7 @@ function logConvo(text, role) {
         'user': '► YOU',
         'user-interim': '► MIC',
         'arbiter': '◄ ARBITER',
-        'system': '⚙ SYSTEM',
+        'system': '● SYSTEM',
     };
 
     // For interim speech results, update in-place instead of adding new lines
@@ -4650,11 +5167,16 @@ async function refreshServiceHealth() {
 }
 
 // ── Weather ─────────────────────────────────────────────────────
-const WMO_ICONS = {
-    0:'☀️',1:'🌤',2:'⛅',3:'☁️',45:'🌫',48:'🌫',51:'🌦',53:'🌧',55:'🌧',
-    56:'🌨',57:'🌨',61:'🌧',63:'🌧',65:'🌧',66:'🌨',67:'🌨',71:'❄️',73:'❄️',
-    75:'❄️',77:'🌨',80:'🌦',81:'🌧',82:'⛈',85:'❄️',86:'❄️',95:'⛈',96:'⛈',99:'⛈',
-};
+const WMO_ICONS = (() => {
+    const s = _SVG('sun',20), cs = _SVG('cloud-sun',20), c = _SVG('cloud',20),
+          cr = _SVG('cloud-rain',20), sn = _SVG('snowflake',20),
+          fg = _SVG('cloud-fog',20), z = _SVG('zap',20);
+    return {
+        0:s,1:cs,2:cs,3:c,45:fg,48:fg,51:cr,53:cr,55:cr,
+        56:sn,57:sn,61:cr,63:cr,65:cr,66:sn,67:sn,71:sn,73:sn,
+        75:sn,77:sn,80:cr,81:cr,82:z,85:sn,86:sn,95:z,96:z,99:z,
+    };
+})();
 const WMO_DESC = {
     0:'Clear',1:'Mostly Clear',2:'Partly Cloudy',3:'Overcast',45:'Fog',48:'Rime Fog',
     51:'Light Drizzle',53:'Drizzle',55:'Heavy Drizzle',61:'Light Rain',63:'Rain',
@@ -4669,7 +5191,7 @@ async function refreshWeather() {
     if (!card || !data || !data.current) return;
     const c = data.current;
     const wc = c.weather_code ?? 0;
-    const icon = WMO_ICONS[wc] || '🌡';
+    const icon = WMO_ICONS[wc] || _SVG('thermometer',20);
     const desc = WMO_DESC[wc] || 'Unknown';
     let html = `<div class="weather-main">
         <span class="weather-icon">${icon}</span>
@@ -4680,8 +5202,8 @@ async function refreshWeather() {
     </div>
     <div class="weather-details">
         <span>Feels ${Math.round(c.apparent_temperature || 0)}°C</span>
-        <span>💧 ${c.relative_humidity_2m || 0}%</span>
-        <span>💨 ${Math.round(c.wind_speed_10m || 0)} km/h</span>
+        <span>${_SVG('droplet',12)} ${c.relative_humidity_2m || 0}%</span>
+        <span>${_SVG('wind',12)} ${Math.round(c.wind_speed_10m || 0)} km/h</span>
     </div>`;
     const daily = data.daily || {};
     if (daily.time && daily.time.length) {
@@ -4689,7 +5211,7 @@ async function refreshWeather() {
         for (let i = 0; i < Math.min(3, daily.time.length); i++) {
             const d = new Date(daily.time[i]);
             const dn = DAY_NAMES[d.getDay()];
-            const dIcon = WMO_ICONS[daily.weather_code?.[i]] || '🌡';
+            const dIcon = WMO_ICONS[daily.weather_code?.[i]] || _SVG('thermometer',18);
             html += `<div class="weather-day">
                 <div>${dn}</div>
                 <div class="wd-icon">${dIcon}</div>
@@ -4706,8 +5228,8 @@ async function refreshWeather() {
     if (wDesc) wDesc.textContent = c.is_day ? 'DAY' : 'NIGHT';
 }
 
-// ── Vertical Dock Overlay ────────────────────────────────────────
-// Each dock tile maps to a title and a panel ID
+// ── Full-Page Panel Routing ──────────────────────────────────────
+// Each dock tile maps to a title and a panel ID; clicking opens a full-page view
 const DOCK_EXPAND = {
     email:     { title: 'EMAIL INTELLIGENCE',       panel: 'dock-panel-email' },
     revenue:   { title: 'REVENUE OVERVIEW',          panel: 'dock-panel-revenue' },
@@ -4725,7 +5247,7 @@ const DOCK_EXPAND = {
 let activeDock = null;
 let _panelTransitioning = false;
 
-function openExpandPanels(panelKey) {
+function openExpandPanels(panelKey, pushHistory = true) {
     const cfg = DOCK_EXPAND[panelKey];
     if (!cfg) return;
     if (_panelTransitioning) return;
@@ -4733,23 +5255,21 @@ function openExpandPanels(panelKey) {
     // Toggle off if same
     if (activeDock === panelKey) { closeExpandPanels(); return; }
 
-    // If another panel is open, swap content in-place
-    if (activeDock) {
-        _returnPanelContent(); // move old content back
+    // If another panel is open, swap content (no re-animate orb)
+    const wasOpen = !!activeDock;
+    if (wasOpen) {
+        _returnPanelContent();
     }
 
-    const overlay = document.getElementById('dock-overlay');
-    const body = document.getElementById('dock-overlay-body');
-    const title = document.getElementById('dock-overlay-title');
-    if (!overlay || !body) return;
+    // If camera is active, close it first
+    if (_cam.active) _camClose();
 
-    // Position overlay above the dock bar
-    const dock = document.querySelector('.mc-dock');
-    if (dock) {
-        overlay.style.bottom = dock.offsetHeight + 'px';
-    }
+    const viewport = document.getElementById('panel-viewport');
+    const body = document.getElementById('panel-viewport-body');
+    const title = document.getElementById('panel-viewport-title');
+    if (!viewport || !body) return;
 
-    // Move panel content into overlay
+    // Move panel content into viewport
     const src = cfg.panel ? document.getElementById(cfg.panel) : null;
     if (src) {
         body.innerHTML = '';
@@ -4757,7 +5277,6 @@ function openExpandPanels(panelKey) {
         src.style.display = 'block';
     }
     title.textContent = cfg.title || '';
-    overlay.classList.add('active');
 
     activeDock = panelKey;
 
@@ -4766,28 +5285,106 @@ function openExpandPanels(panelKey) {
     const tile = document.querySelector(`.dock-panel[data-dock="${panelKey}"]`);
     if (tile) tile.classList.add('active');
 
-    // Refresh CEO panel if opening
-    if (panelKey === 'ceo') {
-        _ceoInitPanel();
+    // Push URL state
+    if (pushHistory) {
+        history.pushState({ panel: panelKey }, '', `/panel/${panelKey}`);
     }
 
-    // Refresh todo if opening todo panel
+    // If already in panel-mode, cross-fade to new content (no orb animation needed)
+    if (wasOpen) {
+        // Fade out old content
+        body.classList.add('swapping');
+        setTimeout(() => {
+            // Content was already swapped by _returnPanelContent + appendChild above
+            viewport.classList.add('active');
+            // Fade in new content
+            requestAnimationFrame(() => {
+                body.classList.remove('swapping');
+            });
+            _panelPostOpen(panelKey);
+        }, 300);
+        return;
+    }
+
+    _panelTransitioning = true;
+
+    // Clear dialogue options
+    const dOpts = document.getElementById('dialogue-options');
+    if (dOpts) dOpts.innerHTML = '';
+    _dismissBriefingPrompt();
+
+    // ── Orb → bottom-right corner (same as camera mode) ──
+    const mc = document.querySelector('.mc-center');
+    const startRect = mc.getBoundingClientRect();
+    const orbCanvas = document.getElementById('orb-canvas');
+    const orbW = orbCanvas ? orbCanvas.offsetWidth : startRect.width;
+    const scaleFrom = orbW / 130;
+
+    const startCX = startRect.left + startRect.width / 2;
+    const startCY = startRect.top + startRect.height / 2;
+
+    if (typeof orb !== 'undefined') orb._resize(130);
+    const mcW = mc.offsetWidth;
+    const mcH = mc.offsetHeight;
+
+    mc.style.position = 'fixed';
+    mc.style.top = (startCY - mcH / 2) + 'px';
+    mc.style.left = (startCX - mcW / 2) + 'px';
+    mc.style.transformOrigin = 'center center';
+    mc.style.transform = `translate(0px, 0px) scale(${scaleFrom})`;
+    mc.style.transition = 'none';
+    mc.style.zIndex = '600';
+    void mc.offsetHeight;
+
+    // Dim dashboard (keeps everything visible)
+    document.body.classList.add('panel-mode');
+
+    // Target: bottom-right corner — lift higher so orb clears dock/panels in windowed mode
+    const dockEl = document.querySelector('.mc-dock');
+    const dockH = dockEl ? dockEl.offsetHeight : 60;
+    const bottomPad = dockH + 40;   // clear the dock + breathing room
+    const targetTop = window.innerHeight - bottomPad - mcH;
+    const targetLeft = window.innerWidth - 32 - mcW;
+    const targetCX = targetLeft + mcW / 2;
+    const targetCY = targetTop + mcH / 2;
+    const dx = targetCX - startCX;
+    const dy = targetCY - startCY;
+
+    requestAnimationFrame(() => {
+        mc.style.transition = 'transform 0.9s cubic-bezier(0.22,1,0.36,1)';
+        mc.style.transform = `translate(${dx}px, ${dy}px) scale(1)`;
+    });
+
+    setTimeout(() => {
+        mc.style.transition = 'none';
+        mc.style.top = targetTop + 'px';
+        mc.style.left = targetLeft + 'px';
+        mc.style.transform = 'none';
+    }, 960);
+
+    // Show panel viewport after orb starts moving
+    setTimeout(() => {
+        viewport.classList.add('active');
+        _panelTransitioning = false;
+    }, 400);
+
+    _panelPostOpen(panelKey);
+}
+
+function _panelPostOpen(panelKey) {
+    // Panel-specific init hooks
+    if (panelKey === 'ceo') _ceoInitPanel();
     if (panelKey === 'todo') {
         _renderTodoList();
-        // Re-bind listeners after DOM move (belt-and-suspenders)
         const todoAddBtn = document.getElementById('todo-add-btn');
         const todoInput = document.getElementById('todo-input');
-        if (todoAddBtn) {
-            todoAddBtn.onclick = _addTodo;
-        }
-        if (todoInput) {
-            todoInput.onkeydown = e => { if (e.key === 'Enter') _addTodo(); };
-        }
+        if (todoAddBtn) todoAddBtn.onclick = _addTodo;
+        if (todoInput) todoInput.onkeydown = e => { if (e.key === 'Enter') _addTodo(); };
     }
 }
 
 function _returnPanelContent() {
-    const body = document.getElementById('dock-overlay-body');
+    const body = document.getElementById('panel-viewport-body');
     const panels = document.getElementById('dock-panels');
     if (!body) return;
     const child = body.querySelector('.dock-panel-inner');
@@ -4798,16 +5395,83 @@ function _returnPanelContent() {
     body.innerHTML = '';
 }
 
-function closeExpandPanels() {
+function closeExpandPanels(pushHistory = true) {
+    if (!activeDock) return;
+    if (_panelTransitioning) return;
+
+    _panelTransitioning = true;
     _returnPanelContent();
 
-    const overlay = document.getElementById('dock-overlay');
-    const title = document.getElementById('dock-overlay-title');
-    if (overlay) overlay.classList.remove('active');
+    const viewport = document.getElementById('panel-viewport');
+    const title = document.getElementById('panel-viewport-title');
+    if (viewport) viewport.classList.remove('active');
     if (title) title.textContent = '';
 
     activeDock = null;
     document.querySelectorAll('.dock-panel[data-dock]').forEach(t => t.classList.remove('active'));
+
+    // Push URL back to root
+    if (pushHistory) {
+        history.pushState({}, '', '/');
+    }
+
+    // ── Orb → back to center ──
+    const mc = document.querySelector('.mc-center');
+    if (!mc) { _panelTransitioning = false; document.body.classList.remove('panel-mode'); return; }
+
+    const curRect = mc.getBoundingClientRect();
+    const curCX = curRect.left + curRect.width / 2;
+    const curCY = curRect.top + curRect.height / 2;
+    const fullSize = Math.max(200, Math.min(window.innerWidth * 0.2, 420));
+    const scaleFrom = 130 / fullSize;
+
+    if (typeof orb !== 'undefined') orb._resize(Math.round(fullSize));
+    const mcW = mc.offsetWidth;
+    const mcH = mc.offsetHeight;
+
+    const parent = mc.parentElement;
+    const parentRect = parent.getBoundingClientRect();
+    const targetCX = parentRect.left + parentRect.width / 2;
+    const targetCY = parentRect.top + parentRect.height / 2;
+
+    mc.style.position = 'fixed';
+    mc.style.top = (curCY - mcH / 2) + 'px';
+    mc.style.left = (curCX - mcW / 2) + 'px';
+    mc.style.transformOrigin = 'center center';
+    mc.style.transform = `translate(0px, 0px) scale(${scaleFrom})`;
+    mc.style.transition = 'none';
+    void mc.offsetHeight;
+
+    // Restore dashboard
+    document.body.classList.remove('panel-mode');
+
+    const dx = targetCX - curCX;
+    const dy = targetCY - curCY;
+
+    requestAnimationFrame(() => {
+        mc.style.transition = 'transform 0.9s cubic-bezier(0.22,1,0.36,1)';
+        mc.style.transform = `translate(${dx}px, ${dy}px) scale(1)`;
+    });
+
+    setTimeout(() => {
+        mc.style.transition = 'none !important';
+        mc.style.cssText = '';
+        void mc.offsetHeight;
+        _panelTransitioning = false;
+    }, 960);
+}
+
+// Quick close — removes panel content and body class without orb animation
+// Used when transitioning directly to another mode (e.g. camera)
+function _panelQuickClose() {
+    _returnPanelContent();
+    const viewport = document.getElementById('panel-viewport');
+    if (viewport) viewport.classList.remove('active');
+    document.body.classList.remove('panel-mode');
+    activeDock = null;
+    _panelTransitioning = false;
+    document.querySelectorAll('.dock-panel[data-dock]').forEach(t => t.classList.remove('active'));
+    history.pushState({}, '', '/');
 }
 
 // ── Todo List (localStorage-backed) ─────────────────────────────
@@ -5076,7 +5740,7 @@ async function refreshDeadlines() {
 
     const now = new Date();
     let nextDeadline = null;
-    const catIcons = { launch: '🚀', milestone: '📌', campaign: '📣', review: '📋' };
+    const catIcons = { launch: _SVG('rocket',14), milestone: _SVG('pin',14), campaign: _SVG('broadcast',14), review: _SVG('clipboard',14) };
     const STATUS_LABEL = { planned: 'PLANNED', in_progress: 'ACTIVE', at_risk: 'AT RISK', blocked: 'BLOCKED', completed: 'DONE' };
     const STATUS_CLS   = { planned: 'planned', in_progress: 'active', at_risk: 'at-risk', blocked: 'at-risk', completed: 'done' };
 
@@ -5101,7 +5765,7 @@ async function refreshDeadlines() {
         items.forEach(m => {
             const status = m.status || 'planned';
             const cls = STATUS_CLS[status] || 'planned';
-            const icon = catIcons[m.category] || '📌';
+            const icon = catIcons[m.category] || _SVG('pin',14);
             const shortTitle = m.title.length > 20 ? m.title.slice(0, 18) + '…' : m.title;
             html += `<div class="rm-q-marker ${cls}" title="${m.title} — ${m.date}">
                 <span class="rm-q-dot"></span>
@@ -5134,7 +5798,7 @@ async function refreshDeadlines() {
     sorted.forEach(m => {
         const target = new Date(m.date);
         const diffDays = Math.ceil((target - now) / (1000 * 60 * 60 * 24));
-        const icon = catIcons[m.category] || '📌';
+        const icon = catIcons[m.category] || _SVG('pin',14);
         const status = m.status || 'planned';
         const statusDotCls = status === 'completed' ? 'success'
             : status === 'at_risk' || status === 'blocked' ? 'failure'
@@ -5207,20 +5871,16 @@ async function _ceoInitPanel() {
         card.style.setProperty('--agent-colour', agent.colour || 'var(--cyan)');
         card.dataset.agentId = agent.id;
         card.innerHTML = `
-            <div class="ceo-agent-header">
-                <div class="ceo-agent-icon">${agent.icon || '◆'}</div>
-                <div class="ceo-agent-info">
-                    <div class="ceo-agent-name">${agent.name}</div>
-                    <div class="ceo-agent-role">${agent.role}</div>
-                </div>
-                <span class="ceo-agent-model">${agent.model}</span>
-            </div>
+            <div class="ceo-agent-badge idle"><span class="ceo-dot"></span> idle</div>
+            <div class="ceo-agent-icon">${_SVG(agent.icon || 'search', 22)}</div>
+            <div class="ceo-agent-name">${agent.name}</div>
+            <div class="ceo-agent-role">${agent.role}</div>
             <div class="ceo-agent-desc">${agent.description}</div>
+            <div class="ceo-agent-model">MODEL <b>${agent.model}</b></div>
             <div class="ceo-agent-input-row">
-                <input type="text" class="ceo-agent-input" placeholder="Task this agent..." autocomplete="off" />
+                <input type="text" class="ceo-agent-input" placeholder="Task..." autocomplete="off" />
                 <button class="ceo-agent-send">▶</button>
             </div>
-            <div class="ceo-agent-status ready"><span class="ceo-dot"></span> READY</div>
             <div class="ceo-agent-output"></div>
         `;
 
@@ -5244,19 +5904,40 @@ async function _ceoInitPanel() {
     }
 }
 
+let _ceoRouteCount = 0;
+let _ceoReadCount = 0;
+
+function _ceoUpdateStats() {
+    const routeEl = document.getElementById('ceo-stat-routes');
+    const readEl = document.getElementById('ceo-stat-reads');
+    if (routeEl) routeEl.textContent = _ceoRouteCount;
+    if (readEl) readEl.textContent = _ceoReadCount;
+}
+
+function _ceoBadge(cardEl, state, label) {
+    const badge = cardEl.querySelector('.ceo-agent-badge');
+    if (!badge) return;
+    badge.className = `ceo-agent-badge ${state}`;
+    badge.innerHTML = `<span class="ceo-dot"></span> ${label}`;
+}
+
 async function _ceoDispatch(agentId, inputEl, cardEl) {
     const task = inputEl.value.trim();
     if (!task) return;
     inputEl.value = '';
 
-    const status = cardEl.querySelector('.ceo-agent-status');
     const output = cardEl.querySelector('.ceo-agent-output');
 
     // Set working state
-    status.className = 'ceo-agent-status working';
-    status.innerHTML = '<span class="ceo-dot"></span> WORKING';
+    _ceoBadge(cardEl, 'working', 'working');
     output.classList.add('active');
     output.textContent = 'Processing directive...';
+    _ceoRouteCount++;
+    _ceoUpdateStats();
+
+    // Set master card to working
+    const masterStatus = document.querySelector('#ceo-master-card .ceo-master-status');
+    if (masterStatus) { masterStatus.className = 'ceo-master-status working'; masterStatus.innerHTML = '<span class="ceo-dot"></span> ROUTING'; }
 
     try {
         const resp = await fetch('/api/ceo/dispatch', {
@@ -5265,21 +5946,23 @@ async function _ceoDispatch(agentId, inputEl, cardEl) {
             body: JSON.stringify({ agent_id: agentId, task }),
         });
         const data = await resp.json();
+        _ceoReadCount++;
+        _ceoUpdateStats();
 
         if (data.error) {
-            status.className = 'ceo-agent-status error';
-            status.innerHTML = '<span class="ceo-dot"></span> ERROR';
+            _ceoBadge(cardEl, 'error', 'error');
             output.textContent = `Error: ${data.error}`;
         } else {
-            status.className = 'ceo-agent-status ready';
-            status.innerHTML = `<span class="ceo-dot"></span> COMPLETE — ${data.model}`;
+            _ceoBadge(cardEl, 'ready', 'complete');
             output.textContent = data.response || 'No response';
         }
     } catch (e) {
-        status.className = 'ceo-agent-status error';
-        status.innerHTML = '<span class="ceo-dot"></span> ERROR';
+        _ceoBadge(cardEl, 'error', 'error');
         output.textContent = `Network error: ${e.message}`;
     }
+
+    // Reset master card
+    if (masterStatus) { masterStatus.className = 'ceo-master-status ready'; masterStatus.innerHTML = '<span class="ceo-dot"></span> ONLINE'; }
 }
 
 async function _ceoBroadcast(inputEl) {
@@ -5290,15 +5973,19 @@ async function _ceoBroadcast(inputEl) {
     const grid = document.getElementById('ceo-agent-grid');
     if (!grid) return;
 
+    // Set master to working
+    const masterStatus = document.querySelector('#ceo-master-card .ceo-master-status');
+    if (masterStatus) { masterStatus.className = 'ceo-master-status working'; masterStatus.innerHTML = '<span class="ceo-dot"></span> BROADCASTING'; }
+
     // Set all cards to working
     grid.querySelectorAll('.ceo-agent-card').forEach(card => {
-        const status = card.querySelector('.ceo-agent-status');
         const output = card.querySelector('.ceo-agent-output');
-        status.className = 'ceo-agent-status working';
-        status.innerHTML = '<span class="ceo-dot"></span> WORKING';
+        _ceoBadge(card, 'working', 'working');
         output.classList.add('active');
         output.textContent = 'Processing directive...';
     });
+    _ceoRouteCount += _ceoAgents ? _ceoAgents.length : 5;
+    _ceoUpdateStats();
 
     try {
         const resp = await fetch('/api/ceo/broadcast', {
@@ -5312,29 +5999,29 @@ async function _ceoBroadcast(inputEl) {
             data.results.forEach(result => {
                 const card = grid.querySelector(`.ceo-agent-card[data-agent-id="${result.agent_id}"]`);
                 if (!card) return;
-                const status = card.querySelector('.ceo-agent-status');
                 const output = card.querySelector('.ceo-agent-output');
+                _ceoReadCount++;
 
                 if (result.error) {
-                    status.className = 'ceo-agent-status error';
-                    status.innerHTML = '<span class="ceo-dot"></span> ERROR';
+                    _ceoBadge(card, 'error', 'error');
                     output.textContent = `Error: ${result.error}`;
                 } else {
-                    status.className = 'ceo-agent-status ready';
-                    status.innerHTML = `<span class="ceo-dot"></span> COMPLETE — ${result.model}`;
+                    _ceoBadge(card, 'ready', 'complete');
                     output.textContent = result.response || 'No response';
                 }
             });
+            _ceoUpdateStats();
         }
     } catch (e) {
         grid.querySelectorAll('.ceo-agent-card').forEach(card => {
-            const status = card.querySelector('.ceo-agent-status');
             const output = card.querySelector('.ceo-agent-output');
-            status.className = 'ceo-agent-status error';
-            status.innerHTML = '<span class="ceo-dot"></span> ERROR';
+            _ceoBadge(card, 'error', 'error');
             output.textContent = `Network error: ${e.message}`;
         });
     }
+
+    // Reset master
+    if (masterStatus) { masterStatus.className = 'ceo-master-status ready'; masterStatus.innerHTML = '<span class="ceo-dot"></span> ONLINE'; }
 }
 
 
@@ -5352,8 +6039,8 @@ function _camOpen() {
     const video = document.getElementById('cam-video');
     if (!bg || !video) return;
 
-    // Close any open dock overlay
-    if (activeDock) closeExpandPanels();
+    // Close any open panel (quick, no orb animation — camera will handle that)
+    if (activeDock) _panelQuickClose();
 
     _cam.active = true;
 
@@ -5777,18 +6464,32 @@ function _camInitParticles() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-    // Dock panel clicks
+    // Dock panel clicks → full-page panel view
     document.querySelectorAll('.dock-panel[data-dock]').forEach(tile => {
         tile.addEventListener('click', () => openExpandPanels(tile.dataset.dock));
     });
-    // Close button (vertical overlay)
-    const closeBtn = document.getElementById('dock-overlay-close');
-    if (closeBtn) closeBtn.addEventListener('click', closeExpandPanels);
+    // Panel viewport close button
+    const panelCloseBtn = document.getElementById('panel-close-btn');
+    if (panelCloseBtn) panelCloseBtn.addEventListener('click', () => closeExpandPanels());
     // ESC key
     document.addEventListener('keydown', e => {
         if (e.key === 'Escape' && activeDock) closeExpandPanels();
         if (e.key === 'Escape' && _cam.active) _camClose();
     });
+    // Browser back/forward navigation
+    window.addEventListener('popstate', (e) => {
+        if (e.state && e.state.panel) {
+            openExpandPanels(e.state.panel, false);
+        } else if (activeDock) {
+            closeExpandPanels(false);
+        }
+    });
+    // On initial load, check if URL has a panel path
+    const pathMatch = window.location.pathname.match(/^\/panel\/(\w+)$/);
+    if (pathMatch && DOCK_EXPAND[pathMatch[1]]) {
+        // Delay to let boot animation finish
+        setTimeout(() => openExpandPanels(pathMatch[1], false), 2500);
+    }
     // Todo list: add button & enter key
     const todoAddBtn = document.getElementById('todo-add-btn');
     const todoInput = document.getElementById('todo-input');
@@ -5939,10 +6640,11 @@ function _offerMorningBriefing() {
     container.appendChild(prompt);
 
     // Speak the prompt — only if not already speaking or processing
+    // Pass a no-op onDone so _speak does NOT open a follow-up listen window
     if (typeof voice !== 'undefined' && voice._speak) {
         const busy = voice._processingQuery || voice.speaking || voice._chatMode;
         if (!busy) {
-            voice._speak(_greetLine);
+            voice._speak(_greetLine, () => {});
         }
     }
 
@@ -5962,6 +6664,23 @@ function _offerMorningBriefing() {
         window._briefingPromptActive = false;
         _dismissBriefingPrompt();
         if (typeof logConvo === 'function') logConvo('Briefing declined', 'system');
+        if (typeof voice !== 'undefined') {
+            // Stop any speech immediately (greeting may still be playing)
+            if (voice.speaking) voice.stopSpeaking();
+            // Clear dialogue options
+            voice._clearDialogueOptions();
+            // Kill recognition — prevent onend from restarting
+            voice._suppressRestart = true;
+            voice._pendingStart = null;
+            voice._mode = 'off';
+            voice._processingQuery = false;
+            if (voice.recognition) {
+                try { voice.recognition.abort(); } catch {}
+            }
+            voice.orb.setState('idle');
+            // Resume passive standby after a long delay
+            setTimeout(() => voice._requestStart('passive'), 3000);
+        }
     };
 }
 
@@ -6091,7 +6810,7 @@ _runBootSequence();
             }
             // Flash notification in title bar
             const origTitle = document.title;
-            document.title = `🔔 ${data.title}`;
+            document.title = `[!] ${data.title}`;
             setTimeout(() => { document.title = origTitle; }, 10000);
         }
 
