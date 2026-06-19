@@ -4719,6 +4719,7 @@ const DOCK_EXPAND = {
     todo:      { title: 'TODO LIST',                 panel: 'dock-panel-todo' },
     cicd:      { title: 'CI/CD — GROW WITH FREYA',   panel: 'dock-panel-cicd' },
     claude:    { title: 'CLAUDE API USAGE',           panel: 'dock-panel-claude' },
+    ceo:       { title: 'CEO ORCHESTRATION',           panel: 'dock-panel-ceo' },
 };
 
 let activeDock = null;
@@ -4764,6 +4765,11 @@ function openExpandPanels(panelKey) {
     document.querySelectorAll('.dock-panel[data-dock]').forEach(t => t.classList.remove('active'));
     const tile = document.querySelector(`.dock-panel[data-dock="${panelKey}"]`);
     if (tile) tile.classList.add('active');
+
+    // Refresh CEO panel if opening
+    if (panelKey === 'ceo') {
+        _ceoInitPanel();
+    }
 
     // Refresh todo if opening todo panel
     if (panelKey === 'todo') {
@@ -5172,6 +5178,165 @@ async function refreshDeadlines() {
         dlLabel.textContent = nextDeadline.title.substring(0, 16);
     }
 }
+
+// ── CEO Orchestration Module ──────────────────────────────────────
+let _ceoAgents = null;
+
+async function _ceoInitPanel() {
+    const grid = document.getElementById('ceo-agent-grid');
+    if (!grid) return;
+
+    // Fetch agent definitions if not cached
+    if (!_ceoAgents) {
+        try {
+            const resp = await fetch('/api/ceo/agents');
+            _ceoAgents = await resp.json();
+        } catch (e) {
+            grid.innerHTML = '<div class="feed-empty">FAILED TO LOAD AGENTS</div>';
+            return;
+        }
+    }
+
+    // Only render if grid is empty (avoid re-render on panel reopen)
+    if (grid.children.length > 0 && grid.querySelector('.ceo-agent-card')) return;
+
+    grid.innerHTML = '';
+    for (const agent of _ceoAgents) {
+        const card = document.createElement('div');
+        card.className = 'ceo-agent-card';
+        card.style.setProperty('--agent-colour', agent.colour || 'var(--cyan)');
+        card.dataset.agentId = agent.id;
+        card.innerHTML = `
+            <div class="ceo-agent-header">
+                <div class="ceo-agent-icon">${agent.icon || '◆'}</div>
+                <div class="ceo-agent-info">
+                    <div class="ceo-agent-name">${agent.name}</div>
+                    <div class="ceo-agent-role">${agent.role}</div>
+                </div>
+                <span class="ceo-agent-model">${agent.model}</span>
+            </div>
+            <div class="ceo-agent-desc">${agent.description}</div>
+            <div class="ceo-agent-input-row">
+                <input type="text" class="ceo-agent-input" placeholder="Task this agent..." autocomplete="off" />
+                <button class="ceo-agent-send">▶</button>
+            </div>
+            <div class="ceo-agent-status ready"><span class="ceo-dot"></span> READY</div>
+            <div class="ceo-agent-output"></div>
+        `;
+
+        // Wire up send
+        const input = card.querySelector('.ceo-agent-input');
+        const sendBtn = card.querySelector('.ceo-agent-send');
+        const sendFn = () => _ceoDispatch(agent.id, input, card);
+        sendBtn.addEventListener('click', sendFn);
+        input.addEventListener('keydown', e => { if (e.key === 'Enter' && input.value.trim()) sendFn(); });
+
+        grid.appendChild(card);
+    }
+
+    // Wire up broadcast
+    const bcastInput = document.getElementById('ceo-broadcast-input');
+    const bcastBtn = document.getElementById('ceo-broadcast-btn');
+    if (bcastBtn && bcastInput) {
+        const bcastFn = () => _ceoBroadcast(bcastInput);
+        bcastBtn.onclick = bcastFn;
+        bcastInput.onkeydown = e => { if (e.key === 'Enter' && bcastInput.value.trim()) bcastFn(); };
+    }
+}
+
+async function _ceoDispatch(agentId, inputEl, cardEl) {
+    const task = inputEl.value.trim();
+    if (!task) return;
+    inputEl.value = '';
+
+    const status = cardEl.querySelector('.ceo-agent-status');
+    const output = cardEl.querySelector('.ceo-agent-output');
+
+    // Set working state
+    status.className = 'ceo-agent-status working';
+    status.innerHTML = '<span class="ceo-dot"></span> WORKING';
+    output.classList.add('active');
+    output.textContent = 'Processing directive...';
+
+    try {
+        const resp = await fetch('/api/ceo/dispatch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ agent_id: agentId, task }),
+        });
+        const data = await resp.json();
+
+        if (data.error) {
+            status.className = 'ceo-agent-status error';
+            status.innerHTML = '<span class="ceo-dot"></span> ERROR';
+            output.textContent = `Error: ${data.error}`;
+        } else {
+            status.className = 'ceo-agent-status ready';
+            status.innerHTML = `<span class="ceo-dot"></span> COMPLETE — ${data.model}`;
+            output.textContent = data.response || 'No response';
+        }
+    } catch (e) {
+        status.className = 'ceo-agent-status error';
+        status.innerHTML = '<span class="ceo-dot"></span> ERROR';
+        output.textContent = `Network error: ${e.message}`;
+    }
+}
+
+async function _ceoBroadcast(inputEl) {
+    const task = inputEl.value.trim();
+    if (!task) return;
+    inputEl.value = '';
+
+    const grid = document.getElementById('ceo-agent-grid');
+    if (!grid) return;
+
+    // Set all cards to working
+    grid.querySelectorAll('.ceo-agent-card').forEach(card => {
+        const status = card.querySelector('.ceo-agent-status');
+        const output = card.querySelector('.ceo-agent-output');
+        status.className = 'ceo-agent-status working';
+        status.innerHTML = '<span class="ceo-dot"></span> WORKING';
+        output.classList.add('active');
+        output.textContent = 'Processing directive...';
+    });
+
+    try {
+        const resp = await fetch('/api/ceo/broadcast', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ task }),
+        });
+        const data = await resp.json();
+
+        if (data.results) {
+            data.results.forEach(result => {
+                const card = grid.querySelector(`.ceo-agent-card[data-agent-id="${result.agent_id}"]`);
+                if (!card) return;
+                const status = card.querySelector('.ceo-agent-status');
+                const output = card.querySelector('.ceo-agent-output');
+
+                if (result.error) {
+                    status.className = 'ceo-agent-status error';
+                    status.innerHTML = '<span class="ceo-dot"></span> ERROR';
+                    output.textContent = `Error: ${result.error}`;
+                } else {
+                    status.className = 'ceo-agent-status ready';
+                    status.innerHTML = `<span class="ceo-dot"></span> COMPLETE — ${result.model}`;
+                    output.textContent = result.response || 'No response';
+                }
+            });
+        }
+    } catch (e) {
+        grid.querySelectorAll('.ceo-agent-card').forEach(card => {
+            const status = card.querySelector('.ceo-agent-status');
+            const output = card.querySelector('.ceo-agent-output');
+            status.className = 'ceo-agent-status error';
+            status.innerHTML = '<span class="ceo-dot"></span> ERROR';
+            output.textContent = `Network error: ${e.message}`;
+        });
+    }
+}
+
 
 // ── Camera Vision Module (background mode) ──────────────────────
 const _cam = {

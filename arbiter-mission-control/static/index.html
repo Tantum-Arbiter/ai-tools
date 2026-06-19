@@ -276,6 +276,13 @@
                 <div class="dp-stat"><span class="dp-val" id="dock-claude-reqs">—</span><span class="dp-lbl">REQS</span></div>
             </div>
         </div>
+        <!-- CEO Orchestration -->
+        <div class="dock-panel" data-dock="ceo" title="CEO Orchestration Layer">
+            <div class="dp-header"><span class="dp-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg></span><span class="dp-title">CEO</span></div>
+            <div class="dp-stats">
+                <div class="dp-stat"><span class="dp-val nominal" id="dock-ceo-agents">5</span><span class="dp-lbl">AGENTS</span></div>
+            </div>
+        </div>
         <!-- Camera Vision -->
         <div class="dock-panel dock-panel-cam" id="dock-cam-btn" title="Camera Vision">
             <div class="dp-header"><span class="dp-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg></span><span class="dp-title">VISION</span></div>
@@ -385,6 +392,17 @@
         <div id="dock-panel-cicd" class="dock-panel-inner">
             <div class="cicd-grid" id="cicd-grid">
                 <div class="feed-empty">LOADING BUILDS...</div>
+            </div>
+        </div>
+
+        <!-- CEO Orchestration -->
+        <div id="dock-panel-ceo" class="dock-panel-inner">
+            <div class="ceo-orch">
+                <div class="ceo-broadcast-row">
+                    <input type="text" class="ceo-broadcast-input" id="ceo-broadcast-input" placeholder="Broadcast a directive to all agents..." autocomplete="off" />
+                    <button class="ceo-broadcast-btn" id="ceo-broadcast-btn" title="Send to all agents">⌁ BROADCAST</button>
+                </div>
+                <div class="ceo-agent-grid" id="ceo-agent-grid"></div>
             </div>
         </div>
 

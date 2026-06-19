@@ -1245,6 +1245,185 @@ async def agent_heartbeat(request: Request):
     return {"status": "ok", "agent_id": agent_id}
 
 
+# ── CEO Orchestration — Sub-Agent Definitions ─────────────────────────
+CEO_AGENTS = {
+    "researcher": {
+        "id": "researcher",
+        "name": "Researcher",
+        "role": "Intel Gatherer",
+        "model": "gemini-2.5-pro",
+        "provider": "gemini",
+        "icon": "🔍",
+        "colour": "#00e5ff",
+        "description": "Market signals, research briefs, sources & strategic content",
+        "system_prompt": (
+            "You are ARBITER's Researcher agent — an elite intelligence gatherer for Sir Luke's business operations. "
+            "Your job: find market signals, compile research briefs with cited sources, and surface strategic content. "
+            "Be thorough but concise. Always cite sources. Structure output with clear headers and bullet points. "
+            "Focus on actionable intelligence, not fluff."
+        ),
+    },
+    "cmo": {
+        "id": "cmo",
+        "name": "CMO",
+        "role": "Market Voice",
+        "model": "gpt-4.1",
+        "provider": "openai",
+        "icon": "📢",
+        "colour": "#ff6ec7",
+        "description": "Strategy → content angles, campaigns & publish-ready drafts",
+        "system_prompt": (
+            "You are ARBITER's CMO agent — the marketing voice for Sir Luke's brand. "
+            "Turn strategy and research into compelling content angles, campaign briefs, and publish-ready drafts. "
+            "You write for social media, email, blogs, and ad copy. Match the brand tone: confident, modern, authoritative. "
+            "Always deliver structured output with clear sections."
+        ),
+    },
+    "sales": {
+        "id": "sales",
+        "name": "Sales Rep",
+        "role": "Revenue Ops",
+        "model": "gpt-4.1",
+        "provider": "openai",
+        "icon": "💰",
+        "colour": "#ffd700",
+        "description": "Qualifies leads, drafts outreach & tracks follow-up opportunities",
+        "system_prompt": (
+            "You are ARBITER's Sales Rep agent — revenue operations specialist for Sir Luke's business. "
+            "Qualify leads, draft personalised outreach messages, track follow-up opportunities, and propose deal strategies. "
+            "Be persuasive but professional. Structure output with prospect details, recommended actions, and timelines."
+        ),
+    },
+    "cto": {
+        "id": "cto",
+        "name": "CTO",
+        "role": "Technical Vision",
+        "model": "gpt-4.1",
+        "provider": "openai",
+        "icon": "⚙️",
+        "colour": "#76ff03",
+        "description": "Verifies technical plans, architecture & engineering vision",
+        "system_prompt": (
+            "You are ARBITER's CTO agent — technical advisor for Sir Luke's engineering decisions. "
+            "Review technical plans, validate architecture choices, assess feasibility, and provide engineering recommendations. "
+            "Be precise and practical. Flag risks, suggest alternatives, and structure output with clear technical reasoning."
+        ),
+    },
+    "analyst": {
+        "id": "analyst",
+        "name": "Data Analyst",
+        "role": "Signal Layer",
+        "model": "gemini-2.5-pro",
+        "provider": "gemini",
+        "icon": "📊",
+        "colour": "#b388ff",
+        "description": "Performance, trends, records & operational signal quality",
+        "system_prompt": (
+            "You are ARBITER's Data Analyst agent — the signal layer for Sir Luke's operations. "
+            "Analyse performance metrics, identify trends, assess data quality, and surface operational insights. "
+            "Be quantitative and precise. Use tables, percentages, and comparisons. Structure output with findings, "
+            "trends, and recommended actions."
+        ),
+    },
+}
+
+# Google Gemini API key
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
+
+
+async def _ceo_dispatch(agent_id: str, task: str) -> dict:
+    """Dispatch a task to a CEO sub-agent and return the result."""
+    agent = CEO_AGENTS.get(agent_id)
+    if not agent:
+        return {"error": f"Unknown agent: {agent_id}"}
+
+    messages = [
+        {"role": "system", "content": agent["system_prompt"]},
+        {"role": "user", "content": task},
+    ]
+
+    reply = None
+    provider = agent["provider"]
+    model = agent["model"]
+
+    try:
+        if provider == "gemini" and GOOGLE_API_KEY:
+            # Use Google Gemini via OpenAI-compatible endpoint
+            from openai import OpenAI as _OAI
+            gemini = _OAI(
+                api_key=GOOGLE_API_KEY,
+                base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+            )
+            resp = gemini.chat.completions.create(
+                model=model, messages=messages,
+                max_tokens=1200, temperature=0.6,
+            )
+            reply = resp.choices[0].message.content.strip()
+        elif provider == "openai" and OPENAI_API_KEY:
+            resp = oai.chat.completions.create(
+                model=model, messages=messages,
+                max_tokens=1200, temperature=0.6,
+            )
+            reply = resp.choices[0].message.content.strip()
+        else:
+            # Fallback to ARBITER's standard LLM chain
+            reply = await _chat_llm(messages, max_tokens=1200, purpose=f"ceo-{agent_id}")
+    except Exception as e:
+        log.error(f"CEO dispatch [{agent_id}] error: {e}")
+        return {"error": str(e), "agent_id": agent_id}
+
+    if not reply:
+        return {"error": "No response from LLM", "agent_id": agent_id}
+
+    return {
+        "agent_id": agent_id,
+        "agent_name": agent["name"],
+        "model": model,
+        "response": reply,
+    }
+
+
+@app.get("/api/ceo/agents")
+async def ceo_agents():
+    """Return the CEO sub-agent definitions for the UI."""
+    return [
+        {k: v for k, v in a.items() if k != "system_prompt"}
+        for a in CEO_AGENTS.values()
+    ]
+
+
+@app.post("/api/ceo/dispatch")
+async def ceo_dispatch(request: Request):
+    """Dispatch a task to a specific CEO sub-agent."""
+    body = await request.json()
+    agent_id = body.get("agent_id", "")
+    task = body.get("task", "")
+    if not agent_id or not task:
+        return {"error": "agent_id and task required"}
+    result = await _ceo_dispatch(agent_id, task)
+    return result
+
+
+@app.post("/api/ceo/broadcast")
+async def ceo_broadcast(request: Request):
+    """Broadcast a directive to all CEO sub-agents simultaneously."""
+    body = await request.json()
+    task = body.get("task", "")
+    if not task:
+        return {"error": "task required"}
+    import asyncio as _aio
+    results = await _aio.gather(
+        *[_ceo_dispatch(aid, task) for aid in CEO_AGENTS],
+        return_exceptions=True,
+    )
+    return {
+        "results": [
+            r if isinstance(r, dict) else {"error": str(r)}
+            for r in results
+        ]
+    }
+
+
 # ── Urgent Bulletins (cross-system) ───────────────────────────────────
 @app.get("/api/bulletins")
 async def bulletins():
