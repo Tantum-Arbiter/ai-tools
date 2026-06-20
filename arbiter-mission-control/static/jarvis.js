@@ -6,9 +6,147 @@
 const REFRESH_INTERVAL = 60_000;
 let countdown = REFRESH_INTERVAL / 1000;
 
+// ── API Authentication ──────────────────────────────────────────────
+// Wraps native fetch to inject Authorization header when an API key is set.
+// Key is stored in localStorage and validated against /api/auth/check.
+let _arbiterApiKey = localStorage.getItem('arbiter_api_key') || '';
+
+const _origFetch = window.fetch.bind(window);
+window.fetch = function(url, opts = {}) {
+    if (_arbiterApiKey && typeof url === 'string' && url.startsWith('/api/')) {
+        opts = opts || {};
+        opts.headers = opts.headers || {};
+        if (opts.headers instanceof Headers) {
+            opts.headers.set('Authorization', `Bearer ${_arbiterApiKey}`);
+        } else {
+            opts.headers['Authorization'] = `Bearer ${_arbiterApiKey}`;
+        }
+    }
+    return _origFetch(url, opts);
+};
+
+async function _arbiterCheckAuth() {
+    try {
+        const resp = await _origFetch('/api/auth/check', {
+            headers: _arbiterApiKey ? { 'Authorization': `Bearer ${_arbiterApiKey}` } : {},
+        });
+        const data = await resp.json();
+        if (data.auth_required && !data.valid) {
+            _arbiterShowAuthModal();
+            return false;
+        }
+        return true;
+    } catch { return true; }
+}
+
+function _arbiterShowAuthModal() {
+    let modal = document.getElementById('arbiter-auth-modal');
+    if (modal) { modal.style.display = 'flex'; return; }
+    modal = document.createElement('div');
+    modal.id = 'arbiter-auth-modal';
+    modal.style.cssText = 'position:fixed;inset:0;z-index:99999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.85);backdrop-filter:blur(8px)';
+    modal.innerHTML = `
+        <div style="background:rgba(6,12,28,0.95);border:1px solid rgba(0,240,255,0.2);border-radius:8px;padding:32px;max-width:380px;width:90%;text-align:center;box-shadow:0 4px 30px rgba(0,0,0,0.5)">
+            <div style="font-family:var(--font-mono);font-size:11px;letter-spacing:2px;color:#00e5ff;margin-bottom:16px">🔒 ARBITER AUTH</div>
+            <div style="font-family:var(--font-mono);font-size:9px;color:rgba(0,240,255,0.5);margin-bottom:20px">API key required — set ARBITER_API_KEY in .env</div>
+            <input id="arbiter-auth-input" type="password" placeholder="Enter API key..."
+                style="width:100%;padding:10px 14px;background:rgba(0,0,0,0.4);border:1px solid rgba(0,240,255,0.15);border-radius:4px;color:var(--text-bright);font-family:var(--font-mono);font-size:11px;outline:none;box-sizing:border-box;margin-bottom:12px"
+            />
+            <div id="arbiter-auth-error" style="font-family:var(--font-mono);font-size:8px;color:#ff5252;margin-bottom:12px;display:none">Invalid API key</div>
+            <button id="arbiter-auth-submit"
+                style="width:100%;padding:8px;background:rgba(0,240,255,0.1);border:1px solid rgba(0,240,255,0.3);border-radius:4px;color:#00e5ff;font-family:var(--font-mono);font-size:10px;letter-spacing:1px;cursor:pointer"
+            >AUTHENTICATE</button>
+        </div>
+    `;
+    document.body.appendChild(modal);
+    const input = document.getElementById('arbiter-auth-input');
+    const submit = document.getElementById('arbiter-auth-submit');
+    const error = document.getElementById('arbiter-auth-error');
+    async function tryAuth() {
+        const key = input.value.trim();
+        if (!key) { input.focus(); return; }
+        try {
+            const resp = await _origFetch('/api/auth/check', { headers: { 'Authorization': `Bearer ${key}` } });
+            const data = await resp.json();
+            if (data.valid) {
+                _arbiterApiKey = key;
+                localStorage.setItem('arbiter_api_key', key);
+                modal.style.display = 'none';
+                location.reload();
+            } else {
+                error.style.display = 'block';
+                input.style.borderColor = '#ff5252';
+            }
+        } catch { error.style.display = 'block'; }
+    }
+    submit.addEventListener('click', tryAuth);
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') tryAuth(); });
+    input.focus();
+}
+
+// Check auth on page load
+document.addEventListener('DOMContentLoaded', () => setTimeout(_arbiterCheckAuth, 500));
+
+// ── Mute toggle ──────────────────────────────────────────────────
+let _arbiterMuted = localStorage.getItem('arbiter_muted') === '1';
+const _MUTE_SVG_ON  = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>`;
+const _MUTE_SVG_OFF = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>`;
+function _muteSetIcon() {
+    const btn = document.getElementById('mc-mute-btn');
+    const icon = document.getElementById('mc-mute-icon');
+    if (btn) btn.classList.toggle('muted', _arbiterMuted);
+    if (icon) icon.innerHTML = _arbiterMuted ? _MUTE_SVG_OFF : _MUTE_SVG_ON;
+}
+function _toggleMute() {
+    _arbiterMuted = !_arbiterMuted;
+    localStorage.setItem('arbiter_muted', _arbiterMuted ? '1' : '0');
+    _muteSetIcon();
+    // Stop any current speech if muting
+    if (_arbiterMuted && typeof voice !== 'undefined' && voice.speaking) {
+        voice.stopSpeaking();
+    }
+}
+// Initialise mute state on load
+document.addEventListener('DOMContentLoaded', _muteSetIcon);
+
+// ── Mic Mute toggle ─────────────────────────────────────────────
+let _micMuted = localStorage.getItem('arbiter_mic_muted') === '1';
+const _MIC_SVG_ON  = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="1" width="6" height="11" rx="3"/><path d="M19 10v1a7 7 0 0 1-14 0v-1"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>`;
+const _MIC_SVG_OFF = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="1" width="6" height="11" rx="3"/><path d="M19 10v1a7 7 0 0 1-14 0v-1"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/><line x1="1" y1="1" x2="23" y2="23"/></svg>`;
+function _micMuteSetIcon() {
+    const btn = document.getElementById('mc-mic-mute-btn');
+    const icon = document.getElementById('mc-mic-mute-icon');
+    if (btn) btn.classList.toggle('muted', _micMuted);
+    if (icon) icon.innerHTML = _micMuted ? _MIC_SVG_OFF : _MIC_SVG_ON;
+}
+function _toggleMicMute() {
+    _micMuted = !_micMuted;
+    localStorage.setItem('arbiter_mic_muted', _micMuted ? '1' : '0');
+    _micMuteSetIcon();
+    if (_micMuted && typeof voice !== 'undefined') {
+        // Kill recognition immediately
+        try { voice.recognition.stop(); } catch {}
+        voice._running = false;
+        voice._mode = 'off';
+        voice._pendingStart = null;
+        voice._stopLevelPump();
+        voice.orb.setState('idle');
+        logConvo('Microphone muted — wake word disabled', 'system');
+    } else if (!_micMuted && typeof voice !== 'undefined') {
+        // Restart passive wake-word listening
+        logConvo('Microphone unmuted — wake word active', 'system');
+        voice._requestStart('passive');
+    }
+}
+document.addEventListener('DOMContentLoaded', _micMuteSetIcon);
+
 // ── SVG Icon Library (replaces emojis) ──────────────────────────
 const _SVG = (name, size = 16) => {
     const icons = {
+        shield:       `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>`,
+        compass:      `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/></svg>`,
+        box:          `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>`,
+        'alert-triangle': `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`,
         search:       `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>`,
         megaphone:    `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 11l18-5v12L3 13v-2z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/></svg>`,
         'trending-up':`<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>`,
@@ -34,6 +172,25 @@ const _SVG = (name, size = 16) => {
         thermometer:  `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/></svg>`,
         bell:         `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>`,
         crown:        `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 20h20l-2-8-4 4-4-8-4 8-4-4z"/><path d="M5 20v2h14v-2"/></svg>`,
+        share:        `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>`,
+        star:         `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>`,
+        eye:          `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`,
+        heart:        `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>`,
+        book:         `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>`,
+        film:         `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="2.18"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="2" y1="7" x2="7" y2="7"/><line x1="2" y1="17" x2="7" y2="17"/><line x1="17" y1="7" x2="22" y2="7"/><line x1="17" y1="17" x2="22" y2="17"/></svg>`,
+        palette:      `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="13.5" cy="6.5" r="0.5" fill="currentColor"/><circle cx="17.5" cy="10.5" r="0.5" fill="currentColor"/><circle cx="8.5" cy="7.5" r="0.5" fill="currentColor"/><circle cx="6.5" cy="12.5" r="0.5" fill="currentColor"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.93 0 1.5-.67 1.5-1.5 0-.39-.15-.74-.39-1.04-.24-.3-.39-.65-.39-1.04 0-.83.67-1.5 1.5-1.5H16c3.31 0 6-2.69 6-6 0-5.5-4.5-9.92-10-9.92z"/></svg>`,
+        smile:        `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>`,
+        activity:     `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>`,
+        'dollar-sign':`<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>`,
+        briefcase:    `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>`,
+        layers:       `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>`,
+        'git-branch': `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>`,
+        'check-circle':`<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>`,
+        terminal:     `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>`,
+        lock:         `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>`,
+        edit:         `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>`,
+        tool:         `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>`,
+        settings:     `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`,
     };
     return icons[name] || `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/></svg>`;
 };
@@ -504,6 +661,13 @@ class VoiceEngine {
         // Active follow-up options (for voice command selection)
         this._activeFollowups = null;
 
+        // Voice correction — track last query/reply for "I said..." corrections
+        this._lastUserQuery = '';
+        this._lastSpokenReply = '';
+
+        // Abort controller for in-flight LLM requests
+        this._activeAbort = null;
+
         // Session cache — stores all query/panel pairs for report building
         this._sessionCache = [];
         this._sessionId = Date.now().toString(36);
@@ -734,8 +898,14 @@ class VoiceEngine {
     _onDoubleClap() {
         // Suppress double-clap entirely while in hands-on chat mode
         if (this._chatMode) return;
-        // Suppress while a query is being processed
-        if (this._processingQuery) return;
+        // Suppress when mic is muted
+        if (_micMuted) return;
+        // If processing, cancel it and return to idle instead of blocking
+        if (this._processingQuery) {
+            this.cancelProcessing();
+            logConvo('Processing interrupted by double clap', 'system');
+            return;
+        }
         // If already actively listening (e.g. follow-up mode), just log it
         if (this._mode === 'active') {
             logConvo('Double clap detected (already listening)', 'system');
@@ -797,6 +967,8 @@ class VoiceEngine {
     _requestStart(mode) {
         // mode = 'passive' | 'active'
         if (!this.recognition) return;
+        // Mic mute guard — block all recognition starts
+        if (_micMuted) { this._pendingStart = null; return; }
         if (this._running) {
             // Recognition is still running — stop it and queue the desired mode
             this._pendingStart = mode;
@@ -930,8 +1102,12 @@ class VoiceEngine {
                         // Only advance past *previous* results.
                         this._lastProcessed = i;
 
-                        // ── Interrupt speech if currently speaking ──
-                        if (this.speaking) {
+                        // ── Interrupt speech or processing if active ──
+                        if (this._processingQuery) {
+                            console.log('[ARBITER] Interrupting processing — wake word detected');
+                            this.cancelProcessing();
+                            logConvo('Processing interrupted', 'system');
+                        } else if (this.speaking) {
                             console.log('[ARBITER] Interrupting speech — wake word detected');
                             this.stopSpeaking();
                         }
@@ -1034,17 +1210,9 @@ class VoiceEngine {
             this._running = false;
             this._lastProcessed = 0; // reset for next session
 
-            // While speaking, only allow passive wake-word listening (for interrupt)
+            // While speaking, do NOT restart recognition — prevents mic
+            // picking up TTS audio and self-triggering on "Arbiter"
             if (this.speaking) {
-                if (this._pendingStart === 'passive') {
-                    setTimeout(() => this._doStart('passive'), 50);
-                    return;
-                }
-                // Passive mode timed out during speech — restart it
-                if (this._mode === 'passive') {
-                    setTimeout(() => this._doStart('passive'), 200);
-                    return;
-                }
                 this._mode = 'off';
                 this._pendingStart = null;
                 return;
@@ -1436,13 +1604,14 @@ class VoiceEngine {
             revenue:   [/\b(revenue|money|mrr|income|earnings|subscri)\b/],
             content:   [/\b(content|pipeline|posts?)\b/],
             engage:    [/\b(engage|engagement|analytics)\b/],
-            weather:   [/\b(weather|forecast|temperature|rain)\b/],
+
             deadlines: [/\b(deadline|roadmap|milestone)\b/],
             bulletins: [/\b(bulletin|news|feed)\b/],
             todo:      [/\b(todo|to.do|tasks?|list)\b/],
             cicd:      [/\b(ci\s*cd|deploy|build|pipeline|freya)\b/],
             claude:    [/\b(claude|api\s*usage|token)\b/],
-            ceo:       [/\b(ceo|orchestrat|agents?)\b/],
+            ceo:       [/\b(agent\s*orchestrat|agents?|orchestrat|workflow|run\s+workflow)\b/],
+            org:       [/\b(ceo|org|organis|team|teams|organisation)\b/],
         };
         const openPanelRx = /^(open|show|go\s*to|navigate\s*to|view|pull\s*up|bring\s*up|display|launch)\s+(the\s+)?(.+?)(\s+panel)?(\s+arbiter)?[.!]?$/;
         const openMatch = lower.match(openPanelRx);
@@ -1527,6 +1696,107 @@ class VoiceEngine {
             return { speak: 'Remote vision activated, Sir.', log: 'Camera activated' };
         }
 
+        // ── Close current panel ──
+        const closePanelRx = /^(close|hide|dismiss|exit)\s+(the\s+)?(panel|current panel|this panel)\s*(arbiter)?[.!]?$/;
+        if (closePanelRx.test(lower)) {
+            if (typeof activeDock !== 'undefined' && activeDock) closeExpandPanels();
+            return { speak: 'Panel closed, Sir.', log: 'Panel closed via voice' };
+        }
+
+        // ── Scroll commands ──
+        const scrollDownRx = /^(scroll|page)\s+(down|lower|more)\s*(arbiter)?[.!]?$/;
+        const scrollUpRx = /^(scroll|page)\s+(up|higher|back)\s*(arbiter)?[.!]?$/;
+        const scrollTopRx = /^(scroll\s+to\s+top|go\s+to\s+top|top\s+of\s+page)\s*(arbiter)?[.!]?$/;
+        if (scrollDownRx.test(lower)) {
+            const vp = document.querySelector('.dock-panel-viewport.active .dock-panel-inner');
+            if (vp) vp.scrollBy({ top: 400, behavior: 'smooth' });
+            return { speak: 'Scrolling down.', log: 'Scroll down' };
+        }
+        if (scrollUpRx.test(lower)) {
+            const vp = document.querySelector('.dock-panel-viewport.active .dock-panel-inner');
+            if (vp) vp.scrollBy({ top: -400, behavior: 'smooth' });
+            return { speak: 'Scrolling up.', log: 'Scroll up' };
+        }
+        if (scrollTopRx.test(lower)) {
+            const vp = document.querySelector('.dock-panel-viewport.active .dock-panel-inner');
+            if (vp) vp.scrollTo({ top: 0, behavior: 'smooth' });
+            return { speak: 'Back to the top.', log: 'Scroll to top' };
+        }
+
+        // ── Add todo via voice ──
+        const addTodoRx = /^(add|create|new)\s+(a\s+)?(task|todo|to.do|reminder)\s*[:\-—]?\s*(.+)$/;
+        const todoMatch = lower.match(addTodoRx);
+        if (todoMatch) {
+            const text = todoMatch[4].replace(/\s*(arbiter|please|sir)[.!]?\s*$/i, '').trim();
+            if (text) {
+                const todos = _loadTodos();
+                todos.push({
+                    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+                    text: text.charAt(0).toUpperCase() + text.slice(1),
+                    date: '', time: '', done: false,
+                    created: new Date().toISOString()
+                });
+                _saveTodos(todos);
+                _renderTodoList();
+                return { speak: `Task added: ${text}`, log: `Todo added: ${text}` };
+            }
+        }
+
+        // ── Run pipeline via voice ──
+        const runPipelineRx = /^(run|start|launch|execute|trigger)\s+(the\s+)?(full|research|content|technical|gtm|strategy)\s*(pipeline|flow|workflow)?\s*(arbiter)?[.!]?$/;
+        const pipelineMatch = lower.match(runPipelineRx);
+        if (pipelineMatch) {
+            const template = pipelineMatch[3];
+            // Open CEO panel and trigger pipeline start
+            if (typeof openExpandPanels === 'function') openExpandPanels('ceo');
+            return { speak: `Opening orchestration for ${template} pipeline, Sir. Enter your directive.`, log: `Pipeline: ${template}` };
+        }
+
+        // ── Approve / Reject pipeline gates ──
+        const approveRx = /^(approve|accept|confirm|go\s*ahead|proceed|yes|looks?\s*good)\s*(it|this|that|gate|stage)?\s*(arbiter)?[.!]?$/;
+        const rejectRx = /^(reject|deny|decline|stop|abort|no|hold|wait)\s*(it|this|that|gate|stage)?\s*(arbiter)?[.!]?$/;
+        if (approveRx.test(lower)) {
+            const approveBtn = document.querySelector('.pipeline-approve-btn:not([disabled])');
+            if (approveBtn) {
+                approveBtn.click();
+                return { speak: 'Stage approved, Sir. Proceeding.', log: 'Pipeline gate: approved' };
+            }
+            return { speak: 'No pending approval gates found, Sir.', log: 'No gate to approve' };
+        }
+        if (rejectRx.test(lower)) {
+            const rejectBtn = document.querySelector('.pipeline-reject-btn:not([disabled])');
+            if (rejectBtn) {
+                rejectBtn.click();
+                return { speak: 'Stage rejected, Sir.', log: 'Pipeline gate: rejected' };
+            }
+            return { speak: 'No pending rejection gates found, Sir.', log: 'No gate to reject' };
+        }
+
+        // ── Trigger manual stage (Publisher "RUN") ──
+        const triggerRunRx = /^(run|trigger|activate|publish|go)\s+(the\s+)?(publisher|manual\s*stage|next\s*stage)\s*(arbiter)?[.!]?$/;
+        if (triggerRunRx.test(lower)) {
+            const runBtn = document.querySelector('.wf-node-run-btn.visible');
+            if (runBtn) {
+                runBtn.click();
+                return { speak: 'Manual stage triggered, Sir.', log: 'Manual stage run' };
+            }
+            return { speak: 'No manual stage is ready to run, Sir.', log: 'No manual stage ready' };
+        }
+
+        // ── Stop / Cancel / Nevermind — interrupt processing ──
+        const cancelRx = /^(stop|cancel|abort|nevermind|never\s*mind|forget\s*(it|that)|shut\s*up|enough|that'?s\s*enough|hold\s*on)\s*(arbiter)?[.!]?$/;
+        if (cancelRx.test(lower)) {
+            if (this._processingQuery) {
+                this.cancelProcessing();
+                return { speak: 'Cancelled, Sir.', log: 'Processing cancelled by voice' };
+            }
+            if (this.speaking) {
+                this.stopSpeaking();
+                return { speak: '', log: 'Speech stopped by voice' };
+            }
+            return { speak: 'Nothing to cancel, Sir.', log: 'Cancel — nothing active' };
+        }
+
         // Not a nav command — let it through to the LLM
         return null;
     }
@@ -1567,10 +1837,11 @@ class VoiceEngine {
             });
         }
 
-        // Click orb to toggle chat mode
+        // Click orb to toggle chat mode — only in dashboard mode (orb centered)
         const orbCanvas = document.getElementById('orb-canvas');
         if (orbCanvas) orbCanvas.addEventListener('click', () => {
             if (_cam.active) return; // no chat mode during vision
+            if (activeDock) return;  // no chat mode when orb is docked to the side
             this._toggleChatMode();
         });
 
@@ -1755,7 +2026,11 @@ class VoiceEngine {
     }
 
     async _chatSend(text) {
-        // Stop any current speech immediately when user sends a new message
+        // Cancel any in-flight request + stop speech when user sends a new message
+        if (this._processingQuery || this._activeAbort) {
+            this.cancelProcessing();
+            logConvo('Previous request cancelled', 'system');
+        }
         if (this.speaking) this.stopSpeaking();
 
         this._clearDialogueOptions();
@@ -1768,7 +2043,7 @@ class VoiceEngine {
         if (navResult) {
             logConvo(text, 'user');
             logConvo(navResult.log, 'system');
-            this._chatAddMessage(navResult.speak, 'assistant');
+            if (navResult.speak) this._chatAddMessage(navResult.speak, 'assistant');
             this.orb.setState('idle');
             return;
         }
@@ -1783,8 +2058,15 @@ class VoiceEngine {
 
         // Also send through the normal pipeline (updates history, panels, etc.)
         this.orb.setState('thinking');
+        this._processingQuery = true;
         this.history.push({ role: 'user', content: text });
         logConvo(text, 'user');
+        const _jtChatId = _jobAdd('chat', text.substring(0, 50));
+
+        // Create abort controller for this request
+        if (this._activeAbort) this._activeAbort.abort();
+        const abort = new AbortController();
+        this._activeAbort = abort;
 
         try {
             // If camera is active, route through vision endpoint
@@ -1798,6 +2080,7 @@ class VoiceEngine {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ query: text, image: frameB64 }),
+                        signal: abort.signal,
                     });
                     d = await r.json();
                     _camScanStop();
@@ -1806,6 +2089,7 @@ class VoiceEngine {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ message: text, history: this.history }),
+                        signal: abort.signal,
                     });
                     d = await r.json();
                 }
@@ -1814,9 +2098,11 @@ class VoiceEngine {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ message: text, history: this.history }),
+                    signal: abort.signal,
                 });
                 d = await r.json();
             }
+            this._activeAbort = null;
             const rawReply = d.reply || 'No response.';
 
             // Remove thinking indicator
@@ -1827,6 +2113,8 @@ class VoiceEngine {
                 this._chatAddMessage(rawReply, 'system');
                 logConvo(rawReply, 'system');
                 this.orb.setState('idle');
+                this._processingQuery = false;
+                _jobComplete(_jtChatId, true);
                 return;
             }
 
@@ -1850,9 +2138,12 @@ class VoiceEngine {
             }
 
             // Add response to chat panel (no speech in hands-on mode)
+            this._lastSpokenReply = spokenText;
             this._chatAddMessage(spokenText, 'assistant');
             logConvo(spokenText, 'arbiter');
             this.orb.setState('idle');
+            this._processingQuery = false;
+            _jobComplete(_jtChatId);
 
             // Show dialogue follow-up options (chat panel only in hands-on mode)
             console.log('[ARBITER] followups:', d.followups);
@@ -1861,13 +2152,21 @@ class VoiceEngine {
                 this._chatRenderFollowups(d.followups);
             }
         } catch (e) {
+            this._activeAbort = null;
+            if (e.name === 'AbortError') {
+                console.log('[ARBITER] Chat request aborted');
+                _jobComplete(_jtChatId, true);
+                return; // cancelProcessing() already reset state
+            }
             console.error('[ARBITER] Chat error:', e);
             _camScanStop();
+            this._processingQuery = false;
             const think = document.getElementById('chat-thinking');
             if (think) think.remove();
             this._chatAddMessage('Connection error. Backend may be offline.', 'system');
             logConvo('Connection error. Backend may be offline.', 'system');
             this.orb.setState('idle');
+            _jobComplete(_jtChatId, true);
         }
     }
 
@@ -2041,6 +2340,42 @@ class VoiceEngine {
 
         // ── Voice intercepts — handle UI commands locally (no LLM cost) ──
         const lower = text.toLowerCase().trim();
+
+        // ── Voice correction: "I said / I meant / correct that to ..." ──
+        const correctionRx = /^(?:no[,.]?\s*)?(?:i\s+(?:said|meant|actually\s+said)|correct(?:ion)?\s+(?:that\s+)?to|what\s+i\s+(?:said|meant)\s+was|i\s+actually\s+meant|that(?:'s| is)\s+wrong[,.]?\s*(?:i\s+said)?)\s+(.+)/i;
+        const corrMatch = lower.match(correctionRx);
+        if (corrMatch) {
+            const corrected = text.slice(text.length - corrMatch[1].length); // preserve original casing
+            logConvo(text, 'user');
+            logConvo(`Correction: "${corrected}"`, 'system');
+            // Remove last user entry from history so correction replaces it
+            const lastUserIdx = this.history.findLastIndex(h => h.role === 'user');
+            if (lastUserIdx >= 0) {
+                this.history.splice(lastUserIdx, this.history.length - lastUserIdx);
+            }
+            this._speak(`Understood. Processing: ${corrected.slice(0, 60)}.`, () => {
+                this._sendMessage(corrected);
+            });
+            return;
+        }
+
+        // ── Repeat last reply ──
+        const repeatRx = /^(?:repeat\s+(?:that|yourself|last|it)|say\s+(?:that|it)\s+again|what\s+did\s+you\s+say|come\s+again|pardon)\s*(arbiter)?[.!?]?$/;
+        if (repeatRx.test(lower)) {
+            logConvo(text, 'user');
+            if (this._lastSpokenReply) {
+                logConvo('Repeating last response.', 'system');
+                this.orb.setState('idle');
+                this._processingQuery = false;
+                this._speak(this._lastSpokenReply);
+            } else {
+                this.orb.setState('idle');
+                this._processingQuery = false;
+                this._speak("I haven't said anything yet, Sir.");
+            }
+            return;
+        }
+
         const navResult = this._handleNavCommand(lower);
         if (navResult) {
             logConvo(text, 'user');
@@ -2056,9 +2391,16 @@ class VoiceEngine {
         this._clearDialogueOptions();
         this.orb.setState('thinking');
         this.orb.setAudioLevel(0);
+        this._lastUserQuery = text;
         this.history.push({ role: 'user', content: text });
         logConvo(text, 'user');
         logConvo('Processing...', 'system');
+        const _jtVoiceId = _jobAdd('voice', text.substring(0, 50));
+
+        // Create abort controller for this request
+        if (this._activeAbort) this._activeAbort.abort();
+        const abort = new AbortController();
+        this._activeAbort = abort;
 
         try {
             // If camera is active, route through vision endpoint with captured frame
@@ -2072,6 +2414,7 @@ class VoiceEngine {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ query: text, image: frameB64 }),
+                        signal: abort.signal,
                     });
                     d = await r.json();
                     _camScanStop();
@@ -2080,6 +2423,7 @@ class VoiceEngine {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ message: text, history: this.history }),
+                        signal: abort.signal,
                     });
                     d = await r.json();
                 }
@@ -2088,9 +2432,11 @@ class VoiceEngine {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ message: text, history: this.history }),
+                    signal: abort.signal,
                 });
                 d = await r.json();
             }
+            this._activeAbort = null;
 
             const rawReply = d.reply || 'No response.';
 
@@ -2098,6 +2444,7 @@ class VoiceEngine {
             if (d.error) {
                 logConvo(rawReply, 'system');
                 this.orb.setState('idle');
+                _jobComplete(_jtVoiceId, true);
                 setTimeout(() => this._requestStart('passive'), 500);
                 return;
             }
@@ -2128,8 +2475,10 @@ class VoiceEngine {
                 _camRenderVisionPanels(spokenText, text);
             }
 
+            this._lastSpokenReply = spokenText;
             logConvo(spokenText, 'arbiter');
             this._speak(spokenText);
+            _jobComplete(_jtVoiceId);
 
             // Show dialogue follow-up options
             console.log('[ARBITER] followups (voice):', d.followups);
@@ -2137,10 +2486,18 @@ class VoiceEngine {
                 this._renderDialogueOptions(d.followups);
             }
         } catch (e) {
+            this._activeAbort = null;
+            if (e.name === 'AbortError') {
+                console.log('[ARBITER] Request aborted');
+                _jobComplete(_jtVoiceId, true);
+                return; // cancelProcessing() already reset state
+            }
             console.error('[ARBITER] Chat error:', e);
             _camScanStop();
             this.orb.setState('idle');
+            this._processingQuery = false;
             logConvo('Connection error. Backend may be offline.', 'system');
+            _jobComplete(_jtVoiceId, true);
             setTimeout(() => this._requestStart('passive'), 500);
         }
     }
@@ -2206,7 +2563,17 @@ class VoiceEngine {
     }
 
     // ── Analysis Wing Panel Renderer (dual inline panels) ───────
-    _renderAnalysisPanel(panel) {
+    _renderAnalysisPanel(panel, _bypassQueue = false) {
+        // ── Overlap guard: if busy, show notification banner instead of overlaying ──
+        const _wouldOverlap = () => {
+            if (typeof activeDock !== 'undefined' && activeDock) return true;
+            const wL = document.getElementById('analysis-wing-left');
+            return wL && wL.classList.contains('active');
+        };
+        if (!_bypassQueue && _wouldOverlap()) {
+            _showPanelNotif(panel, this);
+            return;
+        }
         const wingL = document.getElementById('analysis-wing-left');
         const wingR = document.getElementById('analysis-wing-right');
         const bodyL = document.getElementById('analysis-body-left');
@@ -2219,9 +2586,6 @@ class VoiceEngine {
         if (this._analysisCharts) { this._analysisCharts.forEach(c => { try { c.destroy(); } catch {} }); }
         this._analysisCharts = [];
         if (this._analysisChart) { try { this._analysisChart.destroy(); } catch {} this._analysisChart = null; }
-
-        // Check if wings are already open (content swap vs fresh open)
-        const alreadyOpen = wingL.classList.contains('active') || wingR.classList.contains('active');
 
         // Clear body content (in-place swap if already visible — no flicker)
         bodyL.innerHTML = '';
@@ -3639,6 +4003,23 @@ class VoiceEngine {
         if (this._speakCleanup) this._speakCleanup();
     }
 
+    // ── Cancel in-flight LLM processing ────────────────────────
+    cancelProcessing() {
+        if (this._activeAbort) {
+            this._activeAbort.abort();
+            this._activeAbort = null;
+        }
+        if (this.speaking) this.stopSpeaking();
+        this._processingQuery = false;
+        this.orb.setState('idle');
+        this.orb.setAudioLevel(0);
+        // Remove thinking indicator from chat
+        const think = document.getElementById('chat-thinking');
+        if (think) think.remove();
+        _camScanStop();
+        console.log('[ARBITER] Processing cancelled by user');
+    }
+
     // Strip markdown/formatting for TTS — the voice shouldn't read asterisks, hashes, etc.
     _cleanForTTS(text) {
         return text
@@ -3671,6 +4052,15 @@ class VoiceEngine {
     // ── Speak response using edge-tts (neural voice) ──────────────
     // onDone: optional callback after speech finishes (overrides default passive restart)
     async _speak(text, onDone) {
+        // ── Mute guard: skip audio but run onDone callback ──
+        if (_arbiterMuted) {
+            this.orb.setState('idle');
+            this._processingQuery = false;
+            if (onDone) { onDone(); }
+            else { setTimeout(() => this._requestStart('passive'), 500); }
+            return;
+        }
+
         // Cancel any current speech first — prevents overlapping audio
         if (this.speaking) {
             this.stopSpeaking();
@@ -3687,13 +4077,14 @@ class VoiceEngine {
         const stopBtn = document.getElementById('btn-stop');
         if (stopBtn) stopBtn.style.display = '';
 
-        // ── Keep passive wake-word listening alive during speech so user can interrupt ──
-        // The mic stays open in 'passive' mode — only the wake word triggers action.
-        // This allows "Arbiter" to interrupt speech and start a new query.
-        this._stopLevelPump();  // stop mic level pump (we're using playback level now)
-        if (!this._running || this._mode !== 'passive') {
-            this._requestStart('passive');
-        }
+        // ── Stop mic during speech to prevent self-triggering ──
+        // The TTS output contains "Arbiter" which the mic picks up and
+        // triggers the wake word. Kill recognition while speaking.
+        this._stopLevelPump();
+        this._mode = 'off';
+        this._pendingStart = null;
+        try { this.recognition.stop(); } catch {}
+        this._running = false;
 
         let speakPump = null;
         let cleanedUp = false;
@@ -3970,6 +4361,11 @@ function updateClock() {
         now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     document.getElementById('clock-date').textContent =
         now.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }).toUpperCase();
+    // Orb clock (large, below orb)
+    const orbTime = document.getElementById('orb-clock-time');
+    const orbDate = document.getElementById('orb-clock-date');
+    if (orbTime) orbTime.textContent = now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+    if (orbDate) orbDate.textContent = now.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' }).toUpperCase();
 }
 
 // ── API helper ───────────────────────────────────────────────────
@@ -3984,23 +4380,31 @@ async function api(path) {
 // ── System Status ────────────────────────────────────────────────
 let firstStatusCheck = true;
 async function refreshStatus() {
-    const d = await api('/api/status');
-    if (!d) return;
-    const s = d.systems;
-    setDot('s-content-db', s.content_db.status);
-    setDot('s-engage-db', s.engagement_db.status);
+    // ── ComfyUI (RTX 3080) status check ──
+    let comfyOnline = false;
+    try {
+        const comfyUrl = window._COMFYUI_URL || 'http://127.0.0.1:8188';
+        const cr = await fetch(comfyUrl + '/system_stats', { signal: AbortSignal.timeout(3000) });
+        comfyOnline = cr.ok;
+    } catch { /* offline */ }
+    setDot('s-comfyui', comfyOnline ? 'online' : 'offline');
 
+    // ── OpenRouter status check ──
+    let orOnline = false;
+    try {
+        const orData = await api('/api/openrouter-usage');
+        orOnline = orData && orData.configured && orData.circuit_breaker !== 'open';
+    } catch { /* offline */ }
+    setDot('s-openrouter', orOnline ? 'online' : 'offline');
+
+    // ── Overall badge ──
     const badge = document.getElementById('system-badge');
-    const allOnline = s.content_db.status === 'online' && s.engagement_db.status === 'online';
-    const allOffline = s.content_db.status !== 'online' && s.engagement_db.status !== 'online';
+    const allOnline = comfyOnline && orOnline;
+    const allOffline = !comfyOnline && !orOnline;
     badge.textContent = allOnline ? '● ALL SYSTEMS NOMINAL' : allOffline ? '● SYSTEMS OFFLINE' : '● DEGRADED';
     badge.className = 'system-status ' + (allOnline ? 'online' : allOffline ? 'offline' : 'degraded');
 
-    // Show startup guide on first check if any system is offline
-    if (firstStatusCheck && !allOnline) {
-        firstStatusCheck = false;
-        showStartupGuide(s);
-    } else {
+    if (firstStatusCheck) {
         firstStatusCheck = false;
     }
 }
@@ -4151,8 +4555,8 @@ function showStartupGuide(systems) {
 
     // Build dependency list
     const deps = [
-        { name: 'Content DB', status: systems.content_db.status, hint: 'Content Database' },
-        { name: 'Engage DB', status: systems.engagement_db.status, hint: 'Engagement Database' },
+        { name: 'ComfyUI · RTX 3080', status: systems.comfyui || 'offline', hint: 'ComfyUI image generation server' },
+        { name: 'OpenRouter', status: systems.openrouter || 'offline', hint: 'OpenRouter LLM API' },
     ];
 
     let depsHtml = '';
@@ -4169,11 +4573,11 @@ function showStartupGuide(systems) {
 
     // Platform-specific instructions
     let instr = `<p style="margin-top:16px; color: var(--cyan); font-family: var(--font-mono); font-size: 13px; letter-spacing: 2px;">${platform} SETUP</p>`;
-    if (systems.content_db.status !== 'online') {
-        instr += `<p>Content DB will populate automatically when content is created via the CMS.</p>`;
+    if ((systems.comfyui || 'offline') !== 'online') {
+        instr += `<p>ComfyUI: Start your ComfyUI server (default: <code>http://127.0.0.1:8188</code>).</p>`;
     }
-    if (systems.engagement_db.status !== 'online') {
-        instr += `<p>Engagement DB will populate automatically when user interactions are tracked.</p>`;
+    if ((systems.openrouter || 'offline') !== 'online') {
+        instr += `<p>OpenRouter: Set <code>OPENROUTER_API_KEY</code> in your .env file.</p>`;
     }
     instrEl.innerHTML = instr;
 
@@ -4228,44 +4632,158 @@ async function refreshCICD() {
 }
 
 // ── Claude Token Usage ──────────────────────────────────────────
+let _lastClaudeCost = 0;
+let _lastOrCost = 0;
+
 async function refreshClaudeUsage() {
-    const d = await api('/api/claude-usage');
-    if (!d) return;
     const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
-    // Expanded panel
-    set('cl-model', d.model ? d.model.toUpperCase() : '—');
-    set('cl-cost', d.daily_cost_usd != null ? `$${Number(d.daily_cost_usd).toFixed(4)}` : '—');
-    set('cl-budget', d.daily_budget_usd != null ? `$${Number(d.daily_budget_usd).toFixed(2)}` : '—');
-    set('cl-input-tok', d.daily_input_tokens != null ? Number(d.daily_input_tokens).toLocaleString() : '—');
-    set('cl-output-tok', d.daily_output_tokens != null ? Number(d.daily_output_tokens).toLocaleString() : '—');
-    set('cl-reqs', d.session_requests != null ? `${d.session_requests} / ${d.session_limit || '—'}` : '—');
-    set('cl-rpm', d.rpm_limit || '—');
-    const cbState = d.circuit_breaker === 'open' ? 'OPEN ⚠' : 'CLOSED ✓';
-    set('cl-circuit', cbState);
-    // Budget bar
-    const pct = d.daily_budget_usd > 0 ? Math.min(100, (d.daily_cost_usd / d.daily_budget_usd) * 100) : 0;
-    const fill = document.getElementById('cl-budget-fill');
-    if (fill) {
-        fill.style.width = pct + '%';
-        fill.style.background = pct > 80 ? 'var(--red)' : pct > 50 ? 'var(--amber)' : 'var(--cyan)';
+
+    // ── Claude ──
+    const d = await api('/api/claude-usage');
+    if (d) {
+        console.debug('[LLM] Claude usage:', JSON.stringify({cost: d.daily_cost_usd, budget: d.daily_budget_usd, reqs: d.session_requests, blocked: d.blocked, circuit: d.circuit_breaker}));
+        set('cl-model', d.model ? d.model.toUpperCase() : '—');
+        set('cl-cost', d.daily_cost_usd != null ? `$${Number(d.daily_cost_usd).toFixed(4)}` : '—');
+        set('cl-budget', d.daily_budget_usd != null ? `$${Number(d.daily_budget_usd).toFixed(2)}` : '—');
+        set('cl-input-tok', d.daily_input_tokens != null ? Number(d.daily_input_tokens).toLocaleString() : '—');
+        set('cl-output-tok', d.daily_output_tokens != null ? Number(d.daily_output_tokens).toLocaleString() : '—');
+        set('cl-reqs', d.session_requests != null ? `${d.session_requests} / ${d.session_limit || '—'}` : '—');
+        set('cl-rpm', d.rpm_limit || '—');
+        set('cl-circuit', d.circuit_breaker === 'open' ? 'OPEN ⚠' : 'CLOSED ✓');
+        const pct = d.daily_budget_usd > 0 ? Math.min(100, (d.daily_cost_usd / d.daily_budget_usd) * 100) : 0;
+        const fill = document.getElementById('cl-budget-fill');
+        if (fill) {
+            fill.style.width = pct + '%';
+            fill.style.background = pct > 80 ? 'var(--red)' : pct > 50 ? 'var(--amber)' : 'var(--cyan)';
+        }
+        set('cl-budget-pct', pct.toFixed(1) + '%');
+        const blocked = d.blocked;
+        const blockedEl = document.getElementById('cl-blocked-status');
+        if (blockedEl) {
+            blockedEl.textContent = blocked ? 'BLOCKED: ' + blocked : 'OPERATIONAL';
+            blockedEl.style.color = blocked ? 'var(--red)' : 'var(--green)';
+        }
+        _lastClaudeCost = d.daily_cost_usd || 0;
+        // Dock stat + status dot
+        const dockCost = document.getElementById('dock-claude-cost');
+        if (dockCost) {
+            dockCost.textContent = d.daily_cost_usd != null ? `$${Number(d.daily_cost_usd).toFixed(3)}` : '—';
+            dockCost.className = 'dp-val' + (pct > 80 ? ' alert' : pct > 50 ? ' caution' : ' nominal');
+        }
+        const claudeDot = document.getElementById('dock-claude-dot');
+        if (claudeDot) {
+            claudeDot.className = 'dp-status-dot' + (blocked ? ' err' : d.circuit_breaker === 'open' ? ' warn' : d.configured ? ' ok' : '');
+        }
     }
-    set('cl-budget-pct', pct.toFixed(1) + '%');
-    const blocked = d.blocked;
-    const blockedEl = document.getElementById('cl-blocked-status');
-    if (blockedEl) {
-        blockedEl.textContent = blocked ? 'BLOCKED: ' + blocked : 'OPERATIONAL';
-        blockedEl.style.color = blocked ? 'var(--red)' : 'var(--green)';
+
+    // ── OpenRouter ──
+    const o = await api('/api/openrouter-usage');
+    if (!o) {
+        console.warn('[LLM] OpenRouter usage fetch returned null — endpoint may be down or returning non-200');
     }
-    // Dock stats
-    const dockCost = document.getElementById('dock-claude-cost');
-    const dockReqs = document.getElementById('dock-claude-reqs');
-    if (dockCost) {
-        dockCost.textContent = d.daily_cost_usd != null ? `$${Number(d.daily_cost_usd).toFixed(3)}` : '—';
-        dockCost.className = 'dp-val' + (pct > 80 ? ' alert' : pct > 50 ? ' caution' : ' nominal');
+    if (o) {
+        console.debug('[LLM] OpenRouter usage:', JSON.stringify({configured: o.configured, cost: o.daily_cost_usd, budget: o.daily_budget_usd, balance: o.account_balance_usd, model: o.agent_model, reqs: o.session_requests, blocked: o.blocked, circuit: o.circuit_breaker}));
+        const modelName = o.agent_model ? o.agent_model.split('/').pop().toUpperCase() : '—';
+        set('or-model', modelName);
+        set('or-cost', o.daily_cost_usd != null ? `$${Number(o.daily_cost_usd).toFixed(4)}` : '—');
+        // Account balance / usage from OpenRouter API
+        const balEl = document.getElementById('or-balance');
+        const balLabel = balEl?.closest('.readout-cell')?.querySelector('.rl');
+        if (balEl) {
+            if (o.account_balance_usd != null) {
+                // Key has a credit cap — show remaining balance
+                balEl.textContent = `$${Number(o.account_balance_usd).toFixed(2)}`;
+                balEl.style.color = o.account_balance_usd < 1 ? 'var(--red)' : o.account_balance_usd < 5 ? 'var(--amber)' : 'var(--green)';
+                if (balLabel) balLabel.textContent = '$ REMAINING';
+            } else if (o.account_usage_usd != null) {
+                // Pay-as-you-go — show total spend
+                balEl.textContent = `$${Number(o.account_usage_usd).toFixed(2)}`;
+                balEl.style.color = 'var(--cyan)';
+                if (balLabel) balLabel.textContent = '$ TOTAL SPEND';
+            } else {
+                balEl.textContent = o.configured ? '—' : '—';
+                balEl.style.color = 'var(--text-dim)';
+            }
+        }
+        set('or-budget', o.daily_budget_usd != null ? `$${Number(o.daily_budget_usd).toFixed(2)}` : '—');
+        set('or-input-tok', o.daily_input_tokens != null ? Number(o.daily_input_tokens).toLocaleString() : '—');
+        set('or-output-tok', o.daily_output_tokens != null ? Number(o.daily_output_tokens).toLocaleString() : '—');
+        set('or-reqs', o.session_requests != null ? `${o.session_requests} / ${o.session_limit || '—'}` : '—');
+        set('or-rpm', o.rpm_limit || '—');
+        set('or-circuit', o.circuit_breaker === 'open' ? 'OPEN ⚠' : 'CLOSED ✓');
+        const orPct = o.daily_budget_usd > 0 ? Math.min(100, (o.daily_cost_usd / o.daily_budget_usd) * 100) : 0;
+        const orFill = document.getElementById('or-budget-fill');
+        if (orFill) {
+            orFill.style.width = orPct + '%';
+            orFill.style.background = orPct > 80 ? 'var(--red)' : orPct > 50 ? 'var(--amber)' : 'var(--green)';
+        }
+        set('or-budget-pct', orPct.toFixed(1) + '%');
+        const orBlocked = o.blocked;
+        const orBlockedEl = document.getElementById('or-blocked-status');
+        if (orBlockedEl) {
+            orBlockedEl.textContent = orBlocked ? 'BLOCKED: ' + orBlocked : (o.configured ? 'OPERATIONAL' : 'NOT CONFIGURED');
+            orBlockedEl.style.color = orBlocked ? 'var(--red)' : (o.configured ? 'var(--green)' : 'var(--amber)');
+        }
+        _lastOrCost = o.daily_cost_usd || 0;
+        // Dock stat + status dot — show balance (capped) or daily spend (pay-as-you-go)
+        const dockOrCost = document.getElementById('dock-or-cost');
+        if (dockOrCost) {
+            if (o.account_balance_usd != null) {
+                dockOrCost.textContent = `$${Number(o.account_balance_usd).toFixed(2)}`;
+                dockOrCost.className = 'dp-val' + (o.account_balance_usd < 1 ? ' alert' : o.account_balance_usd < 5 ? ' caution' : ' nominal');
+            } else if (o.account_usage_daily_usd != null) {
+                dockOrCost.textContent = `$${Number(o.account_usage_daily_usd).toFixed(3)}`;
+                dockOrCost.className = 'dp-val nominal';
+            } else {
+                dockOrCost.textContent = o.daily_cost_usd != null ? `$${Number(o.daily_cost_usd).toFixed(3)}` : '—';
+                dockOrCost.className = 'dp-val' + (orPct > 80 ? ' alert' : orPct > 50 ? ' caution' : ' nominal');
+            }
+        }
+        const orDot = document.getElementById('dock-or-dot');
+        if (orDot) {
+            orDot.className = 'dp-status-dot' + (orBlocked ? ' err' : o.circuit_breaker === 'open' ? ' warn' : o.configured ? ' ok' : '');
+        }
     }
-    if (dockReqs) {
-        dockReqs.textContent = d.session_requests != null ? d.session_requests : '—';
+
+    // ── Gemini ──
+    const g = await api('/api/gemini-usage');
+    if (g) {
+        console.debug('[LLM] Gemini usage:', JSON.stringify({configured: g.configured, calls: g.daily_calls, cap: g.daily_call_cap, tokens_in: g.daily_input_tokens, tokens_out: g.daily_output_tokens, blocked: g.blocked, circuit: g.circuit_breaker}));
+        set('gem-model', g.model ? g.model.toUpperCase() : '—');
+        set('gem-calls', g.daily_calls != null ? `${g.daily_calls}` : '—');
+        set('gem-cap', g.daily_call_cap != null ? `${g.daily_call_cap}` : '—');
+        set('gem-session', g.session_calls != null ? `${g.session_calls}` : '—');
+        set('gem-input-tok', g.daily_input_tokens != null ? Number(g.daily_input_tokens).toLocaleString() : '—');
+        set('gem-output-tok', g.daily_output_tokens != null ? Number(g.daily_output_tokens).toLocaleString() : '—');
+        set('gem-circuit', g.circuit_breaker === 'open' ? 'OPEN ⚠' : 'CLOSED ✓');
+        set('gem-cost-label', '$0.00 (free tier)');
+        const gemPct = g.daily_call_cap > 0 ? Math.min(100, (g.daily_calls / g.daily_call_cap) * 100) : 0;
+        const gemFill = document.getElementById('gem-budget-fill');
+        if (gemFill) {
+            gemFill.style.width = gemPct + '%';
+            gemFill.style.background = gemPct > 80 ? 'var(--red)' : gemPct > 60 ? 'var(--amber)' : 'var(--purple, #b388ff)';
+        }
+        set('gem-budget-pct', gemPct.toFixed(1) + '%');
+        const gemBlockedEl = document.getElementById('gem-blocked-status');
+        if (gemBlockedEl) {
+            gemBlockedEl.textContent = g.blocked ? 'BLOCKED: ' + g.blocked : (g.configured ? 'OPERATIONAL' : 'NOT CONFIGURED');
+            gemBlockedEl.style.color = g.blocked ? 'var(--red)' : (g.configured ? 'var(--green)' : 'var(--amber)');
+        }
+        // Dock stat
+        const dockGemCalls = document.getElementById('dock-gem-calls');
+        if (dockGemCalls) {
+            dockGemCalls.textContent = g.daily_calls != null ? `${g.daily_calls}/${g.daily_call_cap}` : '—';
+            dockGemCalls.className = 'dp-val' + (gemPct > 80 ? ' alert' : gemPct > 60 ? ' caution' : ' nominal');
+        }
+        const gemDot = document.getElementById('dock-gem-dot');
+        if (gemDot) {
+            gemDot.className = 'dp-status-dot' + (g.blocked ? ' err' : g.circuit_breaker === 'open' ? ' warn' : g.configured ? ' ok' : '');
+        }
     }
+
+    // ── Combined total ──
+    const totalCost = _lastClaudeCost + _lastOrCost;
+    set('llm-total-cost', `$${totalCost.toFixed(4)}`);
 }
 
 // ── Email Intelligence ───────────────────────────────────────────
@@ -4333,24 +4851,295 @@ async function refreshEmail() {
             });
         }
     }
+
+    // Populate email list in dock panel
+    const emailListEl = document.getElementById('email-list');
+    if (emailListEl) {
+        const recent = await api('/api/email/recent');
+        if (recent && Array.isArray(recent)) {
+            emailListEl.innerHTML = recent.slice(0, 10).map(e => {
+                const catColor = e.category === 'customer_inquiry' ? '#00ff88' :
+                                 e.category === 'business' ? '#00c8ff' :
+                                 e.category === 'spam' || e.category === 'newsletter' ? '#4a5568' : '#6b8899';
+                const urgentDot = e.is_urgent ? '<span style="color:#ff3355;margin-right:4px">●</span>' : '';
+                const unreadStyle = e.is_read ? 'opacity:0.6' : 'font-weight:bold';
+                const catLabel = e.category ? `<span style="color:${catColor};font-size:0.65em;text-transform:uppercase;margin-left:6px">${e.category.replace('_',' ')}</span>` : '';
+                return `<div class="email-row" data-uid="${e.uid}" style="padding:6px 8px;border-bottom:1px solid rgba(0,200,255,0.08);cursor:pointer;${unreadStyle};transition:background 0.2s" onmouseover="this.style.background='rgba(0,200,255,0.06)'" onmouseout="this.style.background='transparent'">
+                    <div style="font-size:0.8em;color:#00c8ff;display:flex;align-items:center">${urgentDot}${(e.sender||'').substring(0,35)}${catLabel}</div>
+                    <div style="font-size:0.75em;color:#8ba4b5;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${e.subject||'(No subject)'}</div>
+                </div>`;
+            }).join('');
+            // Add click handlers
+            emailListEl.querySelectorAll('.email-row').forEach(row => {
+                row.addEventListener('click', () => openEmailDetail(row.dataset.uid));
+            });
+        }
+    }
+}
+
+// ── Email Detail & Reply Panel ───────────────────────────────────
+async function openEmailDetail(uid) {
+    const d = await api(`/api/email/detail/${uid}`);
+    if (!d || d.error) { console.warn('[Email] Detail fetch failed:', d?.error); return; }
+
+    // Close any open dock panel
+    if (typeof activeDock !== 'undefined' && activeDock) closeExpandPanels();
+
+    // Build analysis panel with email content
+    const bodyPreview = (d.body || d.snippet || '(No content)').substring(0, 2000);
+    const catBadge = d.category ? `<span style="background:rgba(0,200,255,0.15);padding:2px 8px;border-radius:4px;font-size:0.7em;text-transform:uppercase;color:#00c8ff">${d.category.replace('_',' ')}</span>` : '';
+
+    const panel = {
+        title: `📧 ${d.subject || 'Email Detail'}`,
+        stats: [
+            { label: 'From', value: (d.sender || '').substring(0, 40) },
+            { label: 'Date', value: (d.date || '').substring(0, 25) },
+            { label: 'Category', value: d.category ? d.category.replace('_', ' ') : 'Unclassified' },
+            { label: 'Status', value: d.is_replied ? 'Replied' : d.is_read ? 'Read' : 'Unread',
+              status: d.is_replied ? 'good' : d.is_read ? null : 'warn' },
+        ],
+        summary: bodyPreview,
+    };
+
+    if (typeof voice !== 'undefined' && voice._renderAnalysisPanel) {
+        voice._renderAnalysisPanel(panel, true);
+
+        // Inject reply button into right wing after render
+        setTimeout(() => {
+            const wingR = document.getElementById('analysis-wing-right');
+            if (!wingR) return;
+            const existing = wingR.querySelector('.email-action-bar');
+            if (existing) existing.remove();
+
+            const bar = document.createElement('div');
+            bar.className = 'email-action-bar';
+            bar.style.cssText = 'display:flex;gap:8px;padding:12px 0;border-top:1px solid rgba(0,200,255,0.15);margin-top:12px;';
+            bar.innerHTML = `
+                <button class="email-reply-btn" data-uid="${uid}" style="flex:1;padding:8px 16px;background:rgba(0,200,255,0.15);border:1px solid rgba(0,200,255,0.3);color:#00c8ff;border-radius:6px;cursor:pointer;font-family:'Courier New',monospace;font-size:0.85em;transition:all 0.2s">
+                    ✉ DRAFT REPLY
+                </button>
+                <button class="email-classify-btn" data-uid="${uid}" style="padding:8px 12px;background:rgba(100,255,218,0.1);border:1px solid rgba(100,255,218,0.2);color:#64ffda;border-radius:6px;cursor:pointer;font-family:'Courier New',monospace;font-size:0.85em;transition:all 0.2s">
+                    🏷 CLASSIFY
+                </button>
+            `;
+            // Append to the summary/content area
+            const content = wingR.querySelector('.analysis-content') || wingR;
+            content.appendChild(bar);
+
+            bar.querySelector('.email-reply-btn').addEventListener('click', () => _emailDraftReply(uid));
+            bar.querySelector('.email-classify-btn').addEventListener('click', () => _emailClassify());
+        }, 200);
+    }
+}
+
+async function _emailDraftReply(uid) {
+    const btn = document.querySelector(`.email-reply-btn[data-uid="${uid}"]`);
+    if (btn) { btn.textContent = '⏳ DRAFTING...'; btn.disabled = true; }
+
+    const d = await api('/api/email/draft-reply', { method: 'POST', body: JSON.stringify({ uid }) });
+    if (!d || d.error) {
+        if (btn) { btn.textContent = '❌ FAILED'; btn.disabled = false; }
+        console.warn('[Email] Draft failed:', d?.error);
+        return;
+    }
+
+    // Show draft in a new panel
+    const panel = {
+        title: `✉ DRAFT REPLY — ${(d.subject || '').substring(0, 50)}`,
+        stats: [
+            { label: 'To', value: (d.to || '').substring(0, 40) },
+            { label: 'Subject', value: (d.subject || '').substring(0, 50) },
+        ],
+        summary: d.draft || '(Empty draft)',
+    };
+
+    if (typeof voice !== 'undefined' && voice._renderAnalysisPanel) {
+        voice._renderAnalysisPanel(panel, true);
+
+        // Inject send/edit buttons
+        setTimeout(() => {
+            const wingR = document.getElementById('analysis-wing-right');
+            if (!wingR) return;
+            const existing = wingR.querySelector('.email-action-bar');
+            if (existing) existing.remove();
+
+            const bar = document.createElement('div');
+            bar.className = 'email-action-bar';
+            bar.style.cssText = 'display:flex;gap:8px;padding:12px 0;border-top:1px solid rgba(0,200,255,0.15);margin-top:12px;';
+            bar.innerHTML = `
+                <button class="email-send-btn" style="flex:1;padding:10px 16px;background:rgba(0,255,136,0.15);border:1px solid rgba(0,255,136,0.3);color:#00ff88;border-radius:6px;cursor:pointer;font-family:'Courier New',monospace;font-size:0.9em;font-weight:bold">
+                    📤 SEND REPLY
+                </button>
+                <button class="email-cancel-btn" style="padding:10px 12px;background:rgba(255,51,85,0.1);border:1px solid rgba(255,51,85,0.2);color:#ff3355;border-radius:6px;cursor:pointer;font-family:'Courier New',monospace;font-size:0.85em">
+                    ✕ CANCEL
+                </button>
+            `;
+            const content = wingR.querySelector('.analysis-content') || wingR;
+            content.appendChild(bar);
+
+            bar.querySelector('.email-send-btn').addEventListener('click', async () => {
+                bar.querySelector('.email-send-btn').textContent = '⏳ SENDING...';
+                bar.querySelector('.email-send-btn').disabled = true;
+                const result = await api('/api/email/send', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        to: d.to, subject: d.subject,
+                        body: d.draft, in_reply_to: d.in_reply_to || '',
+                    }),
+                });
+                if (result && result.ok) {
+                    bar.querySelector('.email-send-btn').textContent = '✅ SENT';
+                    bar.querySelector('.email-send-btn').style.background = 'rgba(0,255,136,0.25)';
+                    if (typeof voice !== 'undefined') voice._speak(`Reply sent to ${d.to.split('<')[0].trim()}, Sir.`);
+                    setTimeout(() => { if (typeof voice !== 'undefined') voice._closeAnalysisWings(); }, 3000);
+                } else {
+                    bar.querySelector('.email-send-btn').textContent = '❌ FAILED';
+                    bar.querySelector('.email-send-btn').disabled = false;
+                    console.warn('[Email] Send failed:', result?.error);
+                }
+            });
+            bar.querySelector('.email-cancel-btn').addEventListener('click', () => {
+                if (typeof voice !== 'undefined') voice._closeAnalysisWings();
+            });
+        }, 200);
+    }
+}
+
+async function _emailClassify() {
+    const d = await api('/api/email/classify', { method: 'POST', body: '{}' });
+    if (d && d.classified > 0) {
+        logConvo(`Classified ${d.classified} emails`, 'system');
+        refreshEmail();
+    }
+}
+
+// ── Notification Banner System ───────────────────────────────────
+const _NOTIF_CLEAR_MS = 20 * 60 * 1000; // 20 minutes
+const _notifSeen = new Set(); // dedup by source+message hash
+
+function _notifIcon(level) {
+    if (level === 'critical') return '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>';
+    if (level === 'high' || level === 'warning') return '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>';
+    return '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>';
+}
+
+function _showNotifBanner(level, source, message) {
+    const key = `${source}::${message}`;
+    if (_notifSeen.has(key)) return;
+    _notifSeen.add(key);
+
+    const stack = document.getElementById('notif-stack');
+    if (!stack) return;
+
+    const el = document.createElement('div');
+    el.className = `notif-banner ${level || 'info'}`;
+    const now = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+    el.innerHTML = `
+        <span class="notif-banner-icon">${_notifIcon(level)}</span>
+        <div class="notif-banner-body">
+            <div class="notif-banner-source">${_escHtml(source)}</div>
+            <div class="notif-banner-msg">${_escHtml(message)}</div>
+            <div class="notif-banner-time">${now}</div>
+        </div>
+        <button class="notif-banner-close" title="Dismiss">✕</button>`;
+
+    // Click to expand/collapse message
+    el.querySelector('.notif-banner-msg').addEventListener('click', (e) => {
+        e.stopPropagation();
+        e.target.classList.toggle('expanded');
+    });
+
+    // Close button
+    el.querySelector('.notif-banner-close').addEventListener('click', (e) => {
+        e.stopPropagation();
+        _dismissNotifBanner(el, key);
+    });
+
+    stack.prepend(el);
+
+    // Auto-clear after 20 minutes
+    setTimeout(() => _dismissNotifBanner(el, key), _NOTIF_CLEAR_MS);
+
+    // Cap at 6 visible banners
+    const banners = stack.querySelectorAll('.notif-banner:not(.dismissing)');
+    if (banners.length > 6) {
+        for (let i = 6; i < banners.length; i++) {
+            _dismissNotifBanner(banners[i]);
+        }
+    }
+}
+
+function _dismissNotifBanner(el, key) {
+    if (!el || el.classList.contains('dismissing')) return;
+    el.classList.add('dismissing');
+    if (key) _notifSeen.delete(key);
+    setTimeout(() => el.remove(), 450);
+}
+
+// ── Panel-overlap notification banner ────────────────────────────
+// Shows a dismissable banner when a new analysis panel arrives while one is already active.
+// User can click "View" to close the current panel and show the queued one, or dismiss it.
+function _showPanelNotif(panel, voiceRef) {
+    const stack = document.getElementById('notif-stack');
+    if (!stack) return;
+    const title = panel.title || panel.sections?.[0]?.title || 'Analysis';
+    const el = document.createElement('div');
+    el.className = 'notif-banner info';
+    const now = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+    el.innerHTML = `
+        <span class="notif-banner-icon">📊</span>
+        <div class="notif-banner-body">
+            <div class="notif-banner-source">New Analysis Ready</div>
+            <div class="notif-banner-msg">${_escHtml(title)}</div>
+            <div class="notif-banner-time">${now}</div>
+        </div>
+        <button class="notif-panel-view" title="View this panel">VIEW</button>
+        <button class="notif-banner-close" title="Dismiss">✕</button>`;
+
+    el.querySelector('.notif-panel-view').addEventListener('click', (e) => {
+        e.stopPropagation();
+        // Close whatever is active, then render queued panel
+        if (typeof activeDock !== 'undefined' && activeDock) closeExpandPanels();
+        if (voiceRef && voiceRef._closeAnalysisWings) voiceRef._closeAnalysisWings();
+        setTimeout(() => {
+            if (voiceRef && voiceRef._renderAnalysisPanel) {
+                voiceRef._renderAnalysisPanel(panel, true);
+            }
+        }, 300);
+        el.remove();
+    });
+    el.querySelector('.notif-banner-close').addEventListener('click', (e) => {
+        e.stopPropagation();
+        _dismissNotifBanner(el);
+    });
+
+    stack.prepend(el);
+    // Auto-dismiss after 60s
+    setTimeout(() => _dismissNotifBanner(el), 60000);
 }
 
 // ── Urgent Bulletins ─────────────────────────────────────────────
 async function refreshBulletins() {
     const d = await api('/api/bulletins');
-    // Update both: hidden dock panel and live top-left panel
-    const els = [document.getElementById('bulletin-feed'), document.getElementById('bulletin-feed-live')];
+    // Update dock panel feed (hidden panel — for when user opens Bulletins dock panel)
+    const dockFeed = document.getElementById('bulletin-feed');
     if (!d || d.length === 0) {
-        els.forEach(el => { if (el) el.innerHTML = '<div class="feed-empty">All systems nominal.</div>'; });
+        if (dockFeed) dockFeed.innerHTML = '<div class="feed-empty">All systems nominal.</div>';
         return;
     }
-    const html = d.map(b => `
-        <div class="bulletin-item">
-            <span class="bull-level ${b.level}">${b.level.toUpperCase()}</span>
-            <span class="bull-source">${b.source}</span>
-            <span class="bull-msg">${b.message}</span>
-        </div>`).join('');
-    els.forEach(el => { if (el) el.innerHTML = html; });
+    // Render into dock panel
+    if (dockFeed) {
+        dockFeed.innerHTML = d.map(b => `
+            <div class="bulletin-item">
+                <span class="bull-level ${b.level}">${b.level.toUpperCase()}</span>
+                <span class="bull-source">${b.source}</span>
+                <span class="bull-msg">${b.message}</span>
+            </div>`).join('');
+    }
+    // Push as notification banners (deduped — won't re-show same alert)
+    for (const b of d) {
+        _showNotifBanner(b.level, b.source, b.message);
+    }
     // Log critical bulletins
     d.filter(b => b.level === 'critical').forEach(b => appendLog(`[ALERT] ${b.source}: ${b.message}`, 'error'));
 }
@@ -5130,7 +5919,7 @@ const HEALTH_LABELS = {
 // Map service names → categories
 const SVC_CATEGORIES = {
     'CLOUD':   ['Cloudflare', 'Google Cloud', 'AWS'],
-    'AI':      ['OpenAI', 'Claude'],
+    'AI':      ['OpenAI', 'Claude', 'OpenRouter'],
     'EMAIL':   ['Gmail', 'Outlook'],
     'GAMING':  ['Xbox Live', 'PlayStation'],
     'COMMS':   ['WhatsApp'],
@@ -5166,66 +5955,148 @@ async function refreshServiceHealth() {
     grid.innerHTML = html;
 }
 
-// ── Weather ─────────────────────────────────────────────────────
-const WMO_ICONS = (() => {
-    const s = _SVG('sun',20), cs = _SVG('cloud-sun',20), c = _SVG('cloud',20),
-          cr = _SVG('cloud-rain',20), sn = _SVG('snowflake',20),
-          fg = _SVG('cloud-fog',20), z = _SVG('zap',20);
-    return {
-        0:s,1:cs,2:cs,3:c,45:fg,48:fg,51:cr,53:cr,55:cr,
-        56:sn,57:sn,61:cr,63:cr,65:cr,66:sn,67:sn,71:sn,73:sn,
-        75:sn,77:sn,80:cr,81:cr,82:z,85:sn,86:sn,95:z,96:z,99:z,
-    };
-})();
-const WMO_DESC = {
-    0:'Clear',1:'Mostly Clear',2:'Partly Cloudy',3:'Overcast',45:'Fog',48:'Rime Fog',
-    51:'Light Drizzle',53:'Drizzle',55:'Heavy Drizzle',61:'Light Rain',63:'Rain',
-    65:'Heavy Rain',71:'Light Snow',73:'Snow',75:'Heavy Snow',80:'Showers',
-    81:'Heavy Showers',82:'Violent Showers',95:'Thunderstorm',96:'Hail Storm',99:'Severe Storm',
+// ── Workflows Panel ──────────────────────────────────────────────
+const _WF_TEMPLATE_META = {
+    full:             { icon: 'broadcast', label: 'Full Pipeline', desc: 'End-to-end business evaluation (8 agents)', colour: '#00e5ff' },
+    research:         { icon: 'search', label: 'Research', desc: 'Deep research + data analysis', colour: '#00e5ff' },
+    content:          { icon: 'edit', label: 'Content', desc: 'Research → CMO content creation', colour: '#ff4081' },
+    technical:        { icon: 'cpu', label: 'Technical', desc: 'Technical landscape → CTO review', colour: '#76ff03' },
+    gtm:              { icon: 'rocket', label: 'Go-to-Market', desc: 'Market → CMO → Revenue → COO', colour: '#ffd740' },
+    strategy:         { icon: 'compass', label: 'Strategy', desc: 'Research → Visionary → Strategist', colour: '#448aff' },
+    story:            { icon: 'book', label: 'Story Creation', desc: 'Research → Child Dev → Story → Art', colour: '#ea80fc' },
+    character:        { icon: 'smile', label: 'Character/IP', desc: 'Research → Character → Creative', colour: '#ffab40' },
+    engineering:      { icon: 'tool', label: 'Engineering', desc: 'Architect → Eng Manager → QA → Security', colour: '#82b1ff' },
+    qa:               { icon: 'check-circle', label: 'QA Pipeline', desc: 'QA Director → Automation → Security', colour: '#00e676' },
+    fundraise:        { icon: 'dollar-sign', label: 'Fundraise', desc: 'Intel → Finance → Investor → CEO', colour: '#b2ff59' },
+    growth_plan:      { icon: 'trending-up', label: 'Growth', desc: 'Trends → Growth → CMO campaigns', colour: '#69f0ae' },
+    content_creation: { icon: 'palette', label: 'Content Creation', desc: 'Trends → Visionary → Creative → CMO', colour: '#b388ff' },
+    product_launch:   { icon: 'rocket', label: 'Product Launch', desc: 'Intel → Product → Architect → Eng → CMO', colour: '#ff6e40' },
+    social_media:     { icon: 'share', label: 'Social Media', desc: 'Trends → Content → Creative → Growth → CMO', colour: '#e040fb' },
+    software_architecture: { icon: 'layers', label: 'Software Architecture', desc: 'Research → Architect → CTO → Security → Eng', colour: '#82b1ff' },
+    legal_compliance: { icon: 'shield', label: 'Legal & Compliance', desc: 'Research → Risk → Security → Chief of Staff', colour: '#ff5252' },
 };
-const DAY_NAMES = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
 
-async function refreshWeather() {
-    const data = await api('/api/weather');
-    const card = document.getElementById('weather-card');
-    if (!card || !data || !data.current) return;
-    const c = data.current;
-    const wc = c.weather_code ?? 0;
-    const icon = WMO_ICONS[wc] || _SVG('thermometer',20);
-    const desc = WMO_DESC[wc] || 'Unknown';
-    let html = `<div class="weather-main">
-        <span class="weather-icon">${icon}</span>
-        <div>
-            <div class="weather-temp">${Math.round(c.temperature_2m || 0)}°C</div>
-            <div class="weather-desc">${desc}</div>
-        </div>
-    </div>
-    <div class="weather-details">
-        <span>Feels ${Math.round(c.apparent_temperature || 0)}°C</span>
-        <span>${_SVG('droplet',12)} ${c.relative_humidity_2m || 0}%</span>
-        <span>${_SVG('wind',12)} ${Math.round(c.wind_speed_10m || 0)} km/h</span>
-    </div>`;
-    const daily = data.daily || {};
-    if (daily.time && daily.time.length) {
-        html += '<div class="weather-forecast">';
-        for (let i = 0; i < Math.min(3, daily.time.length); i++) {
-            const d = new Date(daily.time[i]);
-            const dn = DAY_NAMES[d.getDay()];
-            const dIcon = WMO_ICONS[daily.weather_code?.[i]] || _SVG('thermometer',18);
-            html += `<div class="weather-day">
-                <div>${dn}</div>
-                <div class="wd-icon">${dIcon}</div>
-                <div class="wd-temp">${Math.round(daily.temperature_2m_max?.[i] || 0)}° / ${Math.round(daily.temperature_2m_min?.[i] || 0)}°</div>
-            </div>`;
-        }
-        html += '</div>';
+// _wfMakeCard and refreshWorkflows removed — templates now live in the dropdown only
+
+// ── Custom Workflow Builder ──────────────────────────────────────────
+let _cwbAgentList = []; // cached agent list
+
+async function _cwbOpen() {
+    let overlay = document.getElementById('cwb-overlay');
+    if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.id = 'cwb-overlay';
+        overlay.className = 'cwb-overlay';
+        overlay.innerHTML = `
+            <div class="cwb-dialog">
+                <div class="cwb-header">
+                    <span class="cwb-title">CREATE CUSTOM WORKFLOW</span>
+                    <button class="cwb-close" onclick="_cwbClose()">✕</button>
+                </div>
+                <div class="cwb-body">
+                    <div class="cwb-field">
+                        <label>Name</label>
+                        <input type="text" id="cwb-name" class="cwb-input" placeholder="My Workflow" />
+                    </div>
+                    <div class="cwb-field">
+                        <label>Description</label>
+                        <input type="text" id="cwb-desc" class="cwb-input" placeholder="What this workflow does…" />
+                    </div>
+                    <div class="cwb-field">
+                        <label>Icon (emoji)</label>
+                        <input type="text" id="cwb-icon" class="cwb-input cwb-icon-input" value="⚡" maxlength="2" />
+                    </div>
+                    <div class="cwb-field">
+                        <label>Agents (click to add in order)</label>
+                        <div id="cwb-agent-pool" class="cwb-agent-pool"></div>
+                    </div>
+                    <div class="cwb-field">
+                        <label>Chain <span id="cwb-chain-count">(0 agents)</span></label>
+                        <div id="cwb-chain" class="cwb-chain"></div>
+                    </div>
+                </div>
+                <div class="cwb-footer">
+                    <button class="cwb-save-btn" onclick="_cwbSave()">SAVE WORKFLOW</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(overlay);
     }
-    card.innerHTML = html;
-    // Dock stats
-    const wTemp = document.getElementById('dock-wx-temp');
-    const wDesc = document.getElementById('dock-wx-desc');
-    if (wTemp) wTemp.textContent = `${Math.round(c.temperature_2m || 0)}°`;
-    if (wDesc) wDesc.textContent = c.is_day ? 'DAY' : 'NIGHT';
+    // Populate agent pool
+    if (_cwbAgentList.length === 0) {
+        try {
+            _cwbAgentList = await api('/api/ceo/agents') || [];
+        } catch (e) { console.error('Failed to load agents:', e); }
+    }
+    const pool = document.getElementById('cwb-agent-pool');
+    const chain = document.getElementById('cwb-chain');
+    pool.innerHTML = '';
+    chain.innerHTML = '';
+    document.getElementById('cwb-chain-count').textContent = '(0 agents)';
+    document.getElementById('cwb-name').value = '';
+    document.getElementById('cwb-desc').value = '';
+    document.getElementById('cwb-icon').value = '⚡';
+    _cwbAgentList.forEach(agent => {
+        const chip = document.createElement('button');
+        chip.className = 'cwb-agent-chip';
+        chip.textContent = agent.name;
+        chip.title = agent.description || agent.role || '';
+        chip.dataset.agentId = agent.id;
+        chip.onclick = () => _cwbAddAgent(agent);
+        pool.appendChild(chip);
+    });
+    overlay.classList.add('active');
+}
+
+function _cwbClose() {
+    const overlay = document.getElementById('cwb-overlay');
+    if (overlay) overlay.classList.remove('active');
+}
+
+function _cwbAddAgent(agent) {
+    const chain = document.getElementById('cwb-chain');
+    const countEl = document.getElementById('cwb-chain-count');
+    const item = document.createElement('div');
+    item.className = 'cwb-chain-item';
+    item.dataset.agentId = agent.id;
+    item.innerHTML = `<span class="cwb-chain-name">${_escHtml(agent.name)}</span><button class="cwb-chain-remove" title="Remove">✕</button>`;
+    item.querySelector('.cwb-chain-remove').onclick = () => {
+        item.remove();
+        countEl.textContent = `(${chain.children.length} agents)`;
+    };
+    chain.appendChild(item);
+    countEl.textContent = `(${chain.children.length} agents)`;
+}
+
+async function _cwbSave() {
+    const name = document.getElementById('cwb-name').value.trim();
+    const desc = document.getElementById('cwb-desc').value.trim();
+    const icon = document.getElementById('cwb-icon').value.trim() || '⚡';
+    const chain = document.getElementById('cwb-chain');
+    const agents = [];
+    chain.querySelectorAll('.cwb-chain-item').forEach(el => {
+        agents.push({ agent_id: el.dataset.agentId });
+    });
+    if (!name) { alert('Please enter a workflow name'); return; }
+    if (agents.length < 1) { alert('Add at least one agent'); return; }
+    try {
+        const resp = await fetch('/api/ceo/custom-workflows', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ name, description: desc, icon, agents }),
+        });
+        const data = await resp.json();
+        if (data.ok) {
+            _cwbClose();
+            _customWfCache = null;  // bust cache
+            _populateTemplateDropdown();
+        } else {
+            alert(data.error || 'Failed to save workflow');
+        }
+    } catch (e) {
+        console.error('Save workflow error:', e);
+        alert('Failed to save workflow');
+    }
 }
 
 // ── Full-Page Panel Routing ──────────────────────────────────────
@@ -5235,17 +6106,64 @@ const DOCK_EXPAND = {
     revenue:   { title: 'REVENUE OVERVIEW',          panel: 'dock-panel-revenue' },
     content:   { title: 'CONTENT PIPELINE',          panel: 'dock-panel-content' },
     engage:    { title: 'ENGAGEMENT HUB',            panel: 'dock-panel-engage' },
-    weather:   { title: 'WEATHER — UK',              panel: 'dock-panel-weather' },
+
     deadlines: { title: 'DEADLINES & ROADMAP',       panel: 'dock-panel-deadlines' },
     bulletins: { title: 'BULLETINS',                 panel: 'dock-panel-bulletins' },
     todo:      { title: 'TODO LIST',                 panel: 'dock-panel-todo' },
     cicd:      { title: 'CI/CD — GROW WITH FREYA',   panel: 'dock-panel-cicd' },
     claude:    { title: 'CLAUDE API USAGE',           panel: 'dock-panel-claude' },
-    ceo:       { title: 'CEO ORCHESTRATION',           panel: 'dock-panel-ceo' },
+    ceo:       { title: 'AGENT ORCHESTRATOR',           panel: 'dock-panel-ceo' },
+    org:       { title: 'CEO',                        panel: 'dock-panel-org' },
 };
 
 let activeDock = null;
 let _panelTransitioning = false;
+
+// ── Update Queue: defer panels/SSE while user is in a dock panel ──
+const _updateQueue = [];
+let _drainTimer = null;
+
+function _queueUpdate(entry) {
+    // entry: { type:'panel'|'sse', data: ... }
+    _updateQueue.push(entry);
+    _updateQueueBadge();
+}
+
+function _updateQueueBadge() {
+    let badge = document.getElementById('update-queue-badge');
+    if (_updateQueue.length === 0) {
+        if (badge) badge.style.display = 'none';
+        return;
+    }
+    if (!badge) {
+        badge = document.createElement('div');
+        badge.id = 'update-queue-badge';
+        badge.className = 'update-queue-badge';
+        const clock = document.getElementById('clock');
+        if (clock) clock.parentElement.appendChild(badge);
+    }
+    badge.style.display = 'flex';
+    badge.textContent = _updateQueue.length;
+    badge.title = `${_updateQueue.length} pending update${_updateQueue.length > 1 ? 's' : ''}`;
+}
+
+function _drainUpdateQueue() {
+    if (_drainTimer) { clearTimeout(_drainTimer); _drainTimer = null; }
+    if (_updateQueue.length === 0) { _updateQueueBadge(); return; }
+    // Don't drain while a dock panel is open
+    if (activeDock) return;
+    const next = _updateQueue.shift();
+    _updateQueueBadge();
+    if (next.type === 'panel' && typeof voice !== 'undefined' && voice._renderAnalysisPanel) {
+        voice._renderAnalysisPanel(next.data, true); // true = bypass queue guard
+    } else if (next.type === 'sse') {
+        _deliverSSEDirect(next.data);
+    }
+    // Schedule next delivery after user has a moment to see it
+    if (_updateQueue.length > 0) {
+        _drainTimer = setTimeout(_drainUpdateQueue, 6000);
+    }
+}
 
 function openExpandPanels(panelKey, pushHistory = true) {
     const cfg = DOCK_EXPAND[panelKey];
@@ -5263,6 +6181,9 @@ function openExpandPanels(panelKey, pushHistory = true) {
 
     // If camera is active, close it first
     if (_cam.active) _camClose();
+
+    // Close analysis wings to prevent overlay
+    if (typeof voice !== 'undefined' && voice._closeAnalysisWings) voice._closeAnalysisWings();
 
     const viewport = document.getElementById('panel-viewport');
     const body = document.getElementById('panel-viewport-body');
@@ -5313,7 +6234,7 @@ function openExpandPanels(panelKey, pushHistory = true) {
     if (dOpts) dOpts.innerHTML = '';
     _dismissBriefingPrompt();
 
-    // ── Orb → bottom-right corner (same as camera mode) ──
+    // ── Orb → bottom-right corner ──
     const mc = document.querySelector('.mc-center');
     const startRect = mc.getBoundingClientRect();
     const orbCanvas = document.getElementById('orb-canvas');
@@ -5323,10 +6244,12 @@ function openExpandPanels(panelKey, pushHistory = true) {
     const startCX = startRect.left + startRect.width / 2;
     const startCY = startRect.top + startRect.height / 2;
 
+    // Resize canvas to 130px
     if (typeof orb !== 'undefined') orb._resize(130);
     const mcW = mc.offsetWidth;
     const mcH = mc.offsetHeight;
 
+    // Pin at current visual center, visually scaled up to original size
     mc.style.position = 'fixed';
     mc.style.top = (startCY - mcH / 2) + 'px';
     mc.style.left = (startCX - mcW / 2) + 'px';
@@ -5336,15 +6259,14 @@ function openExpandPanels(panelKey, pushHistory = true) {
     mc.style.zIndex = '600';
     void mc.offsetHeight;
 
-    // Dim dashboard (keeps everything visible)
+    // Dim dashboard
     document.body.classList.add('panel-mode');
 
-    // Target: bottom-right corner — lift higher so orb clears dock/panels in windowed mode
+    // Target: bottom-right corner, above dock
     const dockEl = document.querySelector('.mc-dock');
     const dockH = dockEl ? dockEl.offsetHeight : 60;
-    const bottomPad = dockH + 40;   // clear the dock + breathing room
-    const targetTop = window.innerHeight - bottomPad - mcH;
-    const targetLeft = window.innerWidth - 32 - mcW;
+    const targetTop = window.innerHeight - dockH - mcH + 10;
+    const targetLeft = window.innerWidth - mcW - 32;
     const targetCX = targetLeft + mcW / 2;
     const targetCY = targetTop + mcH / 2;
     const dx = targetCX - startCX;
@@ -5373,7 +6295,8 @@ function openExpandPanels(panelKey, pushHistory = true) {
 
 function _panelPostOpen(panelKey) {
     // Panel-specific init hooks
-    if (panelKey === 'ceo') _ceoInitPanel();
+    if (panelKey === 'ceo') _ceoInitPanel().catch(e => console.error('[CEO] Init panel error:', e));
+    if (panelKey === 'org') _orgInitPanel().catch(e => console.error('[ORG] Init panel error:', e));
     if (panelKey === 'todo') {
         _renderTodoList();
         const todoAddBtn = document.getElementById('todo-add-btn');
@@ -5425,15 +6348,18 @@ function closeExpandPanels(pushHistory = true) {
     const fullSize = Math.max(200, Math.min(window.innerWidth * 0.2, 420));
     const scaleFrom = 130 / fullSize;
 
+    // Resize canvas back to full
     if (typeof orb !== 'undefined') orb._resize(Math.round(fullSize));
     const mcW = mc.offsetWidth;
     const mcH = mc.offsetHeight;
 
+    // Where CSS naturally places the orb (center of viewport parent)
     const parent = mc.parentElement;
     const parentRect = parent.getBoundingClientRect();
     const targetCX = parentRect.left + parentRect.width / 2;
     const targetCY = parentRect.top + parentRect.height / 2;
 
+    // Pin at current visual position, visually still small
     mc.style.position = 'fixed';
     mc.style.top = (curCY - mcH / 2) + 'px';
     mc.style.left = (curCX - mcW / 2) + 'px';
@@ -5454,10 +6380,16 @@ function closeExpandPanels(pushHistory = true) {
     });
 
     setTimeout(() => {
-        mc.style.transition = 'none !important';
-        mc.style.cssText = '';
+        mc.style.transition = 'none';
+        mc.style.cssText = 'transition: none !important;';
         void mc.offsetHeight;
+        requestAnimationFrame(() => {
+            mc.style.cssText = '';
+            if (typeof orb !== 'undefined') orb._resize();
+        });
         _panelTransitioning = false;
+        // Drain queued updates now that user is back on home page
+        if (_updateQueue.length > 0) setTimeout(_drainUpdateQueue, 1500);
     }, 960);
 }
 
@@ -5472,6 +6404,8 @@ function _panelQuickClose() {
     _panelTransitioning = false;
     document.querySelectorAll('.dock-panel[data-dock]').forEach(t => t.classList.remove('active'));
     history.pushState({}, '', '/');
+    // Drain queued updates
+    if (_updateQueue.length > 0) setTimeout(_drainUpdateQueue, 1500);
 }
 
 // ── Todo List (localStorage-backed) ─────────────────────────────
@@ -5714,6 +6648,113 @@ function _formatDateLabel(dateStr) {
     return `${days[d.getDay()]} ${d.getDate()} ${months[d.getMonth()]}`;
 }
 
+// ── Todo Reminders (local cron — no LLM) ────────────────────────
+const _firedReminders = new Set();
+let _reminderInterval = null;
+
+function _initTodoReminders() {
+    // Request notification permission
+    if ('Notification' in window && Notification.permission === 'default') {
+        Notification.requestPermission();
+    }
+    // Check every 30 seconds
+    if (_reminderInterval) clearInterval(_reminderInterval);
+    _reminderInterval = setInterval(_checkTodoReminders, 30_000);
+    // Also run once immediately
+    _checkTodoReminders();
+}
+
+function _checkTodoReminders() {
+    const todos = _loadTodos();
+    const now = new Date();
+    const nowDate = now.toISOString().slice(0, 10);
+    const nowMins = now.getHours() * 60 + now.getMinutes();
+
+    for (const t of todos) {
+        if (t.done || !t.date || !t.time || _firedReminders.has(t.id)) continue;
+
+        const taskMins = parseInt(t.time.split(':')[0]) * 60 + parseInt(t.time.split(':')[1]);
+
+        // Fire if: task is today and within 1 minute of now, OR task is overdue
+        if (t.date === nowDate && Math.abs(taskMins - nowMins) <= 1) {
+            _fireReminder(t);
+        } else if (t.date < nowDate) {
+            // Overdue — fire once
+            _fireReminder(t, true);
+        }
+    }
+}
+
+function _fireReminder(todo, overdue = false) {
+    _firedReminders.add(todo.id);
+    const title = overdue ? '⏰ OVERDUE TASK' : '🔔 TASK DUE NOW';
+    const body = `${todo.text}${todo.time ? ' — ' + todo.time.slice(0, 5) : ''}`;
+
+    // Browser notification
+    if ('Notification' in window && Notification.permission === 'granted') {
+        const n = new Notification(title, {
+            body,
+            icon: '/static/comfyui_output/arbiter-icon.png',
+            tag: `todo-${todo.id}`,
+            requireInteraction: true,
+        });
+        n.onclick = () => {
+            window.focus();
+            if (typeof openExpandPanels === 'function') openExpandPanels('todo');
+            n.close();
+        };
+    }
+
+    // Audio alert — short beep using Web Audio API
+    _playReminderBeep();
+
+    // In-app toast (re-use existing HUD pattern)
+    _showReminderToast(title, body);
+}
+
+function _playReminderBeep() {
+    try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.frequency.value = 880;
+        osc.type = 'sine';
+        gain.gain.setValueAtTime(0.3, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.5);
+        osc.start(ctx.currentTime);
+        osc.stop(ctx.currentTime + 0.5);
+        // Second beep
+        const osc2 = ctx.createOscillator();
+        const gain2 = ctx.createGain();
+        osc2.connect(gain2);
+        gain2.connect(ctx.destination);
+        osc2.frequency.value = 1100;
+        osc2.type = 'sine';
+        gain2.gain.setValueAtTime(0.3, ctx.currentTime + 0.6);
+        gain2.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 1.1);
+        osc2.start(ctx.currentTime + 0.6);
+        osc2.stop(ctx.currentTime + 1.1);
+    } catch (e) { /* audio not supported */ }
+}
+
+function _showReminderToast(title, body) {
+    const toast = document.createElement('div');
+    toast.className = 'reminder-toast';
+    toast.innerHTML = `
+        <div class="reminder-toast-title">${title}</div>
+        <div class="reminder-toast-body">${body}</div>
+    `;
+    toast.addEventListener('click', () => {
+        if (typeof openExpandPanels === 'function') openExpandPanels('todo');
+        toast.remove();
+    });
+    document.body.appendChild(toast);
+    // Auto-remove after 10 seconds
+    setTimeout(() => { if (toast.parentNode) toast.remove(); }, 10_000);
+}
+
 // ── Roadmap / Business Planner ──────────────────────────────────
 let _roadmapData = [];
 
@@ -5843,64 +6884,1340 @@ async function refreshDeadlines() {
     }
 }
 
+// ══════════════════════════════════════════════════════════════════
+// JOB TRACKER — Floating top-right HUD for active jobs/queues
+// ══════════════════════════════════════════════════════════════════
+const _jobs = new Map();      // jobId → { id, type, label, status, startTime, progress?, total? }
+let _jobIdCounter = 0;
+let _jobTickTimer = null;
+
+const _JOB_TYPES = {
+    agent:    { label: 'AGENT',    colour: 'var(--cyan)' },
+    pipeline: { label: 'PIPELINE', colour: '#7c4dff' },
+    chat:     { label: 'QUERY',    colour: 'var(--cyan)' },
+    voice:    { label: 'VOICE',    colour: '#ffd740' },
+};
+
+function _jobAdd(type, label) {
+    const id = `job_${Date.now()}_${++_jobIdCounter}`;
+    _jobs.set(id, { id, type, label, status: 'running', startTime: Date.now(), progress: 0, total: 0 });
+    _jobRender();
+    _jobStartTick();
+    return id;
+}
+
+function _jobUpdate(id, updates) {
+    const job = _jobs.get(id);
+    if (!job) return;
+    Object.assign(job, updates);
+    _jobRender();
+}
+
+function _jobComplete(id, error) {
+    const job = _jobs.get(id);
+    if (!job) return;
+    job.status = error ? 'error' : 'complete';
+    job.endTime = Date.now();
+    _jobRender();
+    // Auto-remove after a short delay
+    setTimeout(() => {
+        const el = document.getElementById(id);
+        if (el) { el.classList.add('removing'); }
+        setTimeout(() => { _jobs.delete(id); _jobRender(); }, 450);
+    }, error ? 4000 : 2200);
+}
+
+function _jobElapsed(ms) {
+    const s = Math.floor(ms / 1000);
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60);
+    return `${m}m${String(s % 60).padStart(2, '0')}s`;
+}
+
+function _jobStartTick() {
+    if (_jobTickTimer) return;
+    _jobTickTimer = setInterval(() => {
+        const running = [..._jobs.values()].filter(j => j.status === 'running');
+        if (!running.length) { clearInterval(_jobTickTimer); _jobTickTimer = null; return; }
+        // Update elapsed timers
+        for (const j of running) {
+            const el = document.getElementById(`${j.id}-elapsed`);
+            if (el) el.textContent = _jobElapsed(Date.now() - j.startTime);
+        }
+    }, 1000);
+}
+
+function _jobRender() {
+    const container = document.getElementById('job-tracker');
+    if (!container) return;
+
+    if (_jobs.size === 0) {
+        container.classList.add('empty');
+        container.innerHTML = '';
+        return;
+    }
+    container.classList.remove('empty');
+
+    // Build items — most recent first
+    const sorted = [..._jobs.values()].sort((a, b) => b.startTime - a.startTime);
+    let html = '';
+    for (const job of sorted) {
+        const typeMeta = _JOB_TYPES[job.type] || _JOB_TYPES.chat;
+        const elapsed = _jobElapsed((job.endTime || Date.now()) - job.startTime);
+
+        let iconHtml;
+        if (job.status === 'running') {
+            iconHtml = '<div class="jt-spinner"></div>';
+        } else if (job.status === 'complete') {
+            iconHtml = `<div class="jt-icon complete">${_SVG('check-circle', 14)}</div>`;
+        } else {
+            iconHtml = `<div class="jt-icon error">${_SVG('alert-triangle', 14)}</div>`;
+        }
+
+        // Progress bar for pipelines
+        let progressHtml = '';
+        if (job.type === 'pipeline' && job.total > 0) {
+            const pct = Math.round((job.progress / job.total) * 100);
+            progressHtml = `<div class="jt-progress"><div class="jt-progress-bar" style="width:${pct}%"></div></div>`;
+        }
+
+        html += `<div class="job-tracker-item ${job.status}" id="${job.id}" style="position:relative;">
+            ${iconHtml}
+            <span class="jt-type">${typeMeta.label}</span>
+            <span class="jt-label" title="${_escHtml(job.label)}">${_escHtml(job.label)}</span>
+            <span class="jt-elapsed" id="${job.id}-elapsed">${elapsed}</span>
+            ${progressHtml}
+        </div>`;
+    }
+    container.innerHTML = html;
+}
+
+// ── Active Agents Panel (below conversation logs) ────────────────
+async function refreshActiveAgents() {
+    const container = document.getElementById('active-agents-list');
+    if (!container) return;
+
+    try {
+        const data = await api('/api/active-jobs');
+        if (!data || !data.jobs) return;
+        const jobs = data.jobs;
+
+        if (jobs.length === 0) {
+            container.innerHTML = '<div class="aa-empty">NO ACTIVE JOBS</div>';
+            return;
+        }
+
+        let html = '';
+        for (const job of jobs) {
+            const kindCls = job.kind || 'agent';
+            const kindLabel = { pipeline: 'PIPELINE', team: 'TEAM', agent: 'AGENT' }[kindCls] || 'AGENT';
+            const statusCls = job.status === 'running' ? 'running' : job.status === 'complete' ? 'complete' : job.status === 'error' ? 'error' : 'waiting';
+
+            // Status icon
+            let statusIcon;
+            if (statusCls === 'running') statusIcon = '<div class="aa-spinner"></div>';
+            else if (statusCls === 'complete') statusIcon = `<div class="aa-icon complete">${_SVG('check-circle', 12)}</div>`;
+            else if (statusCls === 'error') statusIcon = `<div class="aa-icon error">${_SVG('alert-triangle', 12)}</div>`;
+            else statusIcon = '<div class="aa-icon waiting">◉</div>';
+
+            // Progress info
+            let progressHtml = '';
+            if (job.total > 0) {
+                const pct = Math.round((job.progress / job.total) * 100);
+                progressHtml = `<div class="aa-progress"><div class="aa-progress-bar" style="width:${pct}%"></div></div>`;
+            }
+
+            // Sub-info line
+            let subInfo = '';
+            if (job.current_agent) subInfo = job.current_agent;
+            else if (job.agent_name) subInfo = job.agent_name;
+            else if (job.team_name) subInfo = job.team_name;
+            if (job.total > 0) subInfo += (subInfo ? ' · ' : '') + `${job.progress}/${job.total}`;
+
+            // Time ago
+            let timeAgo = '';
+            if (job.created_at) {
+                const diff = Date.now() - new Date(job.created_at).getTime();
+                if (diff < 60000) timeAgo = `${Math.floor(diff / 1000)}s`;
+                else if (diff < 3600000) timeAgo = `${Math.floor(diff / 60000)}m`;
+                else timeAgo = `${Math.floor(diff / 3600000)}h`;
+            }
+
+            html += `<div class="aa-card ${statusCls} kind-${kindCls}" title="${_escHtml(job.label)}">
+                <div class="aa-card-top">
+                    ${statusIcon}
+                    <span class="aa-kind">${kindLabel}</span>
+                    <span class="aa-label">${_escHtml(job.label)}</span>
+                    <span class="aa-time">${timeAgo}</span>
+                </div>
+                ${subInfo ? `<div class="aa-sub">${_escHtml(subInfo)}</div>` : ''}
+                ${progressHtml}
+            </div>`;
+        }
+        container.innerHTML = html;
+    } catch (e) {
+        console.warn('[ActiveAgents] refresh error:', e);
+    }
+}
+
+// ── Organisation Mode Module ─────────────────────────────────────
+let _orgTemplates = null;
+let _orgCustomAgents = null;
+let _activeOrgRun = null;
+let _orgRunPollTimer = null;
+let _orgEditId = null; // template being edited
+
+async function _orgInitPanel() {
+    console.log('[ORG] Initialising org panel...');
+    // Wire up buttons
+    const newTeamBtn = document.getElementById('org-new-team-btn');
+    if (newTeamBtn) newTeamBtn.onclick = () => _orgShowTeamModal();
+
+    // Wire up team modal
+    const teamModalClose = document.getElementById('org-team-modal-close');
+    const teamSaveBtn = document.getElementById('org-team-save');
+    if (teamModalClose) teamModalClose.onclick = _orgHideTeamModal;
+    if (teamSaveBtn) teamSaveBtn.onclick = _orgSaveTeam;
+
+    // Wire up run controls
+    const approveBtn = document.getElementById('org-run-approve');
+    const rejectBtn = document.getElementById('org-run-reject');
+    if (approveBtn) approveBtn.onclick = _orgRunApprove;
+    if (rejectBtn) rejectBtn.onclick = _orgRunReject;
+
+    // Load templates
+    await _orgLoadTemplates();
+}
+
+// Lightweight fetch of team count for the dock badge (no panel DOM needed)
+async function refreshOrgTeamCount() {
+    try {
+        const resp = await fetch('/api/org/templates');
+        const data = await resp.json();
+        _orgTemplates = data;
+        const badge = document.getElementById('dock-org-teams');
+        if (badge) badge.textContent = Array.isArray(data) ? data.length : 0;
+    } catch (e) {
+        console.warn('[ORG] Team count fetch failed:', e);
+    }
+}
+
+async function _orgLoadTemplates() {
+    try {
+        // Ensure agents are cached for rendering agent names/icons
+        if (!_ceoAgents) {
+            try {
+                const agResp = await fetch('/api/ceo/agents');
+                _ceoAgents = await agResp.json();
+            } catch (e) { /* ignore */ }
+        }
+        const resp = await fetch('/api/org/templates');
+        _orgTemplates = await resp.json();
+        _orgRenderTeamsList();
+        // Update dock badge
+        const badge = document.getElementById('dock-org-teams');
+        if (badge) badge.textContent = Array.isArray(_orgTemplates) ? _orgTemplates.length : 0;
+    } catch (e) {
+        console.error('[ORG] Failed to load templates:', e);
+    }
+}
+
+function _orgRenderTeamsList() {
+    const list = document.getElementById('org-teams-list');
+    if (!list) return;
+
+    if (!_orgTemplates || _orgTemplates.length === 0) {
+        list.innerHTML = '<div class="org-empty">No teams created yet. Click <b>+ TEAM</b> to build your first team.</div>';
+        return;
+    }
+
+    list.innerHTML = '';
+
+    // Separate agile vs service templates
+    const agileTemplates = _orgTemplates.filter(t => !t.category || t.category !== 'service');
+    const serviceTemplates = _orgTemplates.filter(t => t.category === 'service');
+
+    if (agileTemplates.length > 0) {
+        const agileHeader = document.createElement('div');
+        agileHeader.className = 'org-section-header';
+        agileHeader.innerHTML = `<span class="org-section-icon">${_SVG('settings', 14)}</span> AGILE TEAMS <span class="org-section-count">${agileTemplates.length}</span>`;
+        list.appendChild(agileHeader);
+        for (const t of agileTemplates) _orgRenderCard(list, t);
+    }
+
+    if (serviceTemplates.length > 0) {
+        const svcHeader = document.createElement('div');
+        svcHeader.className = 'org-section-header org-section-service';
+        svcHeader.innerHTML = `<span class="org-section-icon">${_SVG('briefcase', 14)}</span> SERVICE BUSINESSES <span class="org-section-count">${serviceTemplates.length}</span>`;
+        list.appendChild(svcHeader);
+        for (const t of serviceTemplates) _orgRenderCard(list, t);
+    }
+
+    if (agileTemplates.length === 0 && serviceTemplates.length === 0) {
+        list.innerHTML = '<div class="org-empty">No teams created yet. Click <b>+ TEAM</b> to build your first team.</div>';
+    }
+}
+
+function _orgRenderCard(list, t) {
+    const card = document.createElement('div');
+    card.className = 'org-team-card';
+    const nodeCount = (t.nodes || []).length;
+    const levels = new Set((t.nodes || []).map(n => n.level || 0));
+    const maxLevel = levels.size;
+    const estCost = (0.01 + (nodeCount - 1) * 0.001 + (maxLevel - 1) * 0.001).toFixed(3);
+
+    // Build agent tile flow by level
+    const agentMap = {};
+    if (_ceoAgents) for (const a of _ceoAgents) agentMap[a.id] = a;
+    const levelGroups = {};
+    for (const n of (t.nodes || [])) {
+        const lvl = n.level || 0;
+        if (!levelGroups[lvl]) levelGroups[lvl] = [];
+        levelGroups[lvl].push(n.agent_id);
+    }
+    let flowHtml = '';
+    const sortedLevels = Object.keys(levelGroups).sort((a, b) => a - b);
+    for (let i = 0; i < sortedLevels.length; i++) {
+        const lvl = sortedLevels[i];
+        const labelMap = { '0': 'LEAD', '1': 'CORE', '2': 'OPS', '3': 'COMMS', '4': 'FINANCE' };
+        const label = labelMap[lvl] || `L${lvl}`;
+        let tilesHtml = '';
+        for (const aid of levelGroups[lvl]) {
+            const ag = agentMap[aid] || {};
+            const col = ag.colour || '#00e5ff';
+            const tier = ag.model_tier || (ag.provider === 'claude' ? 'strategic' : ag.provider === 'gemini' ? 'research' : 'execution');
+            const tierLabel = tier === 'strategic' ? 'STR' : tier === 'research' ? 'RES' : 'EXE';
+            const tierClass = `org-tile-tier-${tier}`;
+            tilesHtml += `
+                <div class="org-agent-tile" style="--tile-accent:${col}">
+                    <div class="org-tile-icon">${_SVG(ag.icon || 'user', 18)}</div>
+                    <div class="org-tile-info">
+                        <div class="org-tile-name">${_escHtml(ag.name || aid)}</div>
+                        <div class="org-tile-role">${_escHtml(ag.role || '')}</div>
+                    </div>
+                    <span class="org-tile-tier ${tierClass}">${tierLabel}</span>
+                </div>`;
+        }
+        flowHtml += `<div class="org-flow-level">
+            <span class="org-flow-level-tag">${label}</span>
+            <div class="org-flow-level-tiles">${tilesHtml}</div>
+        </div>`;
+        if (i < sortedLevels.length - 1) {
+            flowHtml += '<div class="org-flow-arrow"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12l7 7 7-7"/></svg></div>';
+        }
+    }
+
+    card.innerHTML = `
+        <div class="org-team-card-header">
+            <span class="org-team-card-icon">${_SVG('layers', 16)}</span>
+            <span class="org-team-card-name">${_escHtml(t.name)}</span>
+            <span class="org-team-card-meta">${nodeCount} agents · ${maxLevel} levels · ~$${estCost}</span>
+        </div>
+        <div class="org-team-card-desc">${_escHtml(t.description || '')}</div>
+        <div class="org-team-card-flow">${flowHtml}</div>
+        <div class="org-team-card-actions">
+            <input type="text" class="org-team-directive-input" placeholder="Enter directive for this team..." autocomplete="off"/>
+            <button class="org-btn org-btn-run" title="Run organisation">▶ RUN</button>
+            <button class="org-btn org-btn-edit" title="Edit team">✎</button>
+            <button class="org-btn org-btn-del" title="Delete team">✕</button>
+        </div>
+    `;
+
+    // Wire up buttons
+    const runBtn = card.querySelector('.org-btn-run');
+    const editBtn = card.querySelector('.org-btn-edit');
+    const delBtn = card.querySelector('.org-btn-del');
+    const directiveInput = card.querySelector('.org-team-directive-input');
+
+    runBtn.addEventListener('click', () => {
+        const directive = directiveInput.value.trim();
+        if (!directive) { directiveInput.focus(); directiveInput.style.borderColor = '#ff4081'; return; }
+        directiveInput.style.borderColor = '';
+        _orgStartRun(t.id, directive);
+    });
+    directiveInput.addEventListener('keydown', e => {
+        if (e.key === 'Enter' && directiveInput.value.trim()) runBtn.click();
+    });
+    editBtn.addEventListener('click', () => _orgShowTeamModal(t));
+    delBtn.addEventListener('click', () => _orgDeleteTeam(t.id));
+
+    list.appendChild(card);
+}
+
+// ── Agent Creator Modal ──
+function _orgShowAgentModal() {
+    const modal = document.getElementById('org-agent-modal');
+    if (modal) modal.style.display = 'flex';
+    // Clear fields
+    ['org-agent-name', 'org-agent-role', 'org-agent-desc', 'org-agent-prompt'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.value = '';
+    });
+    const tierSel = document.getElementById('org-agent-tier');
+    if (tierSel) tierSel.value = 'execution';
+    const colourInp = document.getElementById('org-agent-colour');
+    if (colourInp) colourInp.value = '#00e5ff';
+}
+
+function _orgHideAgentModal() {
+    const modal = document.getElementById('org-agent-modal');
+    if (modal) modal.style.display = 'none';
+}
+
+async function _orgCreateAgent() {
+    const name = document.getElementById('org-agent-name')?.value.trim();
+    const role = document.getElementById('org-agent-role')?.value.trim();
+    const desc = document.getElementById('org-agent-desc')?.value.trim();
+    const tier = document.getElementById('org-agent-tier')?.value || 'execution';
+    const icon = document.getElementById('org-agent-icon')?.value || 'user';
+    const colour = document.getElementById('org-agent-colour')?.value || '#00e5ff';
+    const prompt = document.getElementById('org-agent-prompt')?.value.trim();
+
+    if (!name) { document.getElementById('org-agent-name')?.focus(); return; }
+
+    const saveBtn = document.getElementById('org-agent-save');
+    if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'CREATING...'; }
+
+    try {
+        const resp = await fetch('/api/agents/custom', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, role, description: desc, model_tier: tier, icon, colour, system_prompt: prompt }),
+        });
+        const data = await resp.json();
+        if (data.error) {
+            alert('Error: ' + data.error);
+        } else {
+            _orgHideAgentModal();
+            // Invalidate agent cache so CEO panel + ORG panel re-fetch
+            _ceoAgents = null;
+            _orgCustomAgents = null;
+            // Re-render CEO agent nodes to include the new agent
+            const nodesWrap = document.getElementById('wf-graph-nodes');
+            if (nodesWrap) { nodesWrap.innerHTML = ''; }
+            _ceoInitPanel();
+            // Reload team modal palette if open
+            _orgLoadAgentPalette();
+        }
+    } catch (e) {
+        alert('Failed to create agent: ' + e.message);
+    } finally {
+        if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'CREATE AGENT'; }
+    }
+}
+
+// ── Team Builder Modal ──
+async function _orgShowTeamModal(existing = null) {
+    const modal = document.getElementById('org-team-modal');
+    if (modal) modal.style.display = 'flex';
+
+    const titleEl = document.getElementById('org-team-modal-title');
+    const nameInput = document.getElementById('org-team-name');
+    const descInput = document.getElementById('org-team-desc');
+
+    if (existing) {
+        _orgEditId = existing.id;
+        if (titleEl) titleEl.textContent = 'EDIT TEAM';
+        if (nameInput) nameInput.value = existing.name || '';
+        if (descInput) descInput.value = existing.description || '';
+        // Populate levels with existing nodes
+        _orgPopulateLevels(existing.nodes || []);
+    } else {
+        _orgEditId = null;
+        if (titleEl) titleEl.textContent = 'CREATE TEAM';
+        if (nameInput) nameInput.value = '';
+        if (descInput) descInput.value = '';
+        // Clear levels
+        document.querySelectorAll('.org-level-slots').forEach(el => el.innerHTML = '');
+    }
+
+    await _orgLoadAgentPalette();
+    _orgUpdateCostEstimate();
+
+    // Wire the inline + AGENT button inside the palette header
+    const inlineAgentBtn = document.getElementById('org-team-new-agent-btn');
+    if (inlineAgentBtn) {
+        inlineAgentBtn.onclick = () => {
+            _orgShowAgentModal();
+        };
+    }
+}
+
+function _orgHideTeamModal() {
+    const modal = document.getElementById('org-team-modal');
+    if (modal) modal.style.display = 'none';
+    _orgEditId = null;
+}
+
+async function _orgLoadAgentPalette() {
+    const paletteList = document.getElementById('org-team-palette-list');
+    if (!paletteList) return;
+
+    paletteList.innerHTML = '<div style="color:var(--text-dim);padding:8px;font-size:10px;">Loading agents...</div>';
+
+    // Fetch all agents (built-in + custom)
+    try {
+        const resp = await fetch('/api/ceo/agents');
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const agents = await resp.json();
+        if (!Array.isArray(agents) || agents.length === 0) {
+            paletteList.innerHTML = '<div style="color:var(--text-dim);padding:8px;font-size:10px;">No agents found. Create agents in the Agent Orchestrator panel first.</div>';
+            return;
+        }
+        // Also update the cached agent list for other panels
+        _ceoAgents = agents;
+        paletteList.innerHTML = '';
+
+        for (const agent of agents) {
+            const item = document.createElement('div');
+            item.className = 'org-palette-agent';
+            item.dataset.agentId = agent.id;
+            item.style.setProperty('--agent-colour', agent.colour || '#00e5ff');
+            const tierLabel = agent.model_tier === 'strategic' ? 'STR' : agent.model_tier === 'research' ? 'RES' : 'EXE';
+            item.innerHTML = `
+                <span class="org-palette-icon">${_SVG(agent.icon || 'user', 14)}</span>
+                <span class="org-palette-name">${_escHtml(agent.name)}</span>
+                <span class="org-palette-tier" style="font-size:7px;padding:1px 4px;border-radius:2px;background:rgba(0,200,255,0.1);color:#6b8899;margin-left:auto">${tierLabel}</span>
+                ${agent.custom ? '<span class="org-palette-badge">CUSTOM</span>' : ''}
+            `;
+            item.title = `${agent.role || ''} — ${agent.description || ''}\nClick to add to team`;
+            item.draggable = true;
+            item.addEventListener('dragstart', e => {
+                e.dataTransfer.setData('text/plain', agent.id);
+                e.dataTransfer.effectAllowed = 'copy';
+            });
+            // Also support click to add to first available level
+            item.addEventListener('click', () => _orgAddAgentToLevel(agent.id, agent));
+            paletteList.appendChild(item);
+        }
+        console.log(`[ORG] Agent palette loaded: ${agents.length} agents`);
+    } catch (e) {
+        console.error('[ORG] Failed to load agent palette:', e);
+        paletteList.innerHTML = '<div style="color:#ff3355;padding:8px;font-size:10px;">Failed to load agents. Check server connection.</div>';
+    }
+}
+
+function _orgAddAgentToLevel(agentId, agent, targetLevel = null) {
+    // Find which level to add to — prefer targetLevel, otherwise first with fewest items
+    const levels = document.querySelectorAll('.org-level-slots');
+    let target = null;
+
+    if (targetLevel !== null) {
+        target = document.querySelector(`.org-level-slots[data-level="${targetLevel}"]`);
+    } else {
+        // Check if agent already exists in any level
+        const existing = document.querySelector(`.org-team-agent[data-agent-id="${agentId}"]`);
+        if (existing) return; // Already added
+
+        // Add to level with fewest agents, preferring higher levels
+        let minCount = Infinity;
+        levels.forEach(l => {
+            const count = l.querySelectorAll('.org-team-agent').length;
+            if (count < minCount) { minCount = count; target = l; }
+        });
+    }
+    if (!target) return;
+
+    // Check if already in this level
+    if (target.querySelector(`.org-team-agent[data-agent-id="${agentId}"]`)) return;
+
+    const chip = document.createElement('div');
+    chip.className = 'org-team-agent';
+    chip.dataset.agentId = agentId;
+    chip.style.setProperty('--agent-colour', agent?.colour || '#00e5ff');
+    chip.innerHTML = `
+        <span class="org-team-agent-icon">${_SVG(agent?.icon || 'user', 14)}</span>
+        <span class="org-team-agent-name">${_escHtml(agent?.name || agentId)}</span>
+        <button class="org-team-agent-remove" title="Remove">✕</button>
+    `;
+    chip.querySelector('.org-team-agent-remove').addEventListener('click', (e) => {
+        e.stopPropagation();
+        chip.remove();
+        _orgUpdateCostEstimate();
+    });
+
+    // Make draggable between levels
+    chip.draggable = true;
+    chip.addEventListener('dragstart', e => {
+        e.dataTransfer.setData('text/plain', agentId);
+        chip.classList.add('dragging');
+    });
+    chip.addEventListener('dragend', () => chip.classList.remove('dragging'));
+
+    target.appendChild(chip);
+    _orgUpdateCostEstimate();
+}
+
+function _orgPopulateLevels(nodes) {
+    // Clear all levels first
+    document.querySelectorAll('.org-level-slots').forEach(el => el.innerHTML = '');
+
+    // We need agent info for icons/names — use cached _ceoAgents or fetch
+    const agentMap = {};
+    if (_ceoAgents) {
+        for (const a of _ceoAgents) agentMap[a.id] = a;
+    }
+
+    for (const node of nodes) {
+        const agent = agentMap[node.agent_id] || { id: node.agent_id, name: node.agent_id, icon: 'user', colour: '#00e5ff' };
+        _orgAddAgentToLevel(node.agent_id, agent, node.level || 0);
+    }
+}
+
+function _orgUpdateCostEstimate() {
+    const estEl = document.getElementById('org-cost-estimate');
+    if (!estEl) return;
+    let count = 0;
+    document.querySelectorAll('.org-level-slots .org-team-agent').forEach(() => count++);
+    // Rough estimate: first agent Claude ($0.01), rest GPT-4o-mini ($0.001), + compression
+    const levels = document.querySelectorAll('.org-level-slots');
+    let levelCount = 0;
+    levels.forEach(l => { if (l.querySelectorAll('.org-team-agent').length > 0) levelCount++; });
+    const est = count > 0 ? (0.01 + Math.max(0, count - 1) * 0.001 + Math.max(0, levelCount - 1) * 0.001) : 0;
+    estEl.textContent = `EST. COST: ~$${est.toFixed(3)}`;
+}
+
+async function _orgSaveTeam() {
+    const name = document.getElementById('org-team-name')?.value.trim();
+    const desc = document.getElementById('org-team-desc')?.value.trim();
+    if (!name) { document.getElementById('org-team-name')?.focus(); return; }
+
+    // Collect nodes from levels
+    const nodes = [];
+    const edges = [];
+    document.querySelectorAll('.org-level-slots').forEach(levelSlot => {
+        const level = parseInt(levelSlot.dataset.level || '0');
+        levelSlot.querySelectorAll('.org-team-agent').forEach(chip => {
+            nodes.push({ agent_id: chip.dataset.agentId, level });
+        });
+    });
+
+    if (nodes.length === 0) { alert('Add at least one agent to the team.'); return; }
+
+    // Auto-generate edges: each level 0 agent directs all level 1 agents, etc.
+    for (let lvl = 0; lvl < 3; lvl++) {
+        const parents = nodes.filter(n => n.level === lvl);
+        const children = nodes.filter(n => n.level === lvl + 1);
+        for (const p of parents) {
+            for (const c of children) {
+                edges.push({ from: p.agent_id, to: c.agent_id, type: 'directs' });
+            }
+        }
+    }
+
+    const saveBtn = document.getElementById('org-team-save');
+    if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'SAVING...'; }
+
+    try {
+        const url = _orgEditId ? `/api/org/templates/${_orgEditId}` : '/api/org/templates';
+        const method = _orgEditId ? 'PUT' : 'POST';
+        const resp = await fetch(url, {
+            method,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, description: desc, nodes, edges }),
+        });
+        const data = await resp.json();
+        if (data.error) {
+            alert('Error: ' + data.error);
+        } else {
+            _orgHideTeamModal();
+            await _orgLoadTemplates();
+        }
+    } catch (e) {
+        alert('Failed to save team: ' + e.message);
+    } finally {
+        if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'SAVE TEAM'; }
+    }
+}
+
+async function _orgDeleteTeam(templateId) {
+    if (!confirm('Delete this team?')) return;
+    try {
+        await fetch(`/api/org/templates/${templateId}/delete`, { method: 'POST' });
+        await _orgLoadTemplates();
+    } catch (e) {
+        console.error('[ORG] Delete failed:', e);
+    }
+}
+
+// ── Org Execution ──
+async function _orgStartRun(orgId, directive) {
+    const runView = document.getElementById('org-run-view');
+    const teamsList = document.getElementById('org-teams-list');
+
+    try {
+        const resp = await fetch('/api/org/run', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ org_id: orgId, directive }),
+        });
+        const data = await resp.json();
+        if (data.error) { alert('Error: ' + data.error); return; }
+
+        _activeOrgRun = data;
+        if (teamsList) teamsList.style.display = 'none';
+        if (runView) runView.style.display = 'block';
+        _orgRenderRun();
+
+        // Start polling if still running
+        if (data.status === 'running') _orgStartRunPolling();
+    } catch (e) {
+        alert('Failed to start run: ' + e.message);
+    }
+}
+
+function _orgRenderRun() {
+    if (!_activeOrgRun) return;
+
+    const titleEl = document.getElementById('org-run-title');
+    const costEl = document.getElementById('org-run-cost');
+    const chartEl = document.getElementById('org-run-chart');
+    const controlsEl = document.getElementById('org-run-controls');
+    const levelInfoEl = document.getElementById('org-run-level-info');
+
+    if (titleEl) titleEl.textContent = `${_activeOrgRun.org_name || 'CEO RUN'} — ${_activeOrgRun.directive?.substring(0, 60) || ''}`;
+    if (costEl) costEl.textContent = `$${(_activeOrgRun.total_cost_usd || 0).toFixed(3)}`;
+
+    // Build the agent map for icons/names
+    const agentMap = {};
+    if (_ceoAgents) for (const a of _ceoAgents) agentMap[a.id] = a;
+
+    // Render levels
+    if (chartEl) {
+        const nodes = _activeOrgRun.nodes || [];
+        const levels = {};
+        for (const n of nodes) {
+            const lvl = n.level || 0;
+            if (!levels[lvl]) levels[lvl] = [];
+            levels[lvl].push(n);
+        }
+
+        const labelMap = { '0': 'LEAD', '1': 'CORE', '2': 'OPS', '3': 'COMMS', '4': 'FINANCE' };
+        let html = '';
+        const sortedLevels = Object.entries(levels).sort((a, b) => a[0] - b[0]);
+        for (let li = 0; li < sortedLevels.length; li++) {
+            const [lvl, levelNodes] = sortedLevels[li];
+            const tag = labelMap[lvl] || `L${lvl}`;
+            html += `<div class="org-flow-level" style="padding:6px 0">
+                <span class="org-flow-level-tag">${tag}</span>
+                <div class="org-flow-level-tiles" style="gap:8px">`;
+            for (const node of levelNodes) {
+                const agent = agentMap[node.agent_id] || {};
+                const col = agent.colour || '#00e5ff';
+                const tier = agent.model_tier || (agent.provider === 'claude' ? 'strategic' : agent.provider === 'gemini' ? 'research' : 'execution');
+                const tierLabel = tier === 'strategic' ? 'STR' : tier === 'research' ? 'RES' : 'EXE';
+                const tierClass = `org-tile-tier-${tier}`;
+                const statusClass = node.status === 'complete' ? 'complete' : node.status === 'running' ? 'running' : node.status === 'error' ? 'error' : 'pending';
+                const statusIcon = node.status === 'complete' ? '✓' : node.status === 'running' ? '◌' : node.status === 'error' ? '✗' : '○';
+                const costStr = node.cost_usd > 0 ? `$${node.cost_usd.toFixed(3)}` : '';
+                html += `
+                    <div class="org-agent-tile org-run-tile-${statusClass}" style="--tile-accent:${col}; flex-direction:column; align-items:stretch; max-width:280px; min-width:200px">
+                        <div style="display:flex; align-items:center; gap:8px">
+                            <div class="org-tile-icon">${_SVG(agent.icon || 'user', 18)}</div>
+                            <div class="org-tile-info">
+                                <div class="org-tile-name">${_escHtml(agent.name || node.agent_id)}</div>
+                                <div class="org-tile-role">${_escHtml(agent.role || '')}</div>
+                            </div>
+                            <span class="org-tile-tier ${tierClass}">${tierLabel}</span>
+                            <span class="org-run-status-badge org-run-status-${statusClass}">${statusIcon}</span>
+                        </div>
+                        ${costStr ? `<div style="font-size:7px;font-family:var(--font-mono);color:var(--text-dim);margin-top:4px">${costStr}</div>` : ''}
+                        ${node.output ? `<div class="org-run-node-output">${_escHtml(node.output.substring(0, 300))}${node.output.length > 300 ? '…' : ''}</div>` : ''}
+                        ${node.brief_in && node.status !== 'pending' ? `<div class="org-run-node-brief"><b>BRIEF:</b> ${_escHtml(node.brief_in.substring(0, 150))}…</div>` : ''}
+                    </div>`;
+            }
+            html += '</div></div>';
+            if (li < sortedLevels.length - 1) {
+                html += '<div class="org-flow-arrow"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12l7 7 7-7"/></svg></div>';
+            }
+        }
+        chartEl.innerHTML = html;
+    }
+
+    // Show/hide approval controls
+    if (_activeOrgRun.status === 'awaiting_approval') {
+        if (controlsEl) controlsEl.style.display = 'block';
+        if (levelInfoEl) {
+            const nextLevel = _activeOrgRun.approval_level || (_activeOrgRun.current_level + 1);
+            levelInfoEl.textContent = `Level ${_activeOrgRun.current_level} complete — review outputs before approving Level ${nextLevel}`;
+        }
+    } else if (_activeOrgRun.status === 'complete') {
+        if (controlsEl) controlsEl.style.display = 'block';
+        if (levelInfoEl) levelInfoEl.textContent = '✓ CEO run complete';
+        const approveBtn = document.getElementById('org-run-approve');
+        const rejectBtn = document.getElementById('org-run-reject');
+        if (approveBtn) approveBtn.style.display = 'none';
+        if (rejectBtn) { rejectBtn.textContent = '← BACK'; rejectBtn.onclick = _orgCloseRun; }
+    } else if (_activeOrgRun.status === 'rejected') {
+        if (controlsEl) controlsEl.style.display = 'block';
+        if (levelInfoEl) levelInfoEl.textContent = '✕ CEO run stopped';
+        const approveBtn = document.getElementById('org-run-approve');
+        const rejectBtn = document.getElementById('org-run-reject');
+        if (approveBtn) approveBtn.style.display = 'none';
+        if (rejectBtn) { rejectBtn.textContent = '← BACK'; rejectBtn.onclick = _orgCloseRun; }
+    } else {
+        if (controlsEl) controlsEl.style.display = 'none';
+    }
+}
+
+async function _orgRunApprove() {
+    if (!_activeOrgRun) return;
+    const approveBtn = document.getElementById('org-run-approve');
+    if (approveBtn) { approveBtn.disabled = true; approveBtn.textContent = 'EXECUTING...'; }
+
+    try {
+        const resp = await fetch(`/api/org/run/${_activeOrgRun.id}/approve`, { method: 'POST' });
+        const data = await resp.json();
+        if (data.error) { alert('Error: ' + data.error); return; }
+        _activeOrgRun = data;
+        _orgRenderRun();
+        if (data.status === 'running') _orgStartRunPolling();
+    } catch (e) {
+        alert('Approve failed: ' + e.message);
+    } finally {
+        if (approveBtn) { approveBtn.disabled = false; approveBtn.textContent = '✓ APPROVE & CONTINUE'; }
+    }
+}
+
+async function _orgRunReject() {
+    if (!_activeOrgRun) return;
+    try {
+        const resp = await fetch(`/api/org/run/${_activeOrgRun.id}/reject`, { method: 'POST' });
+        const data = await resp.json();
+        _activeOrgRun = data;
+        _orgRenderRun();
+        _orgStopRunPolling();
+    } catch (e) {
+        alert('Reject failed: ' + e.message);
+    }
+}
+
+function _orgCloseRun() {
+    _activeOrgRun = null;
+    _orgStopRunPolling();
+    const runView = document.getElementById('org-run-view');
+    const teamsList = document.getElementById('org-teams-list');
+    if (runView) runView.style.display = 'none';
+    if (teamsList) teamsList.style.display = '';
+    // Reset buttons
+    const approveBtn = document.getElementById('org-run-approve');
+    const rejectBtn = document.getElementById('org-run-reject');
+    if (approveBtn) { approveBtn.style.display = ''; approveBtn.textContent = '✓ APPROVE & CONTINUE'; }
+    if (rejectBtn) { rejectBtn.style.display = ''; rejectBtn.textContent = '✕ STOP'; rejectBtn.onclick = _orgRunReject; }
+}
+
+function _orgStartRunPolling() {
+    _orgStopRunPolling();
+    _orgRunPollTimer = setInterval(async () => {
+        if (!_activeOrgRun) { _orgStopRunPolling(); return; }
+        try {
+            const resp = await fetch(`/api/org/run/${_activeOrgRun.id}`);
+            const data = await resp.json();
+            if (data.error) return;
+            _activeOrgRun = data;
+            _orgRenderRun();
+            if (data.status !== 'running') _orgStopRunPolling();
+        } catch (e) { /* ignore poll errors */ }
+    }, 2000);
+}
+
+function _orgStopRunPolling() {
+    if (_orgRunPollTimer) { clearInterval(_orgRunPollTimer); _orgRunPollTimer = null; }
+}
+
+// Set up drag-and-drop on level slots
+document.addEventListener('DOMContentLoaded', () => {
+    setTimeout(() => {
+        document.querySelectorAll('.org-level-slots').forEach(slot => {
+            slot.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; slot.classList.add('drag-over'); });
+            slot.addEventListener('dragleave', () => slot.classList.remove('drag-over'));
+            slot.addEventListener('drop', async e => {
+                e.preventDefault();
+                slot.classList.remove('drag-over');
+                const agentId = e.dataTransfer.getData('text/plain');
+                if (!agentId) return;
+                // Fetch agent info
+                let agent = null;
+                if (_ceoAgents) agent = _ceoAgents.find(a => a.id === agentId);
+                if (!agent) {
+                    try {
+                        const resp = await fetch('/api/ceo/agents');
+                        const agents = await resp.json();
+                        agent = agents.find(a => a.id === agentId);
+                    } catch (e) { /* ignore */ }
+                }
+                // Remove from any other level first
+                document.querySelectorAll(`.org-team-agent[data-agent-id="${agentId}"]`).forEach(el => el.remove());
+                _orgAddAgentToLevel(agentId, agent || { id: agentId, name: agentId }, parseInt(slot.dataset.level || '0'));
+            });
+        });
+    }, 500);
+});
+
 // ── CEO Orchestration Module ──────────────────────────────────────
 let _ceoAgents = null;
+let _lastPipeData = null;  // Store latest pipe data for stage click access
+
+// Pipeline chain order — agents rendered left-to-right in this sequence
+// Must match the "full" pipeline template order in server.py
+const _DEFAULT_CHAIN_ORDER = ['researcher', 'analyst', 'visionary', 'strategist', 'product', 'cto', 'risk', 'chief_of_staff'];
+let _CHAIN_ORDER = [..._DEFAULT_CHAIN_ORDER];
 
 async function _ceoInitPanel() {
-    const grid = document.getElementById('ceo-agent-grid');
-    if (!grid) return;
+    console.log('[CEO] Initialising agent panel...');
+    const nodesWrap = document.getElementById('wf-graph-nodes');
+    if (!nodesWrap) { console.warn('[CEO] wf-graph-nodes not found in DOM'); return; }
+
+    // Wire up + AGENT button and modal (lives in CEO panel)
+    const createAgentBtn = document.getElementById('ceo-create-agent-btn');
+    if (createAgentBtn) createAgentBtn.onclick = _orgShowAgentModal;
+    const agentModalClose = document.getElementById('org-agent-modal-close');
+    const agentSaveBtn = document.getElementById('org-agent-save');
+    if (agentModalClose) agentModalClose.onclick = _orgHideAgentModal;
+    if (agentSaveBtn) agentSaveBtn.onclick = _orgCreateAgent;
 
     // Fetch agent definitions if not cached
     if (!_ceoAgents) {
         try {
             const resp = await fetch('/api/ceo/agents');
+            if (!resp.ok) { console.error('[CEO] /api/ceo/agents returned', resp.status); }
             _ceoAgents = await resp.json();
+            console.log('[CEO] Loaded', _ceoAgents.length, 'agents:', _ceoAgents.map(a => a.id));
         } catch (e) {
-            grid.innerHTML = '<div class="feed-empty">FAILED TO LOAD AGENTS</div>';
+            console.error('[CEO] Failed to load agents:', e);
+            nodesWrap.innerHTML = '<div class="feed-empty">FAILED TO LOAD AGENTS</div>';
             return;
         }
     }
 
-    // Only render if grid is empty (avoid re-render on panel reopen)
-    if (grid.children.length > 0 && grid.querySelector('.ceo-agent-card')) return;
+    // Only render if nodes are empty (avoid re-render on panel reopen)
+    // But still allow pipeline rebuild check below
+    const alreadyRendered = !!nodesWrap.querySelector('.wf-node[data-agent-id]');
+    if (alreadyRendered) {
+        console.log('[CEO] Nodes already rendered, checking for pending pipeline...');
+        // Still check if there's pending pipeline data to rebuild
+        if (_lastPipeData && _lastPipeData.stages) {
+            _rebuildChainNodes(_lastPipeData.stages);
+            _ceoPipelineUpdateUI(_lastPipeData);
+        }
+        return;
+    }
 
-    grid.innerHTML = '';
-    for (const agent of _ceoAgents) {
-        const card = document.createElement('div');
-        card.className = 'ceo-agent-card';
-        card.style.setProperty('--agent-colour', agent.colour || 'var(--cyan)');
-        card.dataset.agentId = agent.id;
-        card.innerHTML = `
-            <div class="ceo-agent-badge idle"><span class="ceo-dot"></span> idle</div>
-            <div class="ceo-agent-icon">${_SVG(agent.icon || 'search', 22)}</div>
-            <div class="ceo-agent-name">${agent.name}</div>
-            <div class="ceo-agent-role">${agent.role}</div>
-            <div class="ceo-agent-desc">${agent.description}</div>
-            <div class="ceo-agent-model">MODEL <b>${agent.model}</b></div>
-            <div class="ceo-agent-input-row">
-                <input type="text" class="ceo-agent-input" placeholder="Task..." autocomplete="off" />
-                <button class="ceo-agent-send">▶</button>
+    nodesWrap.innerHTML = '';
+
+    // Sort agents: chain-order first, then remaining
+    const agentMap = {};
+    for (const a of _ceoAgents) agentMap[a.id] = a;
+    const chainAgents = _CHAIN_ORDER.filter(id => agentMap[id]).map(id => agentMap[id]);
+    const otherAgents = _ceoAgents.filter(a => !_CHAIN_ORDER.includes(a.id));
+
+    // ─── Pipeline chain row ───
+    const chainRow = document.createElement('div');
+    chainRow.className = 'wf-chain-row';
+
+    // Directive source node (first in chain)
+    const srcNode = document.createElement('div');
+    srcNode.className = 'wf-node wf-node-src wf-chain-node';
+    srcNode.id = 'wf-src-node';
+    srcNode.innerHTML = `
+        <div class="wf-node-header">
+            <div class="wf-node-icon">${_SVG('broadcast', 18)}</div>
+            <div class="wf-node-title">DIRECTIVE</div>
+        </div>
+        <div class="wf-node-body">
+            <div class="wf-node-desc" id="wf-src-task" style="text-align:center;color:var(--text-dim);font-size:9px;">Awaiting directive...</div>
+        </div>
+        <div class="wf-port wf-port-out" id="wf-port-src-out"></div>
+    `;
+    chainRow.appendChild(srcNode);
+
+    // Chain agent nodes
+    chainAgents.forEach((agent, i) => {
+        const node = document.createElement('div');
+        node.className = 'wf-node wf-chain-node';
+        node.style.setProperty('--node-colour', agent.colour || 'var(--cyan)');
+        node.dataset.agentId = agent.id;
+        node.dataset.chainIdx = i;
+        node.innerHTML = `
+            <div class="wf-port wf-port-in" id="wf-port-${agent.id}-in"></div>
+            <div class="wf-node-header">
+                <div class="wf-node-icon">${_SVG(agent.icon || 'search', 18)}</div>
+                <div class="wf-node-title">${agent.name}</div>
+                <div class="wf-node-status" id="wf-status-${agent.id}"></div>
             </div>
-            <div class="ceo-agent-output"></div>
+            <div class="wf-node-body">
+                <div class="wf-node-role">${agent.role}</div>
+                <div class="wf-node-desc">${agent.description}</div>
+                <div class="wf-node-model">MODEL <b>${agent.model}</b></div>
+            </div>
+            <div class="wf-node-input-row">
+                <input type="text" class="wf-node-input" placeholder="Task..." autocomplete="off" />
+                <button class="wf-node-send">▶</button>
+            </div>
+            <button class="wf-node-run-btn" id="wf-run-btn-${agent.id}" style="display:none;">▶ RUN</button>
+            <div class="wf-node-output" id="wf-output-${agent.id}"></div>
+            <div class="wf-port wf-port-out" id="wf-port-${agent.id}-out"></div>
         `;
 
         // Wire up send
-        const input = card.querySelector('.ceo-agent-input');
-        const sendBtn = card.querySelector('.ceo-agent-send');
-        const sendFn = () => _ceoDispatch(agent.id, input, card);
+        const input = node.querySelector('.wf-node-input');
+        const sendBtn = node.querySelector('.wf-node-send');
+        const sendFn = () => _ceoDispatch(agent.id, input, node);
         sendBtn.addEventListener('click', sendFn);
         input.addEventListener('keydown', e => { if (e.key === 'Enter' && input.value.trim()) sendFn(); });
 
-        grid.appendChild(card);
+        // Click header/body to view stage report
+        const header = node.querySelector('.wf-node-header');
+        const body = node.querySelector('.wf-node-body');
+        if (header) { header.style.cursor = 'pointer'; header.addEventListener('click', () => _ceoPipelineShowStageReport(agent.id)); }
+        if (body) { body.style.cursor = 'pointer'; body.addEventListener('click', () => _ceoPipelineShowStageReport(agent.id)); }
+
+        chainRow.appendChild(node);
+    });
+    nodesWrap.appendChild(chainRow);
+
+    // ─── Other agents row (CTO, Sales, etc.) ───
+    if (otherAgents.length > 0) {
+        const otherLabel = document.createElement('div');
+        otherLabel.className = 'wf-other-label';
+        otherLabel.textContent = 'STANDALONE AGENTS';
+        nodesWrap.appendChild(otherLabel);
+
+        const otherRow = document.createElement('div');
+        otherRow.className = 'wf-other-row';
+        for (const agent of otherAgents) {
+            const node = document.createElement('div');
+            node.className = 'wf-node wf-other-node';
+            node.style.setProperty('--node-colour', agent.colour || 'var(--cyan)');
+            node.dataset.agentId = agent.id;
+            node.innerHTML = `
+                <div class="wf-node-header">
+                    <div class="wf-node-icon">${_SVG(agent.icon || 'search', 18)}</div>
+                    <div class="wf-node-title">${agent.name}</div>
+                    <div class="wf-node-status" id="wf-status-${agent.id}"></div>
+                </div>
+                <div class="wf-node-body">
+                    <div class="wf-node-role">${agent.role}</div>
+                    <div class="wf-node-desc">${agent.description}</div>
+                    <div class="wf-node-model">MODEL <b>${agent.model}</b></div>
+                </div>
+                <div class="wf-node-input-row">
+                    <input type="text" class="wf-node-input" placeholder="Task..." autocomplete="off" />
+                    <button class="wf-node-send">▶</button>
+                </div>
+                <div class="wf-node-output" id="wf-output-${agent.id}"></div>
+            `;
+            const input = node.querySelector('.wf-node-input');
+            const sendBtn = node.querySelector('.wf-node-send');
+            const sendFn = () => _ceoDispatch(agent.id, input, node);
+            sendBtn.addEventListener('click', sendFn);
+            input.addEventListener('keydown', e => { if (e.key === 'Enter' && input.value.trim()) sendFn(); });
+            otherRow.appendChild(node);
+        }
+        nodesWrap.appendChild(otherRow);
     }
 
-    // Wire up broadcast
-    const bcastInput = document.getElementById('ceo-broadcast-input');
-    const bcastBtn = document.getElementById('ceo-broadcast-btn');
-    if (bcastBtn && bcastInput) {
-        const bcastFn = () => _ceoBroadcast(bcastInput);
-        bcastBtn.onclick = bcastFn;
-        bcastInput.onkeydown = e => { if (e.key === 'Enter' && bcastInput.value.trim()) bcastFn(); };
+    // Wire up pipeline launcher
+    const pipeInput = document.getElementById('ceo-pipeline-input');
+    const pipeBtn = document.getElementById('ceo-pipeline-btn');
+    const pipeSelect = document.getElementById('ceo-template-select');
+    if (pipeBtn && pipeInput) {
+        const pipeFn = () => _ceoPipelineLaunch(pipeInput, pipeSelect);
+        pipeBtn.onclick = pipeFn;
+        pipeInput.onkeydown = e => { if (e.key === 'Enter' && pipeInput.value.trim()) pipeFn(); };
+    }
+
+    // Populate template dropdown with built-in + custom workflows
+    _populateTemplateDropdown();
+    // Wire up gate approve/reject buttons
+    const approveBtn = document.getElementById('ceo-pipe-approve');
+    const rejectBtn = document.getElementById('ceo-pipe-reject');
+    if (approveBtn) approveBtn.onclick = () => _ceoPipelineApprove();
+    if (rejectBtn) rejectBtn.onclick = () => _ceoPipelineReject();
+
+    // Draw SVG noodles after DOM layout settles
+    requestAnimationFrame(() => { requestAnimationFrame(_drawNoodles); });
+
+    // If a pipeline is already active (launched from Workflows panel), rebuild chain to match
+    if (_lastPipeData && _lastPipeData.stages) {
+        _rebuildChainNodes(_lastPipeData.stages);
+        _ceoPipelineUpdateUI(_lastPipeData);
+    }
+
+    // Init workflow activity view
+    _wfInit();
+}
+
+// ── Template dropdown — dynamically populated with built-in + custom ────
+let _templateCache = null;
+let _customWfCache = null;
+
+async function _populateTemplateDropdown() {
+    const select = document.getElementById('ceo-template-select');
+    if (!select) return;
+
+    // Fetch built-in templates + custom workflows in parallel
+    const [templates, customWfs] = await Promise.all([
+        api('/api/ceo/pipeline/templates'),
+        api('/api/ceo/custom-workflows'),
+    ]);
+
+    _templateCache = templates || {};
+    _customWfCache = customWfs || {};
+
+    const prevVal = select.value;
+    select.innerHTML = '';
+
+    // Built-in templates
+    const builtInKeys = Object.keys(_templateCache);
+    if (builtInKeys.length > 0) {
+        const grp = document.createElement('optgroup');
+        grp.label = 'BUILT-IN';
+        for (const key of builtInKeys) {
+            const meta = _WF_TEMPLATE_META[key];
+            const label = meta ? meta.label.toUpperCase() : key.toUpperCase();
+            const opt = document.createElement('option');
+            opt.value = key;
+            opt.textContent = `◈ ${label}`;
+            grp.appendChild(opt);
+        }
+        select.appendChild(grp);
+    }
+
+    // Custom workflows
+    const customKeys = Object.keys(_customWfCache);
+    if (customKeys.length > 0) {
+        const grp = document.createElement('optgroup');
+        grp.label = 'CUSTOM';
+        for (const key of customKeys) {
+            const cw = _customWfCache[key];
+            const opt = document.createElement('option');
+            opt.value = key;
+            opt.textContent = `★ ${(cw.name || key).toUpperCase()}`;
+            grp.appendChild(opt);
+        }
+        select.appendChild(grp);
+    }
+
+    // Restore previous selection if still valid, otherwise default to first
+    if (prevVal && select.querySelector(`option[value="${prevVal}"]`)) {
+        select.value = prevVal;
+    } else if (select.options.length > 0) {
+        select.selectedIndex = 0;
+    }
+
+    // Trigger change to update the node graph
+    _ceoTemplateChanged(select.value);
+}
+
+async function _ceoTemplateChanged(templateKey) {
+    // Ensure agents are loaded
+    if (!_ceoAgents) {
+        try {
+            const agResp = await fetch('/api/ceo/agents');
+            _ceoAgents = await agResp.json();
+        } catch (e) { console.error('[CEO] Failed to load agents:', e); return; }
+    }
+    // Ensure caches are populated
+    if (!_templateCache) {
+        try {
+            const tResp = await fetch('/api/ceo/pipeline/templates');
+            _templateCache = await tResp.json();
+        } catch (e) { console.warn('[CEO] Template fetch failed:', e); return; }
+    }
+    if (!_customWfCache) {
+        try { _customWfCache = await api('/api/ceo/custom-workflows') || {}; } catch { _customWfCache = {}; }
+    }
+
+    // Look up in built-in first, then custom workflows
+    let stages = _templateCache[templateKey];
+    if (!stages && _customWfCache[templateKey]) {
+        // Convert custom workflow agents to stage format for the node graph
+        const cw = _customWfCache[templateKey];
+        stages = (cw.agents || []).map(a => ({
+            agent_id: a.agent_id,
+            agent_name: a.agent_name || a.agent_id,
+            description: a.task_hint || cw.description || '',
+            gate: false,
+        }));
+    }
+
+    if (stages && stages.length) {
+        _rebuildChainNodes(stages);
+        _activePipelineId = null;
+        _lastPipeData = null;
+    }
+}
+
+/**
+ * Rebuild the entire graph — pipeline chain row + standalone agents row.
+ * Replaces chain-row DOM, updates _CHAIN_ORDER, redraws noodles.
+ */
+function _rebuildChainNodes(stages) {
+    if (!stages || !stages.length || !_ceoAgents) return;
+    const newOrder = stages.map(s => s.agent_id);
+    // Skip rebuild if chain already matches
+    if (newOrder.length === _CHAIN_ORDER.length && newOrder.every((id, i) => id === _CHAIN_ORDER[i])) return;
+
+    _CHAIN_ORDER = newOrder;
+    const agentMap = {};
+    for (const a of _ceoAgents) agentMap[a.id] = a;
+
+    const nodesWrap = document.getElementById('wf-graph-nodes');
+    if (!nodesWrap) return;
+
+    // Clear entire graph — chain row, other label, other row
+    nodesWrap.innerHTML = '';
+
+    // ─── Build new chain row ───
+    const chainRow = document.createElement('div');
+    chainRow.className = 'wf-chain-row';
+
+    // Directive source node
+    const srcNode = document.createElement('div');
+    srcNode.className = 'wf-node wf-node-src wf-chain-node';
+    srcNode.id = 'wf-src-node';
+    srcNode.innerHTML = `
+        <div class="wf-node-header">
+            <div class="wf-node-icon">${_SVG('broadcast', 18)}</div>
+            <div class="wf-node-title">DIRECTIVE</div>
+        </div>
+        <div class="wf-node-body">
+            <div class="wf-node-desc" id="wf-src-task" style="text-align:center;color:var(--text-dim);font-size:9px;">Awaiting directive...</div>
+        </div>
+        <div class="wf-port wf-port-out" id="wf-port-src-out"></div>
+    `;
+    chainRow.appendChild(srcNode);
+
+    // Chain agent nodes
+    _CHAIN_ORDER.forEach((aid, i) => {
+        const agent = agentMap[aid];
+        if (!agent) { console.warn('[CEO] Agent not found:', aid); return; }
+        const node = document.createElement('div');
+        node.className = 'wf-node wf-chain-node';
+        node.style.setProperty('--node-colour', agent.colour || 'var(--cyan)');
+        node.dataset.agentId = agent.id;
+        node.dataset.chainIdx = i;
+        node.innerHTML = `
+            <div class="wf-port wf-port-in" id="wf-port-${agent.id}-in"></div>
+            <div class="wf-node-header">
+                <div class="wf-node-icon">${_SVG(agent.icon || 'search', 18)}</div>
+                <div class="wf-node-title">${agent.name}</div>
+                <div class="wf-node-status" id="wf-status-${agent.id}"></div>
+            </div>
+            <div class="wf-node-body">
+                <div class="wf-node-role">${agent.role}</div>
+                <div class="wf-node-desc">${agent.description}</div>
+                <div class="wf-node-model">MODEL <b>${agent.model}</b></div>
+            </div>
+            <div class="wf-node-input-row">
+                <input type="text" class="wf-node-input" placeholder="Task..." autocomplete="off" />
+                <button class="wf-node-send">▶</button>
+            </div>
+            <button class="wf-node-run-btn" id="wf-run-btn-${agent.id}" style="display:none;">▶ RUN</button>
+            <div class="wf-node-output" id="wf-output-${agent.id}"></div>
+            <div class="wf-port wf-port-out" id="wf-port-${agent.id}-out"></div>
+        `;
+        // Wire up send
+        const input = node.querySelector('.wf-node-input');
+        const sendBtn = node.querySelector('.wf-node-send');
+        const sendFn = () => _ceoDispatch(agent.id, input, node);
+        sendBtn.addEventListener('click', sendFn);
+        input.addEventListener('keydown', e => { if (e.key === 'Enter' && input.value.trim()) sendFn(); });
+        // Click header/body for stage report
+        const header = node.querySelector('.wf-node-header');
+        const body = node.querySelector('.wf-node-body');
+        if (header) { header.style.cursor = 'pointer'; header.addEventListener('click', () => _ceoPipelineShowStageReport(agent.id)); }
+        if (body) { body.style.cursor = 'pointer'; body.addEventListener('click', () => _ceoPipelineShowStageReport(agent.id)); }
+        chainRow.appendChild(node);
+    });
+
+    nodesWrap.appendChild(chainRow);
+
+    // ─── Rebuild standalone agents (those not in the current chain) ───
+    const otherAgents = _ceoAgents.filter(a => !_CHAIN_ORDER.includes(a.id));
+    if (otherAgents.length > 0) {
+        const otherLabel = document.createElement('div');
+        otherLabel.className = 'wf-other-label';
+        otherLabel.textContent = 'STANDALONE AGENTS';
+        nodesWrap.appendChild(otherLabel);
+
+        const otherRow = document.createElement('div');
+        otherRow.className = 'wf-other-row';
+        for (const agent of otherAgents) {
+            const node = document.createElement('div');
+            node.className = 'wf-node wf-other-node';
+            node.style.setProperty('--node-colour', agent.colour || 'var(--cyan)');
+            node.dataset.agentId = agent.id;
+            node.innerHTML = `
+                <div class="wf-node-header">
+                    <div class="wf-node-icon">${_SVG(agent.icon || 'search', 18)}</div>
+                    <div class="wf-node-title">${agent.name}</div>
+                    <div class="wf-node-status" id="wf-status-${agent.id}"></div>
+                </div>
+                <div class="wf-node-body">
+                    <div class="wf-node-role">${agent.role}</div>
+                    <div class="wf-node-desc">${agent.description}</div>
+                    <div class="wf-node-model">MODEL <b>${agent.model}</b></div>
+                </div>
+                <div class="wf-node-input-row">
+                    <input type="text" class="wf-node-input" placeholder="Task..." autocomplete="off" />
+                    <button class="wf-node-send">▶</button>
+                </div>
+                <div class="wf-node-output" id="wf-output-${agent.id}"></div>
+            `;
+            const input = node.querySelector('.wf-node-input');
+            const sendBtn = node.querySelector('.wf-node-send');
+            const sendFn = () => _ceoDispatch(agent.id, input, node);
+            sendBtn.addEventListener('click', sendFn);
+            input.addEventListener('keydown', e => { if (e.key === 'Enter' && input.value.trim()) sendFn(); });
+            otherRow.appendChild(node);
+        }
+        nodesWrap.appendChild(otherRow);
+    }
+
+    // Redraw noodles after layout
+    requestAnimationFrame(() => { requestAnimationFrame(_drawNoodles); });
+}
+
+function _drawNoodles() {
+    const svg = document.getElementById('wf-graph-svg');
+    const wrap = document.getElementById('wf-graph-wrap');
+    if (!svg || !wrap) return;
+
+    const wrapRect = wrap.getBoundingClientRect();
+    svg.innerHTML = '';
+    svg.setAttribute('viewBox', `0 0 ${wrapRect.width} ${wrapRect.height}`);
+
+    // Build the chain: src → researcher → cmo → analyst → publisher → ...
+    const chainIds = ['src', ..._CHAIN_ORDER];
+
+    // Find a single consistent Y from the first output port
+    const firstOut = document.getElementById(`wf-port-${chainIds[0]}-out`);
+    if (!firstOut) return;
+    const firstOutRect = firstOut.getBoundingClientRect();
+    const lineY = firstOutRect.top + firstOutRect.height / 2 - wrapRect.top;
+
+    for (let i = 0; i < chainIds.length - 1; i++) {
+        const fromId = chainIds[i];
+        const toId = chainIds[i + 1];
+        const outPort = document.getElementById(`wf-port-${fromId}-out`);
+        const inPort = document.getElementById(`wf-port-${toId}-in`);
+        if (!outPort || !inPort) continue;
+
+        const outRect = outPort.getBoundingClientRect();
+        const inRect = inPort.getBoundingClientRect();
+        const sx = outRect.left + outRect.width / 2 - wrapRect.left;
+        const ex = inRect.left + inRect.width / 2 - wrapRect.left;
+
+        // Perfectly straight horizontal line at the consistent Y
+        const d = `M${sx},${lineY} L${ex},${lineY}`;
+
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('d', d);
+        path.setAttribute('class', 'wf-noodle');
+        path.id = `wf-noodle-${toId}`;
+        svg.appendChild(path);
     }
 }
 
@@ -5914,26 +8231,36 @@ function _ceoUpdateStats() {
     if (readEl) readEl.textContent = _ceoReadCount;
 }
 
-function _ceoBadge(cardEl, state, label) {
-    const badge = cardEl.querySelector('.ceo-agent-badge');
-    if (!badge) return;
-    badge.className = `ceo-agent-badge ${state}`;
-    badge.innerHTML = `<span class="ceo-dot"></span> ${label}`;
+function _nodeSetStatus(agentId, status) {
+    const dot = document.getElementById(`wf-status-${agentId}`);
+    if (dot) dot.className = `wf-node-status ${status}`;
+    const noodle = document.getElementById(`wf-noodle-${agentId}`);
+    if (noodle) noodle.setAttribute('class', `wf-noodle ${status}`);
+    const portIn = document.getElementById(`wf-port-${agentId}-in`);
+    if (portIn) portIn.className = `wf-port wf-port-in ${status}`;
 }
 
-async function _ceoDispatch(agentId, inputEl, cardEl) {
+async function _ceoDispatch(agentId, inputEl, nodeEl) {
     const task = inputEl.value.trim();
     if (!task) return;
     inputEl.value = '';
 
-    const output = cardEl.querySelector('.ceo-agent-output');
+    const output = document.getElementById(`wf-output-${agentId}`);
 
-    // Set working state
-    _ceoBadge(cardEl, 'working', 'working');
-    output.classList.add('active');
-    output.textContent = 'Processing directive...';
+    // Set working state on node
+    _nodeSetStatus(agentId, 'working');
+    if (output) { output.classList.add('active'); output.textContent = 'Processing directive...'; }
     _ceoRouteCount++;
     _ceoUpdateStats();
+    const _jtId = _jobAdd('agent', `${agentId.toUpperCase()}: ${task.substring(0, 50)}`);
+
+    // Update source node with task
+    const srcTask = document.getElementById('wf-src-task');
+    if (srcTask) srcTask.textContent = task.substring(0, 80) + (task.length > 80 ? '…' : '');
+
+    // Add live workflow entry
+    const agentName = nodeEl.querySelector('.wf-node-title')?.textContent || agentId;
+    const wfId = _wfAddLive('dispatch', task, [{ agent_id: agentId, agent_name: agentName, status: 'running' }]);
 
     // Set master card to working
     const masterStatus = document.querySelector('#ceo-master-card .ceo-master-status');
@@ -5950,79 +8277,838 @@ async function _ceoDispatch(agentId, inputEl, cardEl) {
         _ceoUpdateStats();
 
         if (data.error) {
-            _ceoBadge(cardEl, 'error', 'error');
-            output.textContent = `Error: ${data.error}`;
+            _nodeSetStatus(agentId, 'error');
+            if (output) output.textContent = `Error: ${data.error}`;
+            _wfUpdateLive(wfId, agentId, 'error', data.error);
+            _jobComplete(_jtId, true);
         } else {
-            _ceoBadge(cardEl, 'ready', 'complete');
-            output.textContent = data.response || 'No response';
+            _nodeSetStatus(agentId, 'complete');
+            if (output) output.textContent = data.response || 'No response';
+            _wfUpdateLive(wfId, agentId, 'complete', data.response, data.model);
+            _jobComplete(_jtId);
         }
     } catch (e) {
-        _ceoBadge(cardEl, 'error', 'error');
-        output.textContent = `Network error: ${e.message}`;
+        _nodeSetStatus(agentId, 'error');
+        if (output) output.textContent = `Network error: ${e.message}`;
+        _wfUpdateLive(wfId, agentId, 'error', e.message);
+        _jobComplete(_jtId, true);
     }
 
     // Reset master card
     if (masterStatus) { masterStatus.className = 'ceo-master-status ready'; masterStatus.innerHTML = '<span class="ceo-dot"></span> ONLINE'; }
 }
 
-async function _ceoBroadcast(inputEl) {
-    const task = inputEl.value.trim();
-    if (!task) return;
+// ── Sequential Pipeline ──────────────────────────────────────────
+let _activePipelineId = null;
+let _pipelinePollTimer = null;
+let _pipelineReportData = null;
+let _pipelineReportDirective = '';
+let _pipelineReportPollTimer = null;
+// _lastPipeData declared above in CEO Orchestration Module
+
+async function _ceoPipelineLaunch(inputEl, selectEl) {
+    const directive = inputEl.value.trim();
+    if (!directive) return;
+    const template = selectEl ? selectEl.value : 'full';
     inputEl.value = '';
 
-    const grid = document.getElementById('ceo-agent-grid');
-    if (!grid) return;
+    // Disable launch button during run
+    const launchBtn = document.getElementById('ceo-pipeline-btn');
+    if (launchBtn) launchBtn.disabled = true;
+
+    // Update source node with directive
+    const srcTask = document.getElementById('wf-src-task');
+    if (srcTask) srcTask.textContent = directive.substring(0, 80) + (directive.length > 80 ? '…' : '');
 
     // Set master to working
     const masterStatus = document.querySelector('#ceo-master-card .ceo-master-status');
-    if (masterStatus) { masterStatus.className = 'ceo-master-status working'; masterStatus.innerHTML = '<span class="ceo-dot"></span> BROADCASTING'; }
+    if (masterStatus) { masterStatus.className = 'ceo-master-status working'; masterStatus.innerHTML = '<span class="ceo-dot"></span> PIPELINE RUNNING'; }
 
-    // Set all cards to working
-    grid.querySelectorAll('.ceo-agent-card').forEach(card => {
-        const output = card.querySelector('.ceo-agent-output');
-        _ceoBadge(card, 'working', 'working');
-        output.classList.add('active');
-        output.textContent = 'Processing directive...';
+    // Reset all node statuses
+    _CHAIN_ORDER.forEach(aid => {
+        _nodeSetStatus(aid, '');
+        const output = document.getElementById(`wf-output-${aid}`);
+        if (output) { output.classList.remove('active'); output.textContent = ''; }
     });
-    _ceoRouteCount += _ceoAgents ? _ceoAgents.length : 5;
+
+    // Show pipeline status bar
+    const statusBar = document.getElementById('ceo-pipeline-status');
+    const pipeLabel = document.getElementById('ceo-pipe-label');
+    const pipeStage = document.getElementById('ceo-pipe-stage');
+    if (statusBar) statusBar.style.display = 'inline-flex';
+    if (pipeLabel) { pipeLabel.textContent = 'LAUNCHING PIPELINE'; pipeLabel.className = 'ceo-pipe-label'; }
+    if (pipeStage) pipeStage.textContent = `Template: ${template.toUpperCase()}`;
+
+    _ceoRouteCount++;
     _ceoUpdateStats();
+    const _jtPipeId = _jobAdd('pipeline', `${template.toUpperCase()}: ${directive.substring(0, 40)}`);
+    // Store job tracker ID on the pipeline for progress updates
+    window._activeJtPipeId = _jtPipeId;
 
     try {
-        const resp = await fetch('/api/ceo/broadcast', {
+        const resp = await fetch('/api/ceo/pipeline', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ task }),
+            body: JSON.stringify({ directive, template }),
         });
         const data = await resp.json();
 
-        if (data.results) {
-            data.results.forEach(result => {
-                const card = grid.querySelector(`.ceo-agent-card[data-agent-id="${result.agent_id}"]`);
-                if (!card) return;
-                const output = card.querySelector('.ceo-agent-output');
-                _ceoReadCount++;
-
-                if (result.error) {
-                    _ceoBadge(card, 'error', 'error');
-                    output.textContent = `Error: ${result.error}`;
-                } else {
-                    _ceoBadge(card, 'ready', 'complete');
-                    output.textContent = result.response || 'No response';
-                }
-            });
-            _ceoUpdateStats();
+        if (data.error) {
+            if (pipeLabel) { pipeLabel.textContent = 'PIPELINE ERROR'; pipeLabel.className = 'ceo-pipe-label error'; }
+            if (pipeStage) pipeStage.textContent = data.error;
+            if (launchBtn) launchBtn.disabled = false;
+            _jobComplete(_jtPipeId, true);
+            window._activeJtPipeId = null;
+            return;
         }
+
+        // Update job with total stage count
+        _jobUpdate(_jtPipeId, { total: data.stages ? data.stages.length : 0 });
+
+        _activePipelineId = data.id || data.pipeline_id;
+        // Rebuild chain nodes to match this pipeline's agents
+        if (data.stages) _rebuildChainNodes(data.stages);
+        // Update source node with directive text
+        const srcTaskEl = document.getElementById('wf-src-task');
+        if (srcTaskEl) srcTaskEl.textContent = directive.substring(0, 80) + (directive.length > 80 ? '…' : '');
+        // Process initial response then start polling
+        _ceoPipelineUpdateUI(data);
+        _ceoPipelineStartPolling();
+
     } catch (e) {
-        grid.querySelectorAll('.ceo-agent-card').forEach(card => {
-            const output = card.querySelector('.ceo-agent-output');
-            _ceoBadge(card, 'error', 'error');
-            output.textContent = `Network error: ${e.message}`;
+        if (pipeLabel) { pipeLabel.textContent = 'NETWORK ERROR'; pipeLabel.className = 'ceo-pipe-label error'; }
+        if (pipeStage) pipeStage.textContent = e.message;
+        if (launchBtn) launchBtn.disabled = false;
+        _jobComplete(_jtPipeId, true);
+        window._activeJtPipeId = null;
+    }
+}
+
+function _ceoPipelineUpdateUI(pipe) {
+    if (!pipe || !pipe.stages) return;
+    _lastPipeData = pipe;  // Cache for stage click access
+
+    // Ensure chain nodes match this pipeline's agents (handles page refresh mid-pipeline)
+    _rebuildChainNodes(pipe.stages);
+
+    const pipeLabel = document.getElementById('ceo-pipe-label');
+    const pipeStage = document.getElementById('ceo-pipe-stage');
+    const approveBtn = document.getElementById('ceo-pipe-approve');
+    const rejectBtn = document.getElementById('ceo-pipe-reject');
+    const cancelBtn = document.getElementById('ceo-pipe-cancel');
+    const launchBtn = document.getElementById('ceo-pipeline-btn');
+
+    // Update each node tile based on stage status
+    pipe.stages.forEach((stage, i) => {
+        const aid = stage.agent_id;
+        const output = document.getElementById(`wf-output-${aid}`);
+
+        if (stage.status === 'running') {
+            _nodeSetStatus(aid, 'working');
+            if (output) { output.classList.add('active'); output.textContent = 'Processing...'; }
+        } else if (stage.status === 'complete') {
+            _nodeSetStatus(aid, 'complete');
+            if (output) {
+                output.classList.add('active');
+                // Truncate long outputs for display
+                const txt = stage.output || 'Complete';
+                output.textContent = txt.length > 600 ? txt.substring(0, 600) + '…' : txt;
+            }
+            _ceoReadCount++;
+        } else if (stage.status === 'error') {
+            _nodeSetStatus(aid, 'error');
+            if (output) { output.classList.add('active'); output.textContent = `Error: ${stage.error}`; }
+        } else if (stage.status === 'waiting') {
+            _nodeSetStatus(aid, 'ready');
+            if (output) { output.classList.add('active'); output.textContent = '⏸ Waiting for your approval...'; }
+        } else if (stage.status === 'ready') {
+            _nodeSetStatus(aid, 'ready');
+        }
+        // pending — leave as default
+    });
+
+    _ceoUpdateStats();
+
+    // Update pipeline status bar
+    const runningStage = pipe.stages.find(s => s.status === 'running');
+    const waitingStage = pipe.stages.find(s => s.status === 'waiting');
+    const completedCount = pipe.stages.filter(s => s.status === 'complete').length;
+    const totalCount = pipe.stages.length;
+
+    // Update job tracker progress
+    if (window._activeJtPipeId) {
+        const running = runningStage ? runningStage.agent_name : null;
+        _jobUpdate(window._activeJtPipeId, {
+            progress: completedCount,
+            total: totalCount,
+            label: running ? `${running} (${completedCount}/${totalCount})` : `Pipeline ${completedCount}/${totalCount}`,
         });
+        if (pipe.status === 'complete') { _jobComplete(window._activeJtPipeId); window._activeJtPipeId = null; }
+        else if (pipe.status === 'error' || pipe.status === 'cancelled') { _jobComplete(window._activeJtPipeId, true); window._activeJtPipeId = null; }
     }
 
-    // Reset master
+    const reportGroup = document.getElementById('ceo-pipe-report-group');
+    const reportBtn = document.getElementById('ceo-pipe-report');
+    const previewBtn = document.getElementById('ceo-pipe-preview');
+
+    // Show cancel button for active pipelines, hide for terminal states
+    const isActive = !['complete', 'error', 'cancelled'].includes(pipe.status);
+    if (cancelBtn) cancelBtn.style.display = isActive ? '' : 'none';
+
+    if (pipe.status === 'complete') {
+        if (pipeLabel) { pipeLabel.textContent = 'PIPELINE COMPLETE'; pipeLabel.className = 'ceo-pipe-label complete'; }
+        if (pipeStage) pipeStage.textContent = `${completedCount}/${totalCount} stages finished`;
+        if (approveBtn) approveBtn.style.display = 'none';
+        if (rejectBtn) rejectBtn.style.display = 'none';
+        if (launchBtn) launchBtn.disabled = false;
+        _ceoPipelineStopPolling();
+        _activePipelineId = null; // Allow dropdown preview again
+        const masterStatus = document.querySelector('#ceo-master-card .ceo-master-status');
+        if (masterStatus) { masterStatus.className = 'ceo-master-status ready'; masterStatus.innerHTML = '<span class="ceo-dot"></span> ONLINE'; }
+
+        // Show report buttons when report is ready or poll for it
+        if (pipe.report) {
+            _pipelineReportData = pipe.report;
+            if (reportGroup) { reportGroup.style.display = 'inline-flex'; }
+            if (reportBtn) { reportBtn.disabled = false; reportBtn.dataset.pipelineId = pipe.id || ''; }
+            if (previewBtn) { previewBtn.dataset.pipelineId = pipe.id || ''; }
+        } else {
+            // Report still generating — poll for it
+            if (reportGroup) { reportGroup.style.display = 'inline-flex'; }
+            if (reportBtn) { reportBtn.disabled = true; reportBtn.dataset.pipelineId = pipe.id || ''; }
+            _ceoPipelineReportPoll();
+        }
+    } else if (pipe.status === 'cancelled') {
+        if (pipeLabel) { pipeLabel.textContent = 'PIPELINE CANCELLED'; pipeLabel.className = 'ceo-pipe-label error'; }
+        if (pipeStage) pipeStage.textContent = `Cancelled at stage ${pipe.current_idx + 1}/${totalCount}`;
+        if (approveBtn) approveBtn.style.display = 'none';
+        if (rejectBtn) rejectBtn.style.display = 'none';
+        if (reportGroup) reportGroup.style.display = 'none';
+        if (launchBtn) launchBtn.disabled = false;
+        _ceoPipelineStopPolling();
+        _activePipelineId = null;
+    } else if (pipe.status === 'error') {
+        if (pipeLabel) { pipeLabel.textContent = 'PIPELINE ERROR'; pipeLabel.className = 'ceo-pipe-label error'; }
+        const errStage = pipe.stages.find(s => s.status === 'error');
+        if (pipeStage) pipeStage.textContent = errStage ? `${errStage.agent_name}: ${errStage.error}` : 'Unknown error';
+        if (approveBtn) approveBtn.style.display = 'none';
+        if (rejectBtn) rejectBtn.style.display = 'none';
+        if (reportGroup) reportGroup.style.display = 'none';
+        if (launchBtn) launchBtn.disabled = false;
+        _ceoPipelineStopPolling();
+        _activePipelineId = null;
+    } else if (waitingStage) {
+        if (pipeLabel) { pipeLabel.textContent = 'AWAITING APPROVAL'; pipeLabel.className = 'ceo-pipe-label'; }
+        if (pipeStage) pipeStage.textContent = `${waitingStage.agent_name} — review output before continuing`;
+        if (approveBtn) approveBtn.style.display = '';
+        if (rejectBtn) rejectBtn.style.display = '';
+        if (reportGroup) reportGroup.style.display = 'none';
+    } else if (runningStage) {
+        if (pipeLabel) { pipeLabel.textContent = 'PIPELINE RUNNING'; pipeLabel.className = 'ceo-pipe-label'; }
+        if (pipeStage) pipeStage.textContent = `${runningStage.agent_name} (${completedCount}/${totalCount})`;
+        if (approveBtn) approveBtn.style.display = 'none';
+        if (rejectBtn) rejectBtn.style.display = 'none';
+        if (reportGroup) reportGroup.style.display = 'none';
+    } else {
+        // Status is 'ready' — some manual stages remain
+        if (pipeLabel) { pipeLabel.textContent = 'PIPELINE RUNNING'; pipeLabel.className = 'ceo-pipe-label'; }
+        if (pipeStage) pipeStage.textContent = `${completedCount}/${totalCount} stages complete`;
+        if (reportGroup) reportGroup.style.display = 'none';
+    }
+}
+
+function _ceoPipelineStartPolling() {
+    _ceoPipelineStopPolling();
+    _pipelinePollTimer = setInterval(async () => {
+        if (!_activePipelineId) { _ceoPipelineStopPolling(); return; }
+        try {
+            const resp = await fetch(`/api/ceo/pipeline/${_activePipelineId}`);
+            const data = await resp.json();
+            if (data.error) { _ceoPipelineStopPolling(); return; }
+            _ceoPipelineUpdateUI(data);
+            // Stop polling on terminal states
+            if (data.status === 'complete' || data.status === 'error' || data.status === 'cancelled') {
+                _ceoPipelineStopPolling();
+            }
+        } catch (e) {
+            console.error('Pipeline poll error:', e);
+        }
+    }, 2000);
+}
+
+function _ceoPipelineStopPolling() {
+    if (_pipelinePollTimer) { clearInterval(_pipelinePollTimer); _pipelinePollTimer = null; }
+}
+
+async function _ceoPipelineCancel() {
+    if (!_activePipelineId) return;
+    const cancelBtn = document.getElementById('ceo-pipe-cancel');
+    const pipeLabel = document.getElementById('ceo-pipe-label');
+    if (cancelBtn) cancelBtn.disabled = true;
+    try {
+        const resp = await fetch(`/api/ceo/pipeline/${_activePipelineId}/cancel`, { method: 'POST' });
+        const data = await resp.json();
+        _ceoPipelineUpdateUI(data);
+        _ceoPipelineStopPolling();
+    } catch (e) {
+        if (pipeLabel) { pipeLabel.textContent = 'CANCEL ERROR'; pipeLabel.className = 'ceo-pipe-label error'; }
+    }
+    if (cancelBtn) cancelBtn.disabled = false;
+}
+
+async function _ceoPipelineApprove() {
+    if (!_activePipelineId) return;
+    const approveBtn = document.getElementById('ceo-pipe-approve');
+    const rejectBtn = document.getElementById('ceo-pipe-reject');
+    if (approveBtn) approveBtn.style.display = 'none';
+    if (rejectBtn) rejectBtn.style.display = 'none';
+
+    const pipeLabel = document.getElementById('ceo-pipe-label');
+    if (pipeLabel) { pipeLabel.textContent = 'APPROVED — CONTINUING'; pipeLabel.className = 'ceo-pipe-label'; }
+
+    try {
+        const resp = await fetch(`/api/ceo/pipeline/${_activePipelineId}/approve`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+        });
+        const data = await resp.json();
+        _ceoPipelineUpdateUI(data);
+        // Resume polling for next stages
+        _ceoPipelineStartPolling();
+    } catch (e) {
+        if (pipeLabel) { pipeLabel.textContent = 'APPROVE ERROR'; pipeLabel.className = 'ceo-pipe-label error'; }
+    }
+}
+
+async function _ceoPipelineReject() {
+    if (!_activePipelineId) return;
+    const pipeLabel = document.getElementById('ceo-pipe-label');
+    const approveBtn = document.getElementById('ceo-pipe-approve');
+    const rejectBtn = document.getElementById('ceo-pipe-reject');
+    if (approveBtn) approveBtn.style.display = 'none';
+    if (rejectBtn) rejectBtn.style.display = 'none';
+    if (pipeLabel) { pipeLabel.textContent = 'PIPELINE CANCELLED'; pipeLabel.className = 'ceo-pipe-label error'; }
+    const launchBtn = document.getElementById('ceo-pipeline-btn');
+    if (launchBtn) launchBtn.disabled = false;
+    _ceoPipelineStopPolling();
+    _activePipelineId = null;
+    const masterStatus = document.querySelector('#ceo-master-card .ceo-master-status');
     if (masterStatus) { masterStatus.className = 'ceo-master-status ready'; masterStatus.innerHTML = '<span class="ceo-dot"></span> ONLINE'; }
 }
+
+function _ceoPipelineReportPoll() {
+    if (_pipelineReportPollTimer) clearInterval(_pipelineReportPollTimer);
+    let attempts = 0;
+    _pipelineReportPollTimer = setInterval(async () => {
+        if (!_activePipelineId || attempts > 30) {
+            clearInterval(_pipelineReportPollTimer);
+            _pipelineReportPollTimer = null;
+            const btn = document.getElementById('ceo-pipe-report');
+            if (btn && !_pipelineReportData) { btn.disabled = false; }
+            return;
+        }
+        attempts++;
+        try {
+            const resp = await fetch(`/api/ceo/pipeline/${_activePipelineId}`);
+            const data = await resp.json();
+            if (data.report) {
+                _pipelineReportData = data.report;
+                _pipelineReportDirective = data.directive || '';
+                const btn = document.getElementById('ceo-pipe-report');
+                if (btn) { btn.disabled = false; }
+                const grp = document.getElementById('ceo-pipe-report-group');
+                if (grp) grp.style.display = 'inline-flex';
+                clearInterval(_pipelineReportPollTimer);
+                _pipelineReportPollTimer = null;
+            }
+        } catch (e) { console.error('Report poll error:', e); }
+    }, 3000);
+}
+
+// ── PDF Download (opens report view then triggers print-to-PDF) ──
+async function _ceoPipelineDownloadPDF() {
+    // First open the preview, then trigger print
+    await _ceoPipelinePreviewReport();
+    // Small delay to let the DOM render
+    setTimeout(() => window.print(), 600);
+}
+
+// ── Print from report overlay ──
+function _reportPrintPDF() {
+    window.print();
+}
+
+// ── Markdown rendering helper ──
+function _renderMarkdown(mdText) {
+    return mdText
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/^# (.+)$/gm, '<h2>$1</h2>')
+        .replace(/^## (.+)$/gm, '<h3>$1</h3>')
+        .replace(/^### (.+)$/gm, '<h4>$1</h4>')
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        .replace(/^- (.+)$/gm, '<div style="padding-left:12px;">• $1</div>')
+        .replace(/^\d+\.\s(.+)$/gm, '<div style="padding-left:12px;">$&</div>')
+        .replace(/^---$/gm, '<hr>')
+        .replace(/`([^`]+)`/g, '<code style="background:rgba(0,200,255,0.08);padding:1px 4px;border-radius:3px;font-size:11px;">$1</code>');
+}
+
+async function _ceoPipelinePreviewReport() {
+    const pipeId = _activePipelineId
+        || (document.getElementById('ceo-pipe-report') || {}).dataset?.pipelineId
+        || (_lastPipeData && _lastPipeData.id);
+    if (!pipeId) { console.warn('[CEO] No pipeline ID for preview'); return; }
+
+    const overlay = document.getElementById('pipeline-report-overlay');
+    const body = document.getElementById('pipeline-report-body');
+    const titleEl = document.getElementById('pipeline-report-title');
+    const metaEl = document.getElementById('pipeline-report-meta');
+    if (!overlay || !body) return;
+
+    body.innerHTML = '<div style="color:var(--text-dim);padding:40px;text-align:center;">Loading report…</div>';
+    if (titleEl) titleEl.textContent = 'EXECUTIVE REPORT';
+    if (metaEl) metaEl.textContent = '';
+    overlay.classList.add('active');
+    document.body.classList.add('report-active');
+
+    try {
+        const mdResp = await fetch(`/api/ceo/pipeline/${pipeId}/report/download?fmt=md`);
+        if (!mdResp.ok) {
+            // Try raw pipeline data (report not generated yet)
+            const pipeResp = await fetch(`/api/ceo/pipeline/${pipeId}`);
+            const pipeData = await pipeResp.json();
+            if (pipeData.stages && pipeData.stages.some(s => s.output)) {
+                body.innerHTML = '';
+                if (titleEl) titleEl.textContent = 'PIPELINE OUTPUT';
+                if (metaEl) metaEl.textContent = pipeData.directive ? pipeData.directive.slice(0, 80) : '';
+                pipeData.stages.forEach((stage, i) => {
+                    if (!stage.output) return;
+                    const sec = document.createElement('div');
+                    sec.className = 'pr-section';
+                    sec.innerHTML = `<div class="pr-section-header"><span class="pr-section-num">${i + 1}</span><span class="pr-section-agent">${_escHtml(stage.agent_name || stage.agent_id)}</span></div>`;
+                    const content = document.createElement('div');
+                    content.className = 'pr-section-content';
+                    content.textContent = stage.output;
+                    sec.appendChild(content);
+                    body.appendChild(sec);
+                });
+            } else {
+                body.innerHTML = '<div style="color:var(--text-dim);padding:40px;text-align:center;">No report data available yet.</div>';
+            }
+            return;
+        }
+        const mdText = await mdResp.text();
+        body.innerHTML = '';
+        if (titleEl) titleEl.textContent = 'EXECUTIVE REPORT';
+        const pre = document.createElement('div');
+        pre.className = 'pr-section-content';
+        pre.innerHTML = _renderMarkdown(mdText);
+        body.appendChild(pre);
+    } catch (e) {
+        console.error('[CEO] Report preview error:', e);
+        body.innerHTML = '<div style="color:var(--red);padding:40px;">Failed to load report preview.</div>';
+    }
+}
+
+// ── Report History (browse saved markdown reports) ──
+async function _reportShowHistory() {
+    const body = document.getElementById('pipeline-report-body');
+    const titleEl = document.getElementById('pipeline-report-title');
+    const metaEl = document.getElementById('pipeline-report-meta');
+    const overlay = document.getElementById('pipeline-report-overlay');
+    if (!body || !overlay) return;
+
+    if (titleEl) titleEl.textContent = 'SAVED REPORTS';
+    if (metaEl) metaEl.textContent = 'Markdown files saved for git commit';
+    overlay.classList.add('active');
+    document.body.classList.add('report-active');
+    body.innerHTML = '<div style="color:var(--text-dim);padding:40px;text-align:center;">Loading…</div>';
+
+    try {
+        const resp = await fetch('/api/reports');
+        const data = await resp.json();
+        const reports = data.reports || [];
+
+        if (reports.length === 0) {
+            body.innerHTML = '<div style="color:var(--text-dim);padding:40px;text-align:center;">No saved reports yet. Run a pipeline to generate reports.</div>';
+            return;
+        }
+
+        body.innerHTML = '';
+        for (const r of reports) {
+            const item = document.createElement('div');
+            item.className = 'pr-history-item';
+            // Parse timestamp
+            const ts = r.timestamp || '';
+            const dateStr = ts.length >= 15 ? `${ts.slice(0,4)}-${ts.slice(4,6)}-${ts.slice(6,8)} ${ts.slice(9,11)}:${ts.slice(11,13)}` : ts;
+            const sizeKB = (r.size / 1024).toFixed(1);
+            const slug = (r.slug || r.filename).replace(/_/g, ' ').replace(/\.[^.]+$/, '');
+            item.innerHTML = `
+                <span class="pr-history-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg></span>
+                <span class="pr-history-name" title="${_escHtml(r.filename)}">${_escHtml(slug)}</span>
+                <span class="pr-history-date">${_escHtml(dateStr)}</span>
+                <span class="pr-history-size">${sizeKB} KB</span>
+            `;
+            item.addEventListener('click', () => _reportLoadFromHistory(r.filename));
+            body.appendChild(item);
+        }
+    } catch (e) {
+        console.error('[CEO] Report history error:', e);
+        body.innerHTML = '<div style="color:var(--red);padding:40px;">Failed to load report history.</div>';
+    }
+}
+
+async function _reportLoadFromHistory(filename) {
+    const body = document.getElementById('pipeline-report-body');
+    const titleEl = document.getElementById('pipeline-report-title');
+    const metaEl = document.getElementById('pipeline-report-meta');
+    if (!body) return;
+
+    body.innerHTML = '<div style="color:var(--text-dim);padding:40px;text-align:center;">Loading…</div>';
+    const slug = filename.replace(/_/g, ' ').replace(/\.[^.]+$/, '');
+    if (titleEl) titleEl.textContent = 'REPORT';
+    if (metaEl) metaEl.textContent = slug.slice(0, 60);
+
+    try {
+        const resp = await fetch(`/api/reports/${encodeURIComponent(filename)}`);
+        if (!resp.ok) { body.innerHTML = '<div style="color:var(--red);padding:40px;">Report not found.</div>'; return; }
+        const mdText = await resp.text();
+        body.innerHTML = '';
+        const pre = document.createElement('div');
+        pre.className = 'pr-section-content';
+        pre.innerHTML = _renderMarkdown(mdText);
+        body.appendChild(pre);
+    } catch (e) {
+        console.error('[CEO] Load report error:', e);
+        body.innerHTML = '<div style="color:var(--red);padding:40px;">Failed to load report.</div>';
+    }
+}
+
+function _ceoPipelineCloseReport() {
+    const overlay = document.getElementById('pipeline-report-overlay');
+    if (overlay) overlay.classList.remove('active');
+    document.body.classList.remove('report-active');
+}
+
+function _ceoPipelineShowStageReport(agentId) {
+    if (!_lastPipeData || !_lastPipeData.stages) return;
+    const stage = _lastPipeData.stages.find(s => s.agent_id === agentId);
+    if (!stage) return;
+    if (stage.status !== 'complete' && stage.status !== 'error' && stage.status !== 'waiting') return; // Nothing to show yet
+
+    const overlay = document.getElementById('pipeline-report-overlay');
+    const body = document.getElementById('pipeline-report-body');
+    const titleEl = document.getElementById('pipeline-report-title');
+    const metaEl = document.getElementById('pipeline-report-meta');
+    if (!overlay || !body) return;
+
+    body.innerHTML = '';
+    const agentName = (stage.agent_name || agentId).toUpperCase();
+    const stageIdx = _lastPipeData.stages.indexOf(stage) + 1;
+    if (titleEl) titleEl.textContent = `STAGE ${stageIdx}: ${agentName} REPORT`;
+    if (metaEl) metaEl.textContent = stage.status === 'error' ? `Status: ERROR` : `Status: ${(stage.status || '').toUpperCase()}`;
+
+    if (stage.status === 'error') {
+        const errSection = document.createElement('div');
+        errSection.className = 'report-section';
+        errSection.innerHTML = `
+            <div class="report-section-header">
+                <span class="report-section-num" style="color:var(--red);">✗</span>
+                <span class="report-section-query">ERROR</span>
+            </div>
+            <div class="report-summary-block"><p class="report-summary-line" style="color:var(--red);">${_escHtmlGlobal(stage.error || 'Unknown error')}</p></div>`;
+        body.appendChild(errSection);
+    } else if (stage.output) {
+        // Try to parse output as structured data for rich rendering
+        let parsed = null;
+        try {
+            const cleaned = stage.output.trim().replace(/^```[a-z]*\n?/i, '').replace(/```$/, '').trim();
+            parsed = JSON.parse(cleaned);
+        } catch (e) { /* not JSON, render as text */ }
+
+        if (parsed && typeof parsed === 'object') {
+            // Render structured output using ARBITER visualization components
+            const vizSection = document.createElement('div');
+            vizSection.className = 'report-section';
+            vizSection.innerHTML = `<div class="report-section-header"><span class="report-section-num">◆</span><span class="report-section-query">${agentName} ANALYSIS</span></div>`;
+            const vizContainer = document.createElement('div');
+            vizContainer.className = 'report-viz-container';
+            voice._renderSection(vizContainer, parsed);
+            vizSection.appendChild(vizContainer);
+            body.appendChild(vizSection);
+        } else {
+            // Render as formatted text blocks
+            const output = stage.output;
+            const sections = output.split(/\n(?=#{1,3}\s|[A-Z][A-Z\s&]{3,}:|\d+\.\s)/).filter(s => s.trim());
+
+            if (sections.length > 1) {
+                sections.forEach((sec, i) => {
+                    const lines = sec.trim().split('\n');
+                    const heading = lines[0].replace(/^#+\s*/, '').replace(/:$/, '').trim();
+                    const content = lines.slice(1).join('\n').trim() || lines[0];
+                    const secEl = document.createElement('div');
+                    secEl.className = 'report-section';
+                    secEl.innerHTML = `
+                        <div class="report-section-header">
+                            <span class="report-section-num">${i + 1}</span>
+                            <span class="report-section-query">${_escHtmlGlobal(heading.substring(0, 80))}</span>
+                        </div>
+                        <div class="report-summary-block" style="white-space:pre-wrap;font-size:12px;line-height:1.6;color:var(--text-main);max-height:400px;overflow-y:auto;">${_escHtmlGlobal(content || heading)}</div>`;
+                    body.appendChild(secEl);
+                });
+            } else {
+                const secEl = document.createElement('div');
+                secEl.className = 'report-section';
+                secEl.innerHTML = `
+                    <div class="report-section-header">
+                        <span class="report-section-num">◆</span>
+                        <span class="report-section-query">${agentName} OUTPUT</span>
+                    </div>
+                    <div class="report-summary-block" style="white-space:pre-wrap;font-size:12px;line-height:1.6;color:var(--text-main);max-height:600px;overflow-y:auto;">${_escHtmlGlobal(output)}</div>`;
+                body.appendChild(secEl);
+            }
+        }
+    } else if (stage.status === 'waiting') {
+        const waitSection = document.createElement('div');
+        waitSection.className = 'report-section';
+        waitSection.innerHTML = `
+            <div class="report-section-header">
+                <span class="report-section-num">⏸</span>
+                <span class="report-section-query">AWAITING APPROVAL</span>
+            </div>
+            <div class="report-summary-block"><p class="report-summary-line">This stage is waiting for your review and approval before the pipeline continues.</p></div>`;
+        body.appendChild(waitSection);
+    }
+
+    overlay.classList.add('active');
+    document.body.classList.add('report-active');
+}
+
+function _escHtmlGlobal(s) {
+    if (!s) return '';
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+
+// ── Agent Workflow View ──────────────────────────────────────────
+// Live in-memory workflows (current session) + historical from DB
+const _wfLive = new Map();  // wfId -> { id, type, task, created_at, agents: [{agent_id, agent_name, status, response, model, error}] }
+
+let _wfIdCounter = 0;
+
+function _wfAddLive(type, task, agents) {
+    const wfId = `live_${Date.now()}_${++_wfIdCounter}`;
+    _wfLive.set(wfId, {
+        id: wfId,
+        type,
+        task,
+        created_at: new Date().toISOString(),
+        agents: agents.map(a => ({ ...a, response: null, error: null, model: null })),
+    });
+    _wfRender();
+    return wfId;
+}
+
+function _wfUpdateLive(wfId, agentId, status, content, model) {
+    const wf = _wfLive.get(wfId);
+    if (!wf) return;
+    const agent = wf.agents.find(a => a.agent_id === agentId);
+    if (agent) {
+        agent.status = status;
+        if (status === 'error') agent.error = content;
+        else agent.response = content;
+        if (model) agent.model = model;
+    }
+    _wfRender();
+}
+
+async function _wfInit() {
+    // Load historical workflows from DB
+    await _wfRefreshFromDB();
+}
+
+async function _wfRefreshFromDB() {
+    try {
+        const resp = await fetch('/api/ceo/activity?limit=20');
+        const data = await resp.json();
+        _wfRender(data.workflows || []);
+    } catch (e) {
+        console.error('[WF] Failed to load activity:', e);
+        _wfRender([]);
+    }
+}
+
+function _wfRender(dbWorkflows) {
+    const runsEl = document.getElementById('wf-runs');
+
+    // Merge live workflows (on top) with DB workflows
+    const allWfs = [];
+    for (const [, wf] of _wfLive) { allWfs.push(wf); }
+    if (dbWorkflows) {
+        const liveIds = new Set([...(_wfLive.keys())]);
+        for (const wf of dbWorkflows) {
+            if (!liveIds.has(wf.id)) allWfs.push(wf);
+        }
+    }
+    // Store last DB results for re-renders triggered by live updates
+    if (dbWorkflows) _wfRender._lastDB = dbWorkflows;
+    else if (_wfRender._lastDB) {
+        const liveIds = new Set([...(_wfLive.keys())]);
+        for (const wf of _wfRender._lastDB) {
+            if (!liveIds.has(wf.id)) allWfs.push(wf);
+        }
+    }
+
+    // Sort: newest first
+    allWfs.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+    // Update overview stats
+    let active = 0, complete = 0, errors = 0;
+    for (const wf of allWfs) {
+        const agents = wf.agents || [];
+        const hasRunning = agents.some(a => a.status === 'running');
+        const hasError = agents.some(a => a.status === 'error' || a.error);
+        const allComplete = agents.every(a => a.status === 'complete' || a.response);
+        if (hasRunning) active++;
+        else if (hasError) errors++;
+        else if (allComplete) complete++;
+    }
+    const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+    setVal('wf-stat-active', active);
+    setVal('wf-stat-complete', complete);
+    setVal('wf-stat-errors', errors);
+
+    // Render compact run history cards below graph
+    if (!runsEl) return;
+    if (allWfs.length === 0) { runsEl.innerHTML = ''; return; }
+
+    runsEl.innerHTML = allWfs.slice(0, 20).map(wf => {
+        const agents = wf.agents || [];
+        const hasRunning = agents.some(a => a.status === 'running');
+        const hasError = agents.some(a => a.status === 'error' || a.error);
+        const allComplete = agents.length > 0 && agents.every(a => a.status === 'complete' || a.response);
+        const wfStatus = hasRunning ? 'working' : hasError ? 'error' : allComplete ? 'complete' : 'pending';
+        const typeLabel = wf.type === 'broadcast' ? 'BROADCAST' : 'DISPATCH';
+        const timeAgo = _wfTimeAgo(wf.created_at);
+
+        return `<div class="wf-run-card ${wfStatus}" onclick="_wfToggleRunDetail('${wf.id}')">
+            <span class="wf-run-type ${wf.type}">${typeLabel}</span>
+            <span class="wf-run-task">${_escHtml(wf.task.substring(0, 80))}</span>
+            <span class="wf-run-agents">${agents.map(a => {
+                const s = a.status === 'running' ? 'working' : (a.error ? 'error' : (a.response || a.status === 'complete') ? 'complete' : 'pending');
+                return `<span class="wf-run-agent-dot ${s}" title="${a.agent_name}"></span>`;
+            }).join('')}</span>
+            <span class="wf-run-time">${timeAgo}</span>
+        </div>`;
+    }).join('');
+}
+
+function _wfToggleRunDetail(wfId) {
+    // Find the workflow data from live or DB cache
+    let wf = _wfLive.get(wfId);
+    if (!wf && _wfRender._lastDB) wf = _wfRender._lastDB.find(w => w.id === wfId);
+    if (!wf) return;
+
+    // Open the report overlay with all agent outputs
+    const overlay = document.getElementById('pipeline-report-overlay');
+    const body = document.getElementById('pipeline-report-body');
+    const titleEl = document.getElementById('pipeline-report-title');
+    const metaEl = document.getElementById('pipeline-report-meta');
+    if (!overlay || !body) return;
+
+    body.innerHTML = '';
+    const typeLabel = wf.type === 'broadcast' ? 'BROADCAST' : 'DISPATCH';
+    if (titleEl) titleEl.textContent = `${typeLabel} REPORT`;
+    if (metaEl) metaEl.textContent = wf.task ? wf.task.substring(0, 120) : '';
+
+    // Directive section
+    if (wf.task) {
+        const dirSection = document.createElement('div');
+        dirSection.className = 'report-section';
+        dirSection.innerHTML = `
+            <div class="report-section-header">
+                <span class="report-section-num" style="color:var(--amber);">⌘</span>
+                <span class="report-section-query">DIRECTIVE</span>
+            </div>
+            <div class="report-summary-block" style="white-space:pre-wrap;font-size:13px;line-height:1.6;color:var(--text-main);">${_escHtmlGlobal(wf.task)}</div>`;
+        body.appendChild(dirSection);
+    }
+
+    const agents = wf.agents || [];
+    agents.forEach((a, i) => {
+        const output = a.response || a.error || '';
+        if (!output) return;
+
+        const isError = !!(a.error);
+        const agentName = (a.agent_name || a.agent_id || 'Agent').toUpperCase();
+
+        // Try JSON parse for rich rendering
+        let parsed = null;
+        try {
+            const cleaned = output.trim().replace(/^```[a-z]*\n?/i, '').replace(/```$/, '').trim();
+            parsed = JSON.parse(cleaned);
+        } catch (e) { /* not JSON */ }
+
+        if (parsed && typeof parsed === 'object' && typeof voice !== 'undefined' && voice._renderSection) {
+            const vizSection = document.createElement('div');
+            vizSection.className = 'report-section';
+            vizSection.innerHTML = `<div class="report-section-header"><span class="report-section-num">${i + 1}</span><span class="report-section-query">${agentName}${a.model ? ` · ${a.model}` : ''}</span></div>`;
+            const vizContainer = document.createElement('div');
+            vizContainer.className = 'report-viz-container';
+            voice._renderSection(vizContainer, parsed);
+            vizSection.appendChild(vizContainer);
+            body.appendChild(vizSection);
+        } else {
+            // Split output by headings for readability
+            const sections = output.split(/\n(?=#{1,3}\s|[A-Z][A-Z\s&]{3,}:|\d+\.\s)/).filter(s => s.trim());
+
+            const secEl = document.createElement('div');
+            secEl.className = 'report-section';
+
+            if (sections.length > 1) {
+                secEl.innerHTML = `<div class="report-section-header"><span class="report-section-num" style="${isError ? 'color:var(--red)' : ''}">${i + 1}</span><span class="report-section-query">${agentName}${a.model ? ` · ${a.model}` : ''}</span></div>`;
+                sections.forEach(sec => {
+                    const lines = sec.trim().split('\n');
+                    const heading = lines[0].replace(/^#+\s*/, '').replace(/:$/, '').trim();
+                    const content = lines.slice(1).join('\n').trim() || heading;
+                    const subEl = document.createElement('div');
+                    subEl.className = 'report-summary-block';
+                    subEl.style.cssText = 'white-space:pre-wrap;font-size:12px;line-height:1.6;color:var(--text-main);max-height:500px;overflow-y:auto;margin-bottom:8px;';
+                    if (heading !== content) {
+                        subEl.innerHTML = `<strong style="color:var(--cyan);font-size:11px;letter-spacing:0.5px;">${_escHtmlGlobal(heading)}</strong>\n${_escHtmlGlobal(content)}`;
+                    } else {
+                        subEl.textContent = content;
+                    }
+                    secEl.appendChild(subEl);
+                });
+            } else {
+                secEl.innerHTML = `
+                    <div class="report-section-header">
+                        <span class="report-section-num" style="${isError ? 'color:var(--red)' : ''}">${i + 1}</span>
+                        <span class="report-section-query">${agentName}${a.model ? ` · ${a.model}` : ''}</span>
+                    </div>
+                    <div class="report-summary-block" style="white-space:pre-wrap;font-size:12px;line-height:1.6;color:var(--text-main);max-height:600px;overflow-y:auto;${isError ? 'color:var(--red);' : ''}">${_escHtmlGlobal(output)}</div>`;
+            }
+            body.appendChild(secEl);
+        }
+    });
+
+    overlay.classList.add('active');
+    document.body.classList.add('report-active');
+}
+
+function _wfTimeAgo(iso) {
+    if (!iso) return '';
+    const diff = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+    if (diff < 60) return `${diff}s ago`;
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+    return `${Math.floor(diff / 86400)}d ago`;
+}
+
+
+
+
 
 
 // ── Camera Vision Module (background mode) ──────────────────────
@@ -6495,8 +9581,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const todoInput = document.getElementById('todo-input');
     if (todoAddBtn) todoAddBtn.addEventListener('click', _addTodo);
     if (todoInput) todoInput.addEventListener('keydown', e => { if (e.key === 'Enter') _addTodo(); });
-    // Init todo dock badge
+    // Init todo dock badge + reminders
     _updateTodoDock();
+    _initTodoReminders();
     // Init deadlines
     refreshDeadlines();
 
@@ -6526,7 +9613,8 @@ async function refreshAll() {
             refreshGCP().catch(e => console.warn('refreshGCP error:', e)),
             refreshRevenue().catch(e => console.warn('refreshRevenue error:', e)),
             refreshServiceHealth().catch(e => console.warn('refreshServiceHealth error:', e)),
-            refreshWeather().catch(e => console.warn('refreshWeather error:', e)),
+            refreshActiveAgents().catch(e => console.warn('refreshActiveAgents error:', e)),
+            refreshOrgTeamCount().catch(e => console.warn('refreshOrgTeamCount error:', e)),
             refreshCICD().catch(e => console.warn('refreshCICD error:', e)),
             refreshClaudeUsage().catch(e => console.warn('refreshClaudeUsage error:', e)),
             refreshLLMStatus().catch(e => console.warn('refreshLLMStatus error:', e)),
@@ -6583,7 +9671,7 @@ async function _runBootSequence() {
 
         // ── Stage 5: Remaining panels ──
         _setProgress(82, 'LOADING DASHBOARDS');
-        await _batch([refreshWeather, refreshCICD, refreshClaudeUsage, refreshAgents, refreshDeadlines]);
+        await _batch([refreshCICD, refreshClaudeUsage, refreshAgents, refreshDeadlines, refreshActiveAgents, refreshOrgTeamCount]);
 
         // ── Stage 6: Done ──
         _setProgress(100, 'SYSTEMS ONLINE');
@@ -6710,7 +9798,7 @@ function _runMorningBriefing() {
             + '3) CI/CD — recent build pass/fail status. '
             + '4) Service uptime — any services currently down or degraded. '
             + '5) Upcoming deadlines from the roadmap. '
-            + '6) Weather today. '
+            + '6) Available workflow pipelines and recent runs. '
             + 'Do NOT include stock markets, S&P 500, crypto, or any financial markets. This is a personal project briefing only.'
         );
     }
@@ -6747,6 +9835,35 @@ setInterval(() => {
 // No separate refreshAll() needed — the splash handles the initial load.
 _refreshing = true; // prevent countdown from triggering refreshAll during boot
 _runBootSequence();
+
+// ── SSE delivery (global — used by queue drain and SSE handler) ──
+function _deliverSSEDirect(data) {
+    // Show panel — if wings are already active, show notification banner instead
+    if (data.panel && typeof voice !== 'undefined' && voice._renderAnalysisPanel) {
+        const wingL = document.getElementById('analysis-wing-left');
+        const panelActive = wingL && wingL.classList.contains('active');
+        if (panelActive) {
+            _showPanelNotif(data.panel, voice);
+        } else {
+            voice._renderAnalysisPanel(data.panel, true);
+        }
+    }
+    // Speak the message if requested — but never talk over an active conversation
+    if (data.speak && data.message && typeof voice !== 'undefined') {
+        const busy = voice._processingQuery || voice.speaking || voice._chatMode;
+        if (!busy) {
+            voice._speak(data.message);
+        }
+    }
+    // Log it
+    if (typeof logConvo === 'function') {
+        logConvo(data.message || data.title, 'arbiter');
+    }
+    // Flash notification in title bar
+    const origTitle = document.title;
+    document.title = `[!] ${data.title}`;
+    setTimeout(() => { document.title = origTitle; }, 10000);
+}
 
 // ── SSE: Proactive Notifications from Scheduler ─────────────────
 (function initSSE() {
@@ -6786,32 +9903,12 @@ _runBootSequence();
         };
 
         function _deliverSSE(data) {
-            // Show panel only if user is not already looking at analysis data.
-            // SSE notifications must never silently destroy an active panel.
-            if (data.panel && typeof voice !== 'undefined' && voice._renderAnalysisPanel) {
-                const wingL = document.getElementById('analysis-wing-left');
-                const panelActive = wingL && wingL.classList.contains('active');
-                if (!panelActive) {
-                    voice._renderAnalysisPanel(data.panel);
-                }
+            // Queue if a dock panel is open — never overlay CEO or other panels
+            if (typeof activeDock !== 'undefined' && activeDock) {
+                _queueUpdate({ type: 'sse', data });
+                return;
             }
-            // Speak the message if requested — but never talk over an active conversation
-            if (data.speak && data.message && typeof voice !== 'undefined') {
-                const busy = voice._processingQuery || voice.speaking || voice._chatMode;
-                if (!busy) {
-                    voice._speak(data.message);
-                } else {
-                    console.log('[SSE] Skipped speech (busy):', data.message.slice(0, 60));
-                }
-            }
-            // Log it
-            if (typeof logConvo === 'function') {
-                logConvo(data.message || data.title, 'arbiter');
-            }
-            // Flash notification in title bar
-            const origTitle = document.title;
-            document.title = `[!] ${data.title}`;
-            setTimeout(() => { document.title = origTitle; }, 10000);
+            _deliverSSEDirect(data);
         }
 
         // Drain queued SSE notifications after voice goes idle

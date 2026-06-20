@@ -37,6 +37,13 @@ SERVICES = {
         "components_url": "https://status.anthropic.com/api/v2/components.json",
         "type": "statuspage",
     },
+    "openrouter": {
+        "name": "OpenRouter",
+        "icon": "🔀",
+        "status_url": "https://openrouter.ai/api/v1/auth/key",
+        "components_url": None,
+        "type": "openrouter",
+    },
     "gcp": {
         "name": "Google Cloud",
         "icon": "☁",
@@ -179,6 +186,8 @@ class ServiceHealthMonitor:
                 return self._check_google_identity(svc, base)
             elif stype == "comfyui_local":
                 return self._check_comfyui_local(svc, base)
+            elif stype == "openrouter":
+                return self._check_openrouter(svc, base)
             return base
         except Exception as e:
             log.debug("Health check failed for %s: %s", svc_id, e)
@@ -402,4 +411,39 @@ class ServiceHealthMonitor:
         except Exception:
             base["status"] = "major_outage"
             base["description"] = "RTX 3080 PC unreachable"
+        return base
+
+    def _check_openrouter(self, svc: dict, base: dict) -> dict:
+        """Check OpenRouter API availability using the auth/key endpoint."""
+        or_key = os.getenv("OPENROUTER_API_KEY", "")
+        if not or_key:
+            base["status"] = "unknown"
+            base["description"] = "No API key configured"
+            return base
+        try:
+            resp = httpx.get(
+                "https://openrouter.ai/api/v1/auth/key",
+                headers={"Authorization": f"Bearer {or_key}"},
+                timeout=8,
+            )
+            if resp.status_code == 200:
+                data = resp.json().get("data", {})
+                credit = data.get("limit_remaining")
+                base["status"] = "operational"
+                if credit is not None:
+                    base["description"] = f"Online — ${credit:.2f} credits remaining"
+                else:
+                    base["description"] = "API responding"
+            elif resp.status_code == 401:
+                base["status"] = "degraded"
+                base["description"] = "Invalid API key"
+            elif resp.status_code == 402:
+                base["status"] = "degraded"
+                base["description"] = "Credits exhausted"
+            else:
+                base["status"] = "degraded"
+                base["description"] = f"HTTP {resp.status_code}"
+        except Exception as e:
+            base["status"] = "unknown"
+            base["description"] = f"Health check failed: {e}"
         return base

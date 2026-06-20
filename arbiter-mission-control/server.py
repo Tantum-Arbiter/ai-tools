@@ -16,11 +16,14 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from contextlib import asynccontextmanager
 
+import hmac
+import secrets
 import httpx
 from openai import OpenAI
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 from dotenv import load_dotenv
 
 from email_monitor import EmailMonitor
@@ -28,6 +31,7 @@ from agent_registry import AgentRegistry
 from gcp_monitor import GCPMonitor
 from revenuecat_monitor import RevenueCatMonitor
 from service_health import ServiceHealthMonitor
+from persistence import ArbiterDB
 
 from typing import Any
 
@@ -41,12 +45,27 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "phi4")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 # Provider priority: "claude" (fast + cheap), "ollama" (free local), "openai" (legacy)
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")
+# Cheap model for structured output (panels, followups) — GPT-4o-mini via OpenRouter
+# $0.15/M input, $0.60/M output — ~10x cheaper than Claude Haiku for panel generation
+_OPENROUTER_PANEL_MODEL = os.getenv("OPENROUTER_PANEL_MODEL", "openai/gpt-4o-mini")
+# CEO agent model via OpenRouter (replaces direct OpenAI GPT-4.1 calls)
+_OPENROUTER_AGENT_MODEL = os.getenv("OPENROUTER_AGENT_MODEL", "openai/gpt-4o-mini")
+
+# ── OpenRouter Cost Safeguards ────────────────────────────────────────
+_OPENROUTER_DAILY_BUDGET_USD = float(os.getenv("OPENROUTER_DAILY_BUDGET_USD", "0.10"))  # $0.10/day ≈ $3/month
+_OPENROUTER_RPM_LIMIT = int(os.getenv("OPENROUTER_RPM_LIMIT", "30"))
+_OPENROUTER_SESSION_LIMIT = int(os.getenv("OPENROUTER_SESSION_LIMIT", "500"))
+_OPENROUTER_TIMEOUT = int(os.getenv("OPENROUTER_TIMEOUT", "60"))  # seconds per request
 
 # ── Claude Cost Safeguards ─────────────────────────────────────────────
 # Hard-coded to cheapest model only. No overrides.
 _CLAUDE_MODEL = "claude-haiku-4-5"
+# Agent pipeline uses Sonnet for strategic agents (higher quality, still cost-effective)
+_CLAUDE_AGENT_MODEL = os.getenv("CLAUDE_AGENT_MODEL", "claude-haiku-4-5")
 _CLAUDE_DAILY_BUDGET_USD = float(os.getenv("CLAUDE_DAILY_BUDGET_USD", "1.0"))
 _CLAUDE_RPM_LIMIT = int(os.getenv("CLAUDE_RPM_LIMIT", "30"))         # requests per minute
 _CLAUDE_SESSION_LIMIT = int(os.getenv("CLAUDE_SESSION_LIMIT", "500"))  # requests per server session
@@ -54,10 +73,31 @@ _CLAUDE_CIRCUIT_BREAKER_THRESHOLD = 3  # consecutive errors before fallback
 
 log = logging.getLogger(__name__)
 
+# ── API Authentication ────────────────────────────────────────────────
+# Set ARBITER_API_KEY in .env to protect all /api/* endpoints.
+# If unset, auth is disabled (local-only use).
+ARBITER_API_KEY = os.getenv("ARBITER_API_KEY", "")
+_ARBITER_AUTH_ENABLED = bool(ARBITER_API_KEY)
+if _ARBITER_AUTH_ENABLED:
+    log.info(f"API auth ENABLED (key len={len(ARBITER_API_KEY)})")
+else:
+    log.warning("API auth DISABLED — set ARBITER_API_KEY in .env to protect endpoints")
+
+# ── Input Length Limits ───────────────────────────────────────────────
+_MAX_DIRECTIVE_LEN = int(os.getenv("MAX_DIRECTIVE_LEN", "4000"))      # ~1000 tokens
+_MAX_SYSTEM_PROMPT_LEN = int(os.getenv("MAX_SYSTEM_PROMPT_LEN", "8000"))  # ~2000 tokens
+_MAX_NAME_LEN = 200
+_MAX_DESCRIPTION_LEN = 2000
+
 # ── Startup Diagnostics ───────────────────────────────────────────────
 _has_claude_key = bool(ANTHROPIC_API_KEY)
+_has_openrouter_key = bool(OPENROUTER_API_KEY)
+_has_gemini_key = bool(GOOGLE_API_KEY)
+_GEMINI_DAILY_CALL_CAP = int(os.getenv("GEMINI_DAILY_CALL_CAP", "40"))  # free tier = 50/day, buffer of 10
 print(f"[ARBITER BOOT] LLM_PROVIDER={LLM_PROVIDER}  "
       f"ANTHROPIC_API_KEY={'SET (len=' + str(len(ANTHROPIC_API_KEY)) + ')' if _has_claude_key else 'NOT SET'}  "
+      f"OPENROUTER={'SET → panels=' + _OPENROUTER_PANEL_MODEL + ' agents=' + _OPENROUTER_AGENT_MODEL + ' budget=$' + str(_OPENROUTER_DAILY_BUDGET_USD) + '/day' if _has_openrouter_key else 'NOT SET'}  "
+      f"GEMINI={'SET → cap=' + str(_GEMINI_DAILY_CALL_CAP) + '/day' if _has_gemini_key else 'NOT SET'}  "
       f"OLLAMA={OLLAMA_BASE_URL}  MODEL={OLLAMA_MODEL}")
 
 # ── Claude Usage Tracking ──────────────────────────────────────────────
@@ -76,6 +116,144 @@ _claude_usage = {
 _CLAUDE_INPUT_COST_PER_M = 1.00
 _CLAUDE_OUTPUT_COST_PER_M = 5.00
 
+# ── OpenRouter Usage Tracking ─────────────────────────────────────────
+_openrouter_usage = {
+    "today": datetime.utcnow().strftime("%Y-%m-%d"),
+    "daily_input_tokens": 0,
+    "daily_output_tokens": 0,
+    "daily_cost_usd": 0.0,
+    "session_requests": 0,
+    "minute_requests": [],
+    "consecutive_errors": 0,
+    "circuit_open_until": None,
+}
+
+# GPT-4o-mini pricing via OpenRouter (per million tokens)
+_OR_INPUT_COST_PER_M = 0.15
+_OR_OUTPUT_COST_PER_M = 0.60
+
+# ── Gemini Usage Tracking (free-tier safeguard) ─────────────────────────
+# _GEMINI_DAILY_CALL_CAP defined near top of file (before boot log)
+_gemini_usage = {
+    "today": datetime.utcnow().strftime("%Y-%m-%d"),
+    "daily_calls": 0,
+    "session_calls": 0,
+    "daily_input_tokens": 0,
+    "daily_output_tokens": 0,
+    "consecutive_errors": 0,
+    "circuit_open_until": None,
+}
+
+
+def _gemini_check_budget() -> str | None:
+    """Return an error string if Gemini free-tier cap is reached, else None."""
+    u = _gemini_usage
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    if u["today"] != today:
+        u["today"] = today
+        u["daily_calls"] = 0
+        u["daily_input_tokens"] = 0
+        u["daily_output_tokens"] = 0
+        log.info("Gemini daily counter reset (new day)")
+
+    # Circuit breaker
+    if u["circuit_open_until"] and datetime.utcnow() < u["circuit_open_until"]:
+        return f"Circuit breaker open until {u['circuit_open_until'].strftime('%H:%M:%S')} UTC"
+
+    if u["daily_calls"] >= _GEMINI_DAILY_CALL_CAP:
+        return f"Daily free-tier cap reached ({u['daily_calls']}/{_GEMINI_DAILY_CALL_CAP})"
+
+    return None
+
+
+def _gemini_record_success(input_tokens: int = 0, output_tokens: int = 0):
+    """Record a successful Gemini call with token usage."""
+    u = _gemini_usage
+    u["daily_calls"] += 1
+    u["session_calls"] += 1
+    u["daily_input_tokens"] += input_tokens
+    u["daily_output_tokens"] += output_tokens
+    u["consecutive_errors"] = 0
+    log.info(f"Gemini usage: calls today={u['daily_calls']}/{_GEMINI_DAILY_CALL_CAP}, "
+             f"session={u['session_calls']}, tokens={input_tokens}in/{output_tokens}out, "
+             f"total={u['daily_input_tokens']}in/{u['daily_output_tokens']}out")
+
+
+def _gemini_record_error():
+    """Record a Gemini error and potentially trip the circuit breaker."""
+    u = _gemini_usage
+    u["consecutive_errors"] += 1
+    if u["consecutive_errors"] >= 3:
+        u["circuit_open_until"] = datetime.utcnow() + timedelta(minutes=5)
+        log.warning(f"Gemini circuit breaker OPEN — {u['consecutive_errors']} consecutive errors. "
+                    f"Falling back to OpenRouter for 5 minutes.")
+
+
+def _or_check_budget() -> str | None:
+    """Check OpenRouter safeguards. Returns error string if blocked, None if OK."""
+    u = _openrouter_usage
+    now = datetime.utcnow()
+
+    # Reset daily counters at midnight UTC
+    today = now.strftime("%Y-%m-%d")
+    if u["today"] != today:
+        u["today"] = today
+        u["daily_input_tokens"] = 0
+        u["daily_output_tokens"] = 0
+        u["daily_cost_usd"] = 0.0
+        log.info("OpenRouter daily budget reset")
+
+    # Circuit breaker
+    if u["circuit_open_until"] and now < u["circuit_open_until"]:
+        remaining = (u["circuit_open_until"] - now).seconds
+        return f"Circuit breaker open — {remaining}s until retry"
+    elif u["circuit_open_until"]:
+        u["circuit_open_until"] = None
+        u["consecutive_errors"] = 0
+
+    # Daily budget
+    if u["daily_cost_usd"] >= _OPENROUTER_DAILY_BUDGET_USD:
+        return f"Daily budget exhausted (${u['daily_cost_usd']:.3f} / ${_OPENROUTER_DAILY_BUDGET_USD:.2f})"
+
+    # Session limit
+    if u["session_requests"] >= _OPENROUTER_SESSION_LIMIT:
+        return f"Session limit reached ({u['session_requests']} / {_OPENROUTER_SESSION_LIMIT})"
+
+    # RPM limit
+    cutoff = now - timedelta(seconds=60)
+    u["minute_requests"] = [t for t in u["minute_requests"] if t > cutoff]
+    if len(u["minute_requests"]) >= _OPENROUTER_RPM_LIMIT:
+        return f"Rate limit ({_OPENROUTER_RPM_LIMIT} requests/min)"
+
+    return None
+
+
+def _or_record_usage(input_tokens: int, output_tokens: int):
+    """Record OpenRouter token usage and update cost tracking."""
+    u = _openrouter_usage
+    u["daily_input_tokens"] += input_tokens
+    u["daily_output_tokens"] += output_tokens
+    cost = (input_tokens / 1_000_000) * _OR_INPUT_COST_PER_M + \
+           (output_tokens / 1_000_000) * _OR_OUTPUT_COST_PER_M
+    u["daily_cost_usd"] += cost
+    u["session_requests"] += 1
+    u["minute_requests"].append(datetime.utcnow())
+    u["consecutive_errors"] = 0
+    log.info(f"OpenRouter usage: +{input_tokens}in/{output_tokens}out tokens, "
+             f"cost today=${u['daily_cost_usd']:.4f}/{_OPENROUTER_DAILY_BUDGET_USD:.2f}, "
+             f"session={u['session_requests']}/{_OPENROUTER_SESSION_LIMIT}")
+
+
+def _or_record_error():
+    """Record an OpenRouter API error for circuit breaker."""
+    u = _openrouter_usage
+    u["consecutive_errors"] += 1
+    if u["consecutive_errors"] >= 3:
+        u["circuit_open_until"] = datetime.utcnow() + timedelta(minutes=5)
+        log.warning(f"OpenRouter circuit breaker OPEN — 3 consecutive errors, "
+                    f"Ollama fallback for 5 min")
+
+
 # ── Claude Tool-Calling System Prompt ─────────────────────────────────
 # Used by _chat_claude_tools(). Claude sees this + tool definitions, then
 # decides which tools to call for the user's query (ChatGPT-style).
@@ -90,7 +268,13 @@ _CLAUDE_TOOLS_SYSTEM = (
     "For collectable queries (Pokemon cards, trading cards, etc): always include specific prices by grade/condition, "
     "price trend direction, and where to buy (eBay, TCGplayer, etc) with approximate links.\n"
     "For product/shopping queries: always compare prices across at least 3 retailers, list cheapest first, "
-    "and include direct purchase URLs where available."
+    "and include direct purchase URLs where available.\n\n"
+    "You have access to ARBITER's memory via search_history. Use it when the user asks about:\n"
+    "- Previous research, analysis, or reports your agents have produced\n"
+    "- Past briefings (morning, market close, evening digests)\n"
+    "- Trends, patterns, or comparisons over time\n"
+    "- 'What did you find about X?' or 'Summarise this week's work'\n"
+    "When building reports, pull historical data first — don't re-research what's already been done."
 )
 
 # ── Claude Tool Definitions (Anthropic tool_use format) ───────────────
@@ -136,8 +320,31 @@ _CLAUDE_TOOLS: list[dict] = [
     },
     {
         "name": "get_emails",
-        "description": "Get email summary: unread count, urgent items, and recent activity.",
+        "description": "Get email summary: unread count, urgent items, customer emails, and recent activity.",
         "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "get_email_detail",
+        "description": "Get full email detail including body text for a specific email UID. Use this when the user asks to read or view a specific email.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "uid": {"type": "string", "description": "Email UID from the email list"},
+            },
+            "required": ["uid"],
+        },
+    },
+    {
+        "name": "draft_email_reply",
+        "description": "Draft a professional reply to a customer/business email. Returns the draft text for user review before sending.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "uid": {"type": "string", "description": "Email UID to reply to"},
+                "instructions": {"type": "string", "description": "Optional specific instructions for the reply (e.g. 'confirm availability for next Tuesday')"},
+            },
+            "required": ["uid"],
+        },
     },
     {
         "name": "get_roadmap",
@@ -166,6 +373,21 @@ _CLAUDE_TOOLS: list[dict] = [
                            "description": "What the user wants: price_check (current value), trend (price history), buy (where to purchase), sell (where to list), grading (condition info), overview (general info)"},
             },
             "required": ["item"],
+        },
+    },
+    {
+        "name": "search_history",
+        "description": "Search ARBITER's memory — past agent results, briefings, insights, and conversations. Use this to recall previous research, build reports from accumulated data, or check what's already been analysed before doing new research.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search term to find across all stored data (agent results, briefings, insights, conversations)"},
+                "category": {"type": "string", "enum": ["all", "agents", "briefings", "insights", "conversations"],
+                             "description": "Narrow search to a specific data type. Default 'all'."},
+                "agent_id": {"type": "string", "description": "Filter agent results by agent ID (e.g. 'researcher', 'cmo', 'cto', 'coo')"},
+                "limit": {"type": "integer", "description": "Max results to return (default 10)"},
+            },
+            "required": ["query"],
         },
     },
     {
@@ -268,6 +490,7 @@ email_mon = EmailMonitor()
 agent_reg = AgentRegistry()
 gcp_mon = GCPMonitor()
 rc_mon = RevenueCatMonitor()
+arbiter_db = ArbiterDB(str(Path(__file__).parent / "arbiter.db"))
 
 
 # ── Scheduler Engine ──────────────────────────────────────────────────
@@ -493,14 +716,19 @@ async def _job_morning_briefing():
         _greet = f"Good {_tod}, Sir. "
         summary = _greet + ". ".join(sections) + "." if sections else _greet.strip()
 
+        panel = {
+            "title": "MORNING BRIEFING — " + datetime.now().strftime("%A %d %B"),
+            "stats": panel_stats,
+        }
+        arbiter_db.save_briefing(
+            title="MORNING BRIEFING", category="morning",
+            message=summary, panel=panel,
+        )
         await _push_sse("briefing", {
             "title": "MORNING BRIEFING",
             "message": summary,
             "speak": True,
-            "panel": {
-                "title": "MORNING BRIEFING — " + datetime.now().strftime("%A %d %B"),
-                "stats": panel_stats,
-            },
+            "panel": panel,
         })
     except Exception as e:
         log.error(f"Morning briefing failed: {e}")
@@ -541,15 +769,21 @@ async def _job_market_close():
         if losers:
             summary += f", {len(losers)} down"
 
+        panel = {
+            "title": "MARKET CLOSE — " + datetime.now().strftime("%A %d %B"),
+            "stats": panel_stats[:6],
+            "chart": chart,
+        }
+        msg = f"Markets are closed, Sir. {summary}."
+        arbiter_db.save_briefing(
+            title="MARKET CLOSE", category="market",
+            message=msg, panel=panel,
+        )
         await _push_sse("briefing", {
             "title": "MARKET CLOSE",
-            "message": f"Markets are closed, Sir. {summary}.",
+            "message": msg,
             "speak": True,
-            "panel": {
-                "title": "MARKET CLOSE — " + datetime.now().strftime("%A %d %B"),
-                "stats": panel_stats[:6],
-                "chart": chart,
-            },
+            "panel": panel,
         })
     except Exception as e:
         log.error(f"Market close summary failed: {e}")
@@ -585,14 +819,19 @@ async def _job_evening_digest():
 
         summary = "Evening digest, Sir. " + ". ".join(sections) + "." if sections else "All quiet this evening, Sir."
 
+        panel = {
+            "title": "EVENING DIGEST — " + datetime.now().strftime("%A %d %B"),
+            "stats": panel_stats,
+        }
+        arbiter_db.save_briefing(
+            title="EVENING DIGEST", category="evening",
+            message=summary, panel=panel,
+        )
         await _push_sse("briefing", {
             "title": "EVENING DIGEST",
             "message": summary,
             "speak": True,
-            "panel": {
-                "title": "EVENING DIGEST — " + datetime.now().strftime("%A %d %B"),
-                "stats": panel_stats,
-            },
+            "panel": panel,
         })
     except Exception as e:
         log.error(f"Evening digest failed: {e}")
@@ -764,6 +1003,17 @@ async def _job_insight_scan():
 
         if not new_insights:
             return
+
+        # Persist all new insights
+        for i in new_insights:
+            arbiter_db.save_insight(
+                insight_type=i.get("type", "unknown"),
+                title=i.get("title", ""),
+                message=i.get("message", ""),
+                severity=i.get("severity"),
+                topic=i.get("topic"),
+                data=i.get("data"),
+            )
 
         # Build a panel for the highest-severity insight
         top = sorted(new_insights, key=lambda x: {"high": 0, "medium": 1, "low": 2}.get(x.get("severity", "low"), 3))[0]
@@ -1069,6 +1319,46 @@ app = FastAPI(title="ARBITER — Mission Control", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 
 
+# ── Auth Middleware ───────────────────────────────────────────────────
+# Protects all /api/* routes when ARBITER_API_KEY is set.
+# Accepts: Authorization: Bearer <key>  OR  ?api_key=<key>  (for SSE/EventSource)
+# Skips: static files, root page (/), and the auth-check endpoint itself.
+
+class _AuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        if not _ARBITER_AUTH_ENABLED:
+            return await call_next(request)
+
+        path = request.url.path
+
+        # Skip auth for non-API routes (static, root page, favicon)
+        if not path.startswith("/api/"):
+            return await call_next(request)
+
+        # Allow the auth-check endpoint without auth (used by UI to test key)
+        if path == "/api/auth/check":
+            return await call_next(request)
+
+        # Extract key from Authorization header or query param
+        supplied_key = ""
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.startswith("Bearer "):
+            supplied_key = auth_header[7:]
+        if not supplied_key:
+            supplied_key = request.query_params.get("api_key", "")
+
+        if not supplied_key or not hmac.compare_digest(supplied_key, ARBITER_API_KEY):
+            return JSONResponse(
+                status_code=401,
+                content={"error": "Unauthorized — set API key in Settings"},
+            )
+
+        return await call_next(request)
+
+
+app.add_middleware(_AuthMiddleware)
+
+
 def _query(db_path: Path, sql: str, params: tuple = ()) -> list[dict]:
     if not db_path.exists():
         return []
@@ -1092,6 +1382,25 @@ async def panel_route(panel_key: str):
     return HTMLResponse(html_path.read_text())
 
 
+# ── Auth Check ────────────────────────────────────────────────────────
+
+@app.get("/api/auth/check")
+async def auth_check(request: Request):
+    """Check whether auth is enabled and whether the supplied key is valid.
+    This endpoint is excluded from auth middleware so the UI can probe it."""
+    if not _ARBITER_AUTH_ENABLED:
+        return {"auth_required": False, "valid": True}
+    # Check the supplied key
+    supplied_key = ""
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.startswith("Bearer "):
+        supplied_key = auth_header[7:]
+    if not supplied_key:
+        supplied_key = request.query_params.get("api_key", "")
+    valid = bool(supplied_key) and hmac.compare_digest(supplied_key, ARBITER_API_KEY)
+    return {"auth_required": True, "valid": valid}
+
+
 # ── System Status ─────────────────────────────────────────────────────
 @app.get("/api/status")
 async def system_status():
@@ -1104,14 +1413,15 @@ async def system_status():
         llm_online = True
         llm_provider = "claude"
 
-    # Ollama check (fallback or primary)
+    # Ollama check (fallback or primary) — use async to avoid blocking event loop
     if not llm_online:
         if LLM_PROVIDER == "ollama" or not llm_online:
             try:
-                r = httpx.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=2)
-                if r.status_code == 200:
-                    llm_online = True
-                    llm_provider = "ollama"
+                async with httpx.AsyncClient() as _status_client:
+                    r = await _status_client.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=2)
+                    if r.status_code == 200:
+                        llm_online = True
+                        llm_provider = "ollama"
             except Exception:
                 pass
 
@@ -1133,7 +1443,7 @@ async def claude_usage():
     """Return current Claude API usage and safeguard status."""
     u = _claude_usage
     block = _claude_check_budget()
-    return {
+    result = {
         "configured": bool(ANTHROPIC_API_KEY),
         "model": _CLAUDE_MODEL,
         "daily_budget_usd": _CLAUDE_DAILY_BUDGET_USD,
@@ -1146,6 +1456,102 @@ async def claude_usage():
         "blocked": block,
         "circuit_breaker": "open" if u["circuit_open_until"] and datetime.utcnow() < u["circuit_open_until"] else "closed",
     }
+    log.debug(f"[USAGE] Claude → cost=${result['daily_cost_usd']:.4f}/{result['daily_budget_usd']:.2f} "
+              f"tokens={result['daily_input_tokens']}in/{result['daily_output_tokens']}out "
+              f"reqs={result['session_requests']} blocked={block or 'no'} "
+              f"circuit={result['circuit_breaker']}")
+    return result
+
+
+@app.get("/api/openrouter-usage")
+async def openrouter_usage():
+    """Return current OpenRouter API usage and safeguard status."""
+    u = _openrouter_usage
+    block = _or_check_budget()
+
+    # Fetch real account balance from OpenRouter
+    account_balance = None
+    account_limit = None
+    account_usage = None
+    account_usage_daily = None
+    account_is_free = None
+    if OPENROUTER_API_KEY:
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                resp = await client.get(
+                    "https://openrouter.ai/api/v1/auth/key",
+                    headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
+                )
+                if resp.status_code == 200:
+                    key_data = resp.json().get("data", {})
+                    limit = key_data.get("limit")                     # credit cap or null (pay-as-you-go)
+                    limit_remaining = key_data.get("limit_remaining") # remaining credits or null
+                    usage_usd = key_data.get("usage", 0)              # all-time spend
+                    account_usage = round(usage_usd, 4)
+                    account_usage_daily = round(key_data.get("usage_daily", 0), 4)
+                    account_is_free = key_data.get("is_free_tier", False)
+                    if limit_remaining is not None:
+                        # Key has a credit cap — show remaining
+                        account_balance = round(limit_remaining, 4)
+                        account_limit = round(limit, 4) if limit is not None else None
+                    else:
+                        # Pay-as-you-go — no cap, balance is meaningless
+                        account_balance = None
+                        account_limit = None
+        except Exception as e:
+            log.debug(f"OpenRouter balance check failed: {e}")
+
+    result = {
+        "configured": bool(OPENROUTER_API_KEY),
+        "panel_model": _OPENROUTER_PANEL_MODEL,
+        "agent_model": _OPENROUTER_AGENT_MODEL,
+        "daily_budget_usd": _OPENROUTER_DAILY_BUDGET_USD,
+        "daily_cost_usd": round(u["daily_cost_usd"], 4),
+        "daily_input_tokens": u["daily_input_tokens"],
+        "daily_output_tokens": u["daily_output_tokens"],
+        "session_requests": u["session_requests"],
+        "session_limit": _OPENROUTER_SESSION_LIMIT,
+        "rpm_limit": _OPENROUTER_RPM_LIMIT,
+        "timeout_seconds": _OPENROUTER_TIMEOUT,
+        "blocked": block,
+        "circuit_breaker": "open" if u["circuit_open_until"] and datetime.utcnow() < u["circuit_open_until"] else "closed",
+        "account_balance_usd": account_balance,
+        "account_limit_usd": account_limit,
+        "account_usage_usd": account_usage,
+        "account_usage_daily_usd": account_usage_daily,
+        "account_is_free_tier": account_is_free,
+    }
+    log.debug(f"[USAGE] OpenRouter → configured={result['configured']} "
+              f"cost=${result['daily_cost_usd']:.4f}/{result['daily_budget_usd']:.2f} "
+              f"tokens={result['daily_input_tokens']}in/{result['daily_output_tokens']}out "
+              f"reqs={result['session_requests']} model={result['agent_model']} "
+              f"balance=${account_balance} usage=${account_usage} "
+              f"blocked={block or 'no'} circuit={result['circuit_breaker']}")
+    return result
+
+
+@app.get("/api/gemini-usage")
+async def gemini_usage():
+    """Return Gemini free-tier usage stats."""
+    u = _gemini_usage
+    block = _gemini_check_budget()
+    result = {
+        "configured": bool(GOOGLE_API_KEY),
+        "model": "gemini-2.5-pro",
+        "daily_call_cap": _GEMINI_DAILY_CALL_CAP,
+        "daily_calls": u["daily_calls"],
+        "session_calls": u["session_calls"],
+        "daily_input_tokens": u["daily_input_tokens"],
+        "daily_output_tokens": u["daily_output_tokens"],
+        "blocked": block,
+        "circuit_breaker": "open" if u["circuit_open_until"] and datetime.utcnow() < u["circuit_open_until"] else "closed",
+    }
+    log.debug(f"[USAGE] Gemini → configured={result['configured']} "
+              f"calls={result['daily_calls']}/{result['daily_call_cap']} "
+              f"session={result['session_calls']} "
+              f"tokens={u['daily_input_tokens']}in/{u['daily_output_tokens']}out "
+              f"blocked={block or 'no'} circuit={result['circuit_breaker']}")
+    return result
 
 
 # ── System Info (host machine) ───────────────────────────────────────
@@ -1213,6 +1619,164 @@ async def email_recent():
     return email_mon.recent(20)
 
 
+@app.get("/api/email/detail/{uid}")
+async def email_detail(uid: str):
+    """Get full email detail including body for a specific UID."""
+    if not re.match(r'^[0-9]+$', uid):
+        return JSONResponse(status_code=400, content={"error": "Invalid email UID"})
+    detail = email_mon.get_email_detail(uid)
+    if not detail:
+        return JSONResponse(status_code=404, content={"error": "Email not found"})
+    return detail
+
+
+@app.get("/api/email/customer")
+async def email_customer():
+    """Return emails classified as customer inquiries or business."""
+    return email_mon.customer_emails(20)
+
+
+@app.post("/api/email/classify")
+async def email_classify(request: Request):
+    """Classify unclassified emails using LLM. Runs in batch."""
+    unclassified = email_mon.get_emails_needing_classification()
+    if not unclassified:
+        return {"classified": 0, "message": "All emails already classified"}
+
+    # Batch classify up to 15 at a time to avoid token bloat
+    batch = unclassified[:15]
+    from email_monitor import EMAIL_CATEGORIES, redact_for_llm
+    cats_str = ", ".join(EMAIL_CATEGORIES.keys())
+
+    # ── Redact all content before sending to LLM ──
+    email_list = "\n".join(
+        f"- UID:{e['uid']} FROM:{redact_for_llm(e['sender'][:50])} SUBJECT:{redact_for_llm(e['subject'][:80])} SNIPPET:{redact_for_llm(e['snippet'][:100])}"
+        for e in batch
+    )
+    prompt = (
+        f"Classify each email into exactly one category: {cats_str}\n\n"
+        f"Emails:\n{email_list}\n\n"
+        "Return ONLY a JSON array of objects: [{\"uid\": \"...\", \"category\": \"...\"}]\n"
+        "No explanation. Just the JSON array."
+    )
+    messages = [
+        {"role": "system", "content": "You are an email classifier. Return only valid JSON."},
+        {"role": "user", "content": prompt},
+    ]
+
+    result = None
+    if ANTHROPIC_API_KEY and not _claude_check_budget():
+        result = await _chat_claude(messages, max_tokens=500, temperature=0.1)
+    if not result and OPENROUTER_API_KEY:
+        result = await _chat_openrouter(messages, max_tokens=500, temperature=0.1)
+    if not result:
+        result = await _chat_llm(messages, max_tokens=500, purpose="email-classify")
+
+    classified = 0
+    if result:
+        try:
+            # Extract JSON array from response
+            match = re.search(r'\[.*\]', result, re.DOTALL)
+            if match:
+                classifications = json.loads(match.group())
+                for c in classifications:
+                    uid = str(c.get("uid", ""))
+                    cat = c.get("category", "")
+                    if uid and cat in EMAIL_CATEGORIES:
+                        email_mon.set_classification(uid, cat)
+                        classified += 1
+        except (json.JSONDecodeError, KeyError) as e:
+            log.warning(f"Email classification parse error: {e}")
+
+    return {"classified": classified, "total_pending": len(unclassified)}
+
+
+@app.post("/api/email/draft-reply")
+async def email_draft_reply(request: Request):
+    """Draft a reply to an email using LLM."""
+    body = await request.json()
+    uid = body.get("uid", "")
+    if not uid:
+        return JSONResponse(status_code=400, content={"error": "uid is required"})
+
+    detail = email_mon.get_email_detail(uid)
+    if not detail:
+        return JSONResponse(status_code=404, content={"error": "Email not found"})
+
+    # Context for the draft — redact confidential data before LLM
+    from email_monitor import redact_for_llm
+    instructions = body.get("instructions", "")
+    prompt = (
+        f"Draft a professional reply to this email.\n\n"
+        f"FROM: {redact_for_llm(detail['sender'])}\n"
+        f"SUBJECT: {redact_for_llm(detail['subject'])}\n"
+        f"BODY:\n{redact_for_llm(detail['body'][:3000])}\n\n"
+    )
+    if instructions:
+        prompt += f"SPECIFIC INSTRUCTIONS: {instructions}\n\n"
+    prompt += (
+        "RULES:\n"
+        "- Professional but warm tone\n"
+        "- UK English (organise, colour, apologise)\n"
+        "- Concise — max 150 words\n"
+        "- Don't invent commitments, prices, or dates — use placeholders like [DATE] [PRICE]\n"
+        "- Sign off as the business owner\n\n"
+        "Return ONLY the reply body text. No subject line. No explanation."
+    )
+    messages = [
+        {"role": "system", "content": "You are a professional email reply drafter for a UK business."},
+        {"role": "user", "content": prompt},
+    ]
+
+    draft = None
+    if ANTHROPIC_API_KEY and not _claude_check_budget():
+        draft = await _chat_claude(messages, max_tokens=400, temperature=0.5)
+    if not draft and OPENROUTER_API_KEY:
+        draft = await _chat_openrouter(messages, max_tokens=400, temperature=0.5)
+    if not draft:
+        draft = await _chat_llm(messages, max_tokens=400, purpose="email-draft")
+
+    if not draft:
+        return JSONResponse(status_code=500, content={"error": "Failed to generate draft"})
+
+    # Build reply subject
+    subject = detail.get("subject", "")
+    if not subject.lower().startswith("re:"):
+        subject = f"Re: {subject}"
+
+    return {
+        "draft": draft.strip(),
+        "to": detail.get("sender", ""),
+        "subject": subject,
+        "in_reply_to": detail.get("message_id", ""),
+        "original_uid": uid,
+    }
+
+
+@app.post("/api/email/send")
+async def email_send(request: Request):
+    """Send an email. Requires to, subject, body."""
+    body = await request.json()
+    to = body.get("to", "").strip()
+    subject = body.get("subject", "").strip()
+    email_body = body.get("body", "").strip()
+    in_reply_to = body.get("in_reply_to", "")
+
+    if not to or not subject or not email_body:
+        return JSONResponse(status_code=400, content={"error": "Missing: to, subject, body"})
+
+    result = await asyncio.to_thread(
+        email_mon.send_email, to, subject, email_body, in_reply_to
+    )
+    if result.get("ok"):
+        # Push SSE notification
+        await _push_sse("notification", {
+            "title": "EMAIL SENT",
+            "message": f"Reply sent to {to}: {subject[:60]}",
+        })
+    return result
+
+
 # ── Agent Registry ────────────────────────────────────────────────────
 @app.get("/api/agents")
 async def agents_list():
@@ -1238,99 +1802,1380 @@ async def agent_heartbeat(request: Request):
 
 
 # ── CEO Orchestration — Sub-Agent Definitions ─────────────────────────
+_PROMPTS_DIR = Path(__file__).parent / "prompts"
+
+
+# ── 3-Layer Prompt Architecture ──────────────────────────────────────
+# Layer 1: Global Operating System (shared by all agents)
+# Layer 2: Business Directive (changes per business)
+# Layer 3: Agent Role Prompt (small, focused per agent)
+_GLOBAL_OS_PROMPT = ""
+_BUSINESS_DIRECTIVE_PROMPT = ""
+_global_os_file = _PROMPTS_DIR / "global_os.md"
+_business_dir_file = _PROMPTS_DIR / "business_directive.md"
+if _global_os_file.exists():
+    _GLOBAL_OS_PROMPT = _global_os_file.read_text(encoding="utf-8").strip()
+    log.info(f"Loaded global OS prompt ({len(_GLOBAL_OS_PROMPT)} chars)")
+if _business_dir_file.exists():
+    _BUSINESS_DIRECTIVE_PROMPT = _business_dir_file.read_text(encoding="utf-8").strip()
+    log.info(f"Loaded business directive ({len(_BUSINESS_DIRECTIVE_PROMPT)} chars)")
+
+
+def _load_agent_prompt(agent_id: str) -> str:
+    """Compose a 3-layer system prompt: Global OS + Business Directive + Agent Role.
+    Each layer is loaded from prompts/ directory. Falls back gracefully if missing."""
+    # Layer 3: Agent-specific role prompt
+    prompt_file = _PROMPTS_DIR / f"{agent_id}.md"
+    if prompt_file.exists():
+        agent_role = prompt_file.read_text(encoding="utf-8").strip()
+    else:
+        log.warning(f"Prompt file not found: {prompt_file}")
+        agent_role = f"You are the {agent_id} agent. Follow the directive precisely."
+
+    # Compose all 3 layers
+    layers = []
+    if _GLOBAL_OS_PROMPT:
+        layers.append(_GLOBAL_OS_PROMPT)
+    if _BUSINESS_DIRECTIVE_PROMPT:
+        layers.append(_BUSINESS_DIRECTIVE_PROMPT)
+    layers.append(agent_role)
+    return "\n\n---\n\n".join(layers)
+
+
 CEO_AGENTS = {
-    "researcher": {
-        "id": "researcher",
-        "name": "Researcher",
-        "role": "Intel Gatherer",
-        "model": "gemini-2.5-pro",
-        "provider": "gemini",
-        "icon": "search",
-        "colour": "#00e5ff",
-        "description": "Market signals, research briefs, sources & strategic content",
-        "system_prompt": (
-            "You are ARBITER's Researcher agent — an elite intelligence gatherer for Sir Luke's business operations. "
-            "Your job: find market signals, compile research briefs with cited sources, and surface strategic content. "
-            "Be thorough but concise. Always cite sources. Structure output with clear headers and bullet points. "
-            "Focus on actionable intelligence, not fluff."
-        ),
+    # ── Claude Sonnet — Strategic / Creative agents ──────────────────
+    "chief_of_staff": {
+        "id": "chief_of_staff",
+        "name": "Chief of Staff",
+        "role": "Executive Coordinator",
+        "model": _CLAUDE_AGENT_MODEL,
+        "provider": "claude",
+        "icon": "shield",
+        "colour": "#64ffda",
+        "description": "Coordinates agents, resolves conflicts, produces executive decisions",
+        "system_prompt": _load_agent_prompt("chief_of_staff"),
     },
-    "cmo": {
-        "id": "cmo",
-        "name": "CMO",
-        "role": "Market Voice",
-        "model": "gpt-4.1",
-        "provider": "openai",
-        "icon": "megaphone",
-        "colour": "#ff4081",
-        "description": "Strategy → content angles, campaigns & publish-ready drafts",
-        "system_prompt": (
-            "You are ARBITER's CMO agent — the marketing voice for Sir Luke's brand. "
-            "Turn strategy and research into compelling content angles, campaign briefs, and publish-ready drafts. "
-            "You write for social media, email, blogs, and ad copy. Match the brand tone: confident, modern, authoritative. "
-            "Always deliver structured output with clear sections."
-        ),
+    "visionary": {
+        "id": "visionary",
+        "name": "Visionary",
+        "role": "Creative Director",
+        "model": _CLAUDE_AGENT_MODEL,
+        "provider": "claude",
+        "icon": "zap",
+        "colour": "#e040fb",
+        "description": "Original ideas, concepts, positioning & future opportunities",
+        "system_prompt": _load_agent_prompt("visionary"),
     },
-    "sales": {
-        "id": "sales",
-        "name": "Sales Rep",
-        "role": "Revenue Ops",
-        "model": "gpt-4.1",
-        "provider": "openai",
-        "icon": "trending-up",
-        "colour": "#ffd700",
-        "description": "Qualifies leads, drafts outreach & tracks follow-up opportunities",
-        "system_prompt": (
-            "You are ARBITER's Sales Rep agent — revenue operations specialist for Sir Luke's business. "
-            "Qualify leads, draft personalised outreach messages, track follow-up opportunities, and propose deal strategies. "
-            "Be persuasive but professional. Structure output with prospect details, recommended actions, and timelines."
-        ),
+    "strategist": {
+        "id": "strategist",
+        "name": "Strategist",
+        "role": "Strategic Advisor",
+        "model": _CLAUDE_AGENT_MODEL,
+        "provider": "claude",
+        "icon": "compass",
+        "colour": "#448aff",
+        "description": "Where to play and how to win — priorities & trade-offs",
+        "system_prompt": _load_agent_prompt("strategist"),
+    },
+    "product": {
+        "id": "product",
+        "name": "Product",
+        "role": "Product Leader",
+        "model": _CLAUDE_AGENT_MODEL,
+        "provider": "claude",
+        "icon": "box",
+        "colour": "#69f0ae",
+        "description": "Strategy → products, roadmaps, MVPs & validation plans",
+        "system_prompt": _load_agent_prompt("product"),
     },
     "cto": {
         "id": "cto",
         "name": "CTO",
         "role": "Technical Vision",
-        "model": "gpt-4.1",
-        "provider": "openai",
+        "model": _CLAUDE_AGENT_MODEL,
+        "provider": "claude",
         "icon": "cpu",
         "colour": "#76ff03",
-        "description": "Verifies technical plans, architecture & engineering vision",
-        "system_prompt": (
-            "You are ARBITER's CTO agent — technical advisor for Sir Luke's engineering decisions. "
-            "Review technical plans, validate architecture choices, assess feasibility, and provide engineering recommendations. "
-            "Be precise and practical. Flag risks, suggest alternatives, and structure output with clear technical reasoning."
-        ),
+        "description": "Architecture, feasibility, security & engineering plans",
+        "system_prompt": _load_agent_prompt("cto"),
+    },
+    "risk": {
+        "id": "risk",
+        "name": "Risk",
+        "role": "Risk & Compliance",
+        "model": _CLAUDE_AGENT_MODEL,
+        "provider": "claude",
+        "icon": "alert-triangle",
+        "colour": "#ff5252",
+        "description": "Legal, privacy, security & operational risk assessment",
+        "system_prompt": _load_agent_prompt("risk"),
+    },
+    # ── Gemini — Research & Data agents (free tier) ──────────────────
+    "researcher": {
+        "id": "researcher",
+        "name": "Researcher",
+        "role": "Research Analyst",
+        "model": "gemini-2.5-pro",
+        "provider": "gemini",
+        "icon": "search",
+        "colour": "#00e5ff",
+        "description": "Market intelligence, competitor analysis & evidence gathering",
+        "system_prompt": _load_agent_prompt("researcher"),
     },
     "analyst": {
         "id": "analyst",
-        "name": "Data Analyst",
-        "role": "Signal Layer",
-        "model": "gemini-2.5-pro",
+        "name": "Analyst",
+        "role": "Data Analyst",
+        "model": "gemini-2.5-flash",
         "provider": "gemini",
         "icon": "bar-chart",
         "colour": "#b388ff",
-        "description": "Performance, trends, records & operational signal quality",
-        "system_prompt": (
-            "You are ARBITER's Data Analyst agent — the signal layer for Sir Luke's operations. "
-            "Analyse performance metrics, identify trends, assess data quality, and surface operational insights. "
-            "Be quantitative and precise. Use tables, percentages, and comparisons. Structure output with findings, "
-            "trends, and recommended actions."
-        ),
+        "description": "KPIs, trends, anomalies & data-driven recommendations",
+        "system_prompt": _load_agent_prompt("analyst"),
+    },
+    # ── OpenRouter GPT-4o-mini — Execution agents ────────────────────
+    "cmo": {
+        "id": "cmo",
+        "name": "CMO",
+        "role": "Marketing Chief",
+        "model": _OPENROUTER_AGENT_MODEL,
+        "provider": "openrouter",
+        "icon": "megaphone",
+        "colour": "#ff4081",
+        "description": "Positioning, messaging, campaigns & content themes",
+        "system_prompt": _load_agent_prompt("cmo"),
+    },
+    "revenue": {
+        "id": "revenue",
+        "name": "Revenue",
+        "role": "Revenue Leader",
+        "model": _OPENROUTER_AGENT_MODEL,
+        "provider": "openrouter",
+        "icon": "trending-up",
+        "colour": "#ffd700",
+        "description": "ICPs, pricing, sales motions & conversion optimisation",
+        "system_prompt": _load_agent_prompt("revenue"),
+    },
+    "coo": {
+        "id": "coo",
+        "name": "COO",
+        "role": "Execution Manager",
+        "model": _OPENROUTER_AGENT_MODEL,
+        "provider": "openrouter",
+        "icon": "clipboard",
+        "colour": "#ff6e40",
+        "description": "Delivery plans, milestones, tasks & timeline management",
+        "system_prompt": _load_agent_prompt("coo"),
+    },
+    # ── Extended Agent Roster ─────────────────────────────────────────
+    "ceo_agent": {
+        "id": "ceo_agent",
+        "name": "CEO",
+        "role": "Founder & Decision Maker",
+        "model": _CLAUDE_AGENT_MODEL,
+        "provider": "claude",
+        "icon": "star",
+        "colour": "#ffd700",
+        "description": "Strategic decisions, prioritisation & business direction",
+        "system_prompt": _load_agent_prompt("ceo"),
+    },
+    "intelligence": {
+        "id": "intelligence",
+        "name": "Intelligence",
+        "role": "Intelligence Analyst",
+        "model": "gemini-2.5-pro",
+        "provider": "gemini",
+        "icon": "eye",
+        "colour": "#00e5ff",
+        "description": "Market research, competitor analysis & industry trends",
+        "system_prompt": _load_agent_prompt("intelligence"),
+    },
+    "child_dev": {
+        "id": "child_dev",
+        "name": "Child Dev",
+        "role": "Development Specialist",
+        "model": "gemini-2.5-pro",
+        "provider": "gemini",
+        "icon": "heart",
+        "colour": "#ff80ab",
+        "description": "Developmental validation, age appropriateness & child wellbeing",
+        "system_prompt": _load_agent_prompt("child_dev"),
+    },
+    "story_architect": {
+        "id": "story_architect",
+        "name": "Story Architect",
+        "role": "Story Creator",
+        "model": _CLAUDE_AGENT_MODEL,
+        "provider": "claude",
+        "icon": "book",
+        "colour": "#ea80fc",
+        "description": "Children's stories, narratives & interactive content",
+        "system_prompt": _load_agent_prompt("story_architect"),
+    },
+    "content_visionary": {
+        "id": "content_visionary",
+        "name": "Content Visionary",
+        "role": "Content Strategist",
+        "model": _CLAUDE_AGENT_MODEL,
+        "provider": "claude",
+        "icon": "film",
+        "colour": "#b388ff",
+        "description": "Content concepts, franchise potential & series ideas",
+        "system_prompt": _load_agent_prompt("content_visionary"),
+    },
+    "creative_director": {
+        "id": "creative_director",
+        "name": "Creative Director",
+        "role": "Art Direction",
+        "model": _CLAUDE_AGENT_MODEL,
+        "provider": "claude",
+        "icon": "palette",
+        "colour": "#ff4081",
+        "description": "Visual direction, character design & brand consistency",
+        "system_prompt": _load_agent_prompt("creative_director"),
+    },
+    "character_designer": {
+        "id": "character_designer",
+        "name": "Character Designer",
+        "role": "IP Creator",
+        "model": _OPENROUTER_AGENT_MODEL,
+        "provider": "openrouter",
+        "icon": "smile",
+        "colour": "#ffab40",
+        "description": "Character creation, franchise IP & merchandising potential",
+        "system_prompt": _load_agent_prompt("character_designer"),
+    },
+    "growth": {
+        "id": "growth",
+        "name": "Growth",
+        "role": "Growth Strategist",
+        "model": _OPENROUTER_AGENT_MODEL,
+        "provider": "openrouter",
+        "icon": "trending-up",
+        "colour": "#69f0ae",
+        "description": "Ethical user acquisition, SEO, social & referral strategies",
+        "system_prompt": _load_agent_prompt("growth"),
+    },
+    "trend_analyst": {
+        "id": "trend_analyst",
+        "name": "Trend Analyst",
+        "role": "Social Media Trends",
+        "model": "gemini-2.5-flash",
+        "provider": "gemini",
+        "icon": "activity",
+        "colour": "#40c4ff",
+        "description": "Trending topics, content formats & platform opportunities",
+        "system_prompt": _load_agent_prompt("trend_analyst"),
+    },
+    "financial": {
+        "id": "financial",
+        "name": "Financial",
+        "role": "CFO / Financial Analyst",
+        "model": "gemini-2.5-pro",
+        "provider": "gemini",
+        "icon": "dollar-sign",
+        "colour": "#ffd740",
+        "description": "Revenue, costs, margins, forecasts & financial modelling",
+        "system_prompt": _load_agent_prompt("financial"),
+    },
+    "investor": {
+        "id": "investor",
+        "name": "Investor",
+        "role": "VC Partner Review",
+        "model": "gemini-2.5-pro",
+        "provider": "gemini",
+        "icon": "briefcase",
+        "colour": "#b2ff59",
+        "description": "Investment memo, valuation, risks & fundraising analysis",
+        "system_prompt": _load_agent_prompt("investor"),
+    },
+    "architect": {
+        "id": "architect",
+        "name": "Architect",
+        "role": "Software Architect",
+        "model": _OPENROUTER_AGENT_MODEL,
+        "provider": "openrouter",
+        "icon": "layers",
+        "colour": "#82b1ff",
+        "description": "System design, architecture, data flow & scalability",
+        "system_prompt": _load_agent_prompt("architect"),
+    },
+    "eng_manager": {
+        "id": "eng_manager",
+        "name": "Eng Manager",
+        "role": "Engineering Manager",
+        "model": _OPENROUTER_AGENT_MODEL,
+        "provider": "openrouter",
+        "icon": "git-branch",
+        "colour": "#a7ffeb",
+        "description": "Epics, stories, tasks, estimates & delivery roadmaps",
+        "system_prompt": _load_agent_prompt("eng_manager"),
+    },
+    "qa_director": {
+        "id": "qa_director",
+        "name": "QA Director",
+        "role": "Quality Owner",
+        "model": _OPENROUTER_AGENT_MODEL,
+        "provider": "openrouter",
+        "icon": "check-circle",
+        "colour": "#00e676",
+        "description": "Test strategy, acceptance criteria & release readiness",
+        "system_prompt": _load_agent_prompt("qa_director"),
+    },
+    "qa_automation": {
+        "id": "qa_automation",
+        "name": "QA Automation",
+        "role": "Test Engineer",
+        "model": _OPENROUTER_AGENT_MODEL,
+        "provider": "openrouter",
+        "icon": "terminal",
+        "colour": "#76ff03",
+        "description": "Unit, integration, E2E & regression test code",
+        "system_prompt": _load_agent_prompt("qa_automation"),
+    },
+    "security": {
+        "id": "security",
+        "name": "Security",
+        "role": "Security Auditor",
+        "model": _OPENROUTER_AGENT_MODEL,
+        "provider": "openrouter",
+        "icon": "lock",
+        "colour": "#ff1744",
+        "description": "Vulnerability assessment, remediation & security review",
+        "system_prompt": _load_agent_prompt("security"),
     },
 }
 
-# Google Gemini API key
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
+# ── Custom Agents (user-created, persisted to JSON) ───────────────────
+_CUSTOM_AGENTS_FILE = Path(__file__).parent / "custom_agents.json"
 
 
-async def _ceo_dispatch(agent_id: str, task: str) -> dict:
+def _load_custom_agents() -> dict:
+    """Load custom agents from JSON file on disk."""
+    if _CUSTOM_AGENTS_FILE.exists():
+        try:
+            data = json.loads(_CUSTOM_AGENTS_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and len(data) > 0:
+                return data
+        except Exception:
+            pass
+    # First load — seed with service business agents
+    agents = _seed_service_agents()
+    _CUSTOM_AGENTS_FILE.write_text(json.dumps(agents, indent=2), encoding="utf-8")
+    return agents
+
+
+def _save_custom_agents(agents: dict):
+    """Persist custom agents to JSON file."""
+    _CUSTOM_AGENTS_FILE.write_text(json.dumps(agents, indent=2), encoding="utf-8")
+
+
+def _seed_service_agents() -> dict:
+    """Create service-business custom agents for UK service industry automation."""
+    now = datetime.now().isoformat()
+    agents = {}
+
+    _svc_defs = [
+        {
+            "id": "svc_vision",
+            "name": "Visual Identifier",
+            "role": "Image Scan & Recognition",
+            "icon": "eye",
+            "colour": "#18ffff",
+            "description": "Scans photos to identify pests, damage, faults & materials — outputs species ID, severity, cost estimate, and required certifications",
+            "system_prompt": (
+                "# ROLE: Visual Identification Specialist (UK Service Industry)\n\n"
+                "You analyse images submitted by customers to identify issues and provide actionable intelligence for downstream agents.\n\n"
+                "## ACCEPTED QUERIES\n"
+                "- \"What is this?\" + image description\n"
+                "- \"Customer sent a photo of [X] in their [location]\"\n"
+                "- \"Identify the pest/damage/fault in this image\"\n"
+                "- \"How much would it cost to fix what's shown?\"\n\n"
+                "## PROCESS\n"
+                "Analyse the visual evidence and produce ALL of the following:\n\n"
+                "## OUTPUT FORMAT (use exactly these headers)\n\n"
+                "**IDENTIFICATION**\n"
+                "- Subject: [exact species/issue/material — e.g. 'Vespa velutina (Asian hornet)', 'Rising damp with black mould']\n"
+                "- Confidence: [HIGH / MEDIUM / LOW]\n"
+                "- Category: [PEST | PLUMBING | ELECTRICAL | STRUCTURAL | DAMP | APPLIANCE | GARDEN | OTHER]\n\n"
+                "**SEVERITY** [1-5]\n"
+                "- 1=cosmetic, 2=minor, 3=moderate, 4=significant, 5=SAFETY CRITICAL\n"
+                "- ⚠️ NOTIFIABLE: [Yes/No — Asian hornet→NNSS, Japanese knotweed→legal, asbestos→HSE]\n\n"
+                "**COST ESTIMATE (GBP)**\n"
+                "| Item | Min | Max |\n"
+                "Use current UK 2025 market rates:\n"
+                "- Wasp nest: £50-£100 | Rat treatment 3-visit: £150-£300\n"
+                "- Asian hornet: £120-£200 + NNSS | Bed bugs/room: £300-£600\n"
+                "- Drain unblock: £80-£150 | Boiler repair: £150-£400\n"
+                "- Rewire 3-bed: £3,000-£5,000 | Damp: £500-£2,000\n"
+                "- Roof repair: £200-£1,500 | Blocked gutter: £75-£150\n\n"
+                "**REQUIRED CERTIFICATIONS**\n"
+                "- [BPCA / Gas Safe / NICEIC / NAPIT / CSCS / DBS / Asbestos Awareness / RSPH Level 2]\n\n"
+                "**URGENCY**: [EMERGENCY same-day | URGENT 24-48h | ROUTINE within 7 days]\n\n"
+                "**IMMEDIATE CUSTOMER ADVICE**\n"
+                "- Safety steps the customer should take NOW (e.g. 'Do not approach', 'Turn off at stopcock')\n\n"
+                "Always err on the side of caution. If unsure, classify as higher severity. UK context only."
+            ),
+            "model_tier": "research",
+        },
+        {
+            "id": "svc_intake",
+            "name": "Intake Specialist",
+            "role": "Customer Inquiry Handler",
+            "icon": "clipboard",
+            "colour": "#00e5ff",
+            "description": "Captures and structures customer requirements into a standardised job brief for downstream agents",
+            "system_prompt": (
+                "# ROLE: Intake Specialist (UK Service Business)\n\n"
+                "You receive raw customer inquiries — text, calls, form submissions — and produce a structured job brief.\n\n"
+                "## ACCEPTED QUERIES\n"
+                "- \"Customer says: [raw message]\"\n"
+                "- \"New inquiry from [name] about [issue] at [location]\"\n"
+                "- \"Process this customer request: [details]\"\n"
+                "- Any visual identification report from the Visual Identifier agent\n\n"
+                "## PROCESS\n"
+                "Extract or infer every field. Ask clarifying questions ONLY if safety-critical info is missing.\n\n"
+                "## OUTPUT FORMAT (use exactly these headers)\n\n"
+                "**JOB BRIEF #[auto]**\n\n"
+                "| Field | Value |\n"
+                "|---|---|\n"
+                "| Service Type | [e.g. Pest Control — Rodent] |\n"
+                "| Urgency | [EMERGENCY / URGENT / ROUTINE] |\n"
+                "| Address | [full address + postcode] |\n"
+                "| Property Type | [House / Flat / Commercial / HMO] |\n"
+                "| Access | [key safe / neighbour / tenant present / restricted hours] |\n"
+                "| Preferred Slots | [date + time preferences] |\n"
+                "| Complexity | [SIMPLE / MODERATE / COMPLEX] |\n"
+                "| Description | [2-3 sentence summary] |\n\n"
+                "**SAFETY FLAGS**: [gas smell / flooding / structural / electrical / none]\n"
+                "**VISUAL EVIDENCE**: [summary of any image analysis received, or 'None provided']\n"
+                "**NOTES**: [anything unusual — pets, parking, listed building, vulnerable customer]\n\n"
+                "Be empathetic but efficient. UK English. Every brief must be actionable by Quoter and Dispatcher."
+            ),
+            "model_tier": "execution",
+        },
+        {
+            "id": "svc_quoter",
+            "name": "Quoting Engine",
+            "role": "Pricing & Estimation",
+            "icon": "trending-up",
+            "colour": "#ffd700",
+            "description": "Generates itemised, transparent quotes with UK market rates, VAT, location adjustments, and payment terms",
+            "system_prompt": (
+                "# ROLE: Quoting Engine (UK Service Business)\n\n"
+                "You receive a job brief (and optional visual identification report) and produce a customer-ready quote.\n\n"
+                "## ACCEPTED QUERIES\n"
+                "- \"Quote this job: [job brief]\"\n"
+                "- \"Price estimate for [service] at [location]\"\n"
+                "- \"Generate quote from this identification report: [visual ID]\"\n"
+                "- \"Re-quote with adjustments: [changes]\"\n\n"
+                "## PRICING RULES\n"
+                "- Base rates: UK 2025 market averages for the trade\n"
+                "- London/SE premium: +20-30%\n"
+                "- Urgency: emergency +50-100%, urgent +25%\n"
+                "- Out-of-hours (before 08:00, after 18:00, weekends): +30-50%\n"
+                "- Bank holidays: +75-100%\n"
+                "- Congestion charge zone: +£15\n"
+                "- Parking permit areas: +£5-10\n\n"
+                "## OUTPUT FORMAT\n\n"
+                "**QUOTE — [Service Type]**\n"
+                "Ref: [Q-auto] | Valid: 14 days\n\n"
+                "| Line Item | Qty | Unit Price | Total |\n"
+                "|---|---|---|---|\n"
+                "| [Labour — description] | [hours] | [£/hr] | [£] |\n"
+                "| [Materials — itemised] | [units] | [£/unit] | [£] |\n"
+                "| [Call-out fee] | 1 | [£] | [£] |\n"
+                "| [Location adjustments] | — | — | [£] |\n\n"
+                "| | | **Subtotal** | **£X** |\n"
+                "| | | **VAT (20%)** | **£X** |\n"
+                "| | | **TOTAL** | **£X** |\n\n"
+                "**Range**: £[min] – £[max]\n"
+                "**Payment**: [X]% deposit on booking, balance on completion\n"
+                "**Assumptions**: [list anything that may change on-site]\n"
+                "**Warranty**: [if applicable]\n\n"
+                "All amounts GBP. Be transparent — customers trust itemised breakdowns."
+            ),
+            "model_tier": "execution",
+        },
+        {
+            "id": "svc_dispatcher",
+            "name": "Job Dispatcher",
+            "role": "Contractor Matching & Assignment",
+            "icon": "zap",
+            "colour": "#ff6e40",
+            "description": "Matches jobs to the right contractor by certifications, proximity, rating, and availability — generates dispatch briefs",
+            "system_prompt": (
+                "# ROLE: Job Dispatcher (UK Service Business)\n\n"
+                "You receive a job brief + compliance requirements and match the right contractor, then generate a dispatch pack.\n\n"
+                "## ACCEPTED QUERIES\n"
+                "- \"Dispatch this job: [brief]\"\n"
+                "- \"Find a contractor for [service] in [postcode area]\"\n"
+                "- \"Re-assign job [ref] — previous contractor unavailable\"\n"
+                "- \"Emergency dispatch: [details]\"\n\n"
+                "## MATCHING CRITERIA (ranked)\n"
+                "1. **Certifications match** — non-negotiable (Gas Safe, NICEIC, BPCA etc.)\n"
+                "2. **Proximity** — nearest to job postcode (search radius: 10mi routine, 20mi urgent, 30mi emergency)\n"
+                "3. **Availability** — can attend within the SLA window\n"
+                "4. **Rating** — minimum 4.0/5.0, prefer 4.5+\n"
+                "5. **Specialism** — exact match preferred over general trades\n\n"
+                "## OUTPUT FORMAT\n\n"
+                "**DISPATCH BRIEF**\n"
+                "Job Ref: [ref] | Priority: [EMERGENCY/URGENT/ROUTINE]\n\n"
+                "**Contractor Profile Required**:\n"
+                "- Certifications: [list all mandatory]\n"
+                "- Insurance: Public liability min £[2M/5M], employer's liability\n"
+                "- DBS: [Required / Not required]\n"
+                "- Search radius: [X] miles from [postcode]\n\n"
+                "**Job Pack for Contractor**:\n"
+                "- Address: [full] | Access: [instructions]\n"
+                "- Scope: [2-3 lines] | Duration: [estimated hours]\n"
+                "- Tools/materials: [list] | Customer notes: [any]\n"
+                "- Contact protocol: [call 30min before, text on arrival]\n\n"
+                "**SLA**: Respond within [X]h, attend within [X]h, complete within [X]h\n\n"
+                "Safety certifications are NON-NEGOTIABLE. Never dispatch unqualified contractors."
+            ),
+            "model_tier": "execution",
+        },
+        {
+            "id": "svc_scheduler",
+            "name": "Scheduling Coordinator",
+            "role": "Calendar & Appointment Management",
+            "icon": "bar-chart",
+            "colour": "#b388ff",
+            "description": "Manages time slots, recurring appointments, route efficiency, and reminder sequences",
+            "system_prompt": (
+                "# ROLE: Scheduling Coordinator (UK Service Business)\n\n"
+                "You receive dispatch briefs and customer preferences to produce optimal appointment schedules.\n\n"
+                "## ACCEPTED QUERIES\n"
+                "- \"Schedule this job: [dispatch brief + customer preferences]\"\n"
+                "- \"Find 3 slots for [service] in [area] this week\"\n"
+                "- \"Set up recurring [weekly/fortnightly/monthly] for [service]\"\n"
+                "- \"Reschedule job [ref] — contractor delayed / customer changed\"\n\n"
+                "## SCHEDULING RULES\n"
+                "- Standard hours: 08:00-18:00 Mon-Fri, 09:00-16:00 Sat\n"
+                "- Emergency: 24/7 available\n"
+                "- Buffer: 30min between jobs (60min in London congestion zone)\n"
+                "- School run avoidance: avoid 08:15-09:15 and 14:45-15:45 for residential\n"
+                "- UK bank holidays: emergency only, premium rate\n"
+                "- Recurring: prefer same day/time each visit for customer consistency\n\n"
+                "## OUTPUT FORMAT\n\n"
+                "**APPOINTMENT OPTIONS**\n\n"
+                "| Option | Date | Window | Travel | Notes |\n"
+                "|---|---|---|---|---|\n"
+                "| A (recommended) | [date] | [HH:MM-HH:MM] | [Xmin from prev job] | [why recommended] |\n"
+                "| B | [date] | [HH:MM-HH:MM] | [Xmin] | |\n"
+                "| C | [date] | [HH:MM-HH:MM] | [Xmin] | |\n\n"
+                "**Confirmation Template**: [ready-to-send to customer]\n"
+                "**Reminder Sequence**: 24h SMS → 1h SMS → 'On the way' live notification\n"
+                "**Preparation**: [what customer should do before visit]\n\n"
+                "Use 24-hour format. All times are GMT/BST as appropriate."
+            ),
+            "model_tier": "execution",
+        },
+        {
+            "id": "svc_customer_comms",
+            "name": "Customer Communications",
+            "role": "Client Messaging & Satisfaction",
+            "icon": "megaphone",
+            "colour": "#ff4081",
+            "description": "Drafts all customer-facing messages: confirmations, updates, follow-ups, reviews, and complaint resolution",
+            "system_prompt": (
+                "# ROLE: Customer Communications (UK Service Business)\n\n"
+                "You draft every customer-facing message across the service lifecycle. Every message must be mobile-friendly, under 150 words.\n\n"
+                "## ACCEPTED QUERIES\n"
+                "- \"Write booking confirmation for: [job details]\"\n"
+                "- \"Draft quote presentation for: [quote]\"\n"
+                "- \"Handle this complaint: [customer message]\"\n"
+                "- \"Request a review after job [ref] completion\"\n"
+                "- \"Write follow-up offer for [service] customer\"\n\n"
+                "## MESSAGE TYPES & TEMPLATES\n"
+                "Draft the specific type requested. Always include:\n"
+                "- [COMPANY] placeholder for business name\n"
+                "- Booking ref where applicable\n"
+                "- Direct contact number / email placeholder\n\n"
+                "## TONE RULES\n"
+                "- Professional but warm — like a trusted local business, NOT a call centre\n"
+                "- UK English (organise, colour, apologise)\n"
+                "- First name basis with customer\n"
+                "- Complaints: acknowledge → apologise → resolve → compensate if warranted\n"
+                "- Reviews: polite, never pushy — Google/Trustpilot link placeholder [REVIEW_LINK]\n\n"
+                "## OUTPUT FORMAT\n\n"
+                "**[MESSAGE TYPE] — [Channel: SMS/Email/WhatsApp]**\n\n"
+                "Subject (email only): [subject line]\n\n"
+                "[Message body — max 150 words, mobile-formatted]\n\n"
+                "---\n"
+                "**Sent via**: [channel] | **Timing**: [when to send relative to event]"
+            ),
+            "model_tier": "execution",
+        },
+        {
+            "id": "svc_contractor_comms",
+            "name": "Contractor Manager",
+            "role": "Supplier Relations & Job Packs",
+            "icon": "tool",
+            "colour": "#ff9100",
+            "description": "Generates contractor job packs, onboarding checklists, completion report templates, and performance scorecards",
+            "system_prompt": (
+                "# ROLE: Contractor Manager (UK Service Business)\n\n"
+                "You manage the contractor side of every job — briefing, reporting, performance, payment.\n\n"
+                "## ACCEPTED QUERIES\n"
+                "- \"Create job pack for contractor: [dispatch brief]\"\n"
+                "- \"Onboarding checklist for new [trade] contractor\"\n"
+                "- \"Generate completion report template for [service type]\"\n"
+                "- \"Calculate contractor payment for job [ref]\"\n"
+                "- \"Performance summary for contractor [name/id]\"\n\n"
+                "## OUTPUT FORMATS\n\n"
+                "### Job Pack (under 200 words)\n"
+                "**JOB [ref]** — [service type]\n"
+                "- 📍 Address: [full + postcode + what3words if available]\n"
+                "- 🔧 Scope: [clear bullet points]\n"
+                "- ⏱ Duration: [estimated] | Window: [HH:MM-HH:MM]\n"
+                "- 🧰 Bring: [tools + materials list]\n"
+                "- ⚠️ Safety: [any hazards or special requirements]\n"
+                "- 📋 On completion: [checklist — photos, certs, sign-off]\n"
+                "- 📞 Customer protocol: [call 30min before, text on arrival]\n\n"
+                "### Onboarding Checklist\n"
+                "☐ Public liability insurance (min £2M) ☐ Employer's liability\n"
+                "☐ [Trade-specific certs] ☐ DBS (if domestic) ☐ Right-to-work\n"
+                "☐ Bank details ☐ Vehicle insurance ☐ Signed T&Cs\n\n"
+                "### Payment Calc\n"
+                "Agreed rate - platform commission (%) = contractor payout\n\n"
+                "Be direct. Contractors are busy — brevity = respect."
+            ),
+            "model_tier": "execution",
+        },
+        {
+            "id": "svc_compliance",
+            "name": "Compliance Officer",
+            "role": "Regulatory & Safety Verification",
+            "icon": "shield",
+            "colour": "#64ffda",
+            "description": "Verifies certifications, flags regulatory risks, generates compliance checklists — zero tolerance for non-compliance",
+            "system_prompt": (
+                "# ROLE: Compliance Officer (UK Service Business)\n\n"
+                "You are the safety gate. No job proceeds without your sign-off. Zero tolerance for non-compliance.\n\n"
+                "## ACCEPTED QUERIES\n"
+                "- \"Compliance check for [service type] job at [location]\"\n"
+                "- \"Verify contractor [name] has certs for [job type]\"\n"
+                "- \"What certifications are needed for [work description]?\"\n"
+                "- \"Audit this visual identification report: [report]\"\n"
+                "- \"GDPR check for [data handling scenario]\"\n\n"
+                "## CERTIFICATION DATABASE\n"
+                "| Trade | Required | Body | Legal? |\n"
+                "|---|---|---|---|\n"
+                "| Gas (boilers, cookers, fires) | Gas Safe Register | Gas Safe | YES — law |\n"
+                "| Electrical (Part P) | NICEIC / NAPIT / ELECSA | DCLG scheme | YES — Building Regs |\n"
+                "| Pest control | BPCA membership + RSPH L2 | BPCA | Best practice |\n"
+                "| Pest — COSHH chemicals | COSHH training cert | HSE | YES — law |\n"
+                "| Any domestic | DBS check | DBS Service | Best practice |\n"
+                "| All trades | Public liability ≥£2M | Insurer | Required |\n"
+                "| Employing | Employer's liability ≥£5M | Insurer | YES — law |\n"
+                "| Asbestos (pre-2000) | Asbestos awareness | UKATA | YES — law |\n\n"
+                "## OUTPUT FORMAT\n\n"
+                "**COMPLIANCE REPORT — [Job Ref]**\n\n"
+                "| Check | Status | Detail |\n"
+                "|---|---|---|\n"
+                "| [Certification] | ✅ PASS / ❌ FAIL / ⚠️ EXPIRING | [details + expiry date] |\n\n"
+                "**RISK FLAGS**: [list any, or 'None']\n"
+                "**NOTIFIABLE**: [Asian hornet→NNSS / Knotweed→legal / Asbestos→HSE, or 'N/A']\n"
+                "**GDPR**: [data handling compliant? customer consent captured?]\n"
+                "**VERDICT**: [APPROVED / BLOCKED — reason]\n\n"
+                "Block the job if ANY mandatory certification is missing. Customer safety is absolute."
+            ),
+            "model_tier": "execution",
+        },
+        {
+            "id": "svc_billing",
+            "name": "Billing & Invoicing",
+            "role": "Financial Operations",
+            "icon": "briefcase",
+            "colour": "#00e676",
+            "description": "Generates invoices, calculates margins, handles deposits/refunds, and produces financial reconciliation",
+            "system_prompt": (
+                "# ROLE: Billing Specialist (UK Service Business)\n\n"
+                "You handle all financial operations from quote acceptance to payment reconciliation.\n\n"
+                "## ACCEPTED QUERIES\n"
+                "- \"Generate invoice for completed job: [details + quote]\"\n"
+                "- \"Calculate deposit for quote [ref]: [amount]\"\n"
+                "- \"Process refund for job [ref]: [reason]\"\n"
+                "- \"Monthly reconciliation for [month/year]\"\n"
+                "- \"Calculate contractor payout for job [ref]\"\n\n"
+                "## FINANCIAL RULES\n"
+                "- VAT: 20% (VAT threshold £90,000 — include even if below for readiness)\n"
+                "- Deposit: 20-50% on booking (higher for materials-heavy jobs)\n"
+                "- Balance: on completion, payable within 7 days\n"
+                "- Platform commission: configurable [X]% of gross\n"
+                "- Payment processing: 1.5-2.5% (Stripe/SumUp)\n"
+                "- Cancellation: free if 24h+ notice, 50% if <24h, 100% if no-show\n\n"
+                "## OUTPUT FORMAT\n\n"
+                "**INVOICE [INV-auto]**\n"
+                "[COMPANY] | VAT: [VAT_NUMBER] | Date: [date]\n\n"
+                "| Item | Amount |\n"
+                "|---|---|\n"
+                "| [line items from quote] | £X |\n"
+                "| **Subtotal** | **£X** |\n"
+                "| VAT (20%) | £X |\n"
+                "| **Total Due** | **£X** |\n"
+                "| Less: Deposit paid | -£X |\n"
+                "| **Balance Due** | **£X** |\n\n"
+                "Payment: Bank transfer to [BANK_DETAILS] | Ref: [INV-ref]\n"
+                "Due: [date + 7 days]\n\n"
+                "**MARGIN CALC**: Revenue £X - Contractor £X - VAT £X - Processing £X = Net £X ([X]%)\n\n"
+                "Comply with Companies Act 2006 invoicing requirements. All amounts GBP."
+            ),
+            "model_tier": "execution",
+        },
+    ]
+
+    for d in _svc_defs:
+        tier = _MODEL_TIERS.get(d["model_tier"], _MODEL_TIERS["execution"])
+        agents[d["id"]] = {
+            "id": d["id"],
+            "name": d["name"],
+            "role": d["role"],
+            "model": tier["model"],
+            "provider": tier["provider"],
+            "icon": d["icon"],
+            "colour": d["colour"],
+            "description": d["description"],
+            "system_prompt": d["system_prompt"],
+            "model_tier": d["model_tier"],
+            "custom": True,
+            "created_at": now,
+        }
+
+    log.info(f"Seeded {len(agents)} service business custom agents")
+    return agents
+
+
+_MODEL_TIERS = {
+    "strategic": {"model": _CLAUDE_AGENT_MODEL, "provider": "claude"},
+    "research":  {"model": "gemini-2.5-flash", "provider": "gemini"},
+    "execution": {"model": _OPENROUTER_AGENT_MODEL, "provider": "openrouter"},
+}
+
+
+def _get_all_agents() -> dict:
+    """Return merged dict of built-in + custom agents."""
+    merged = dict(CEO_AGENTS)
+    merged.update(_load_custom_agents())
+    return merged
+
+
+# ── Org Templates (persisted to JSON) ─────────────────────────────────
+_ORG_TEMPLATES_FILE = Path(__file__).parent / "org_templates.json"
+
+
+def _load_org_templates() -> dict:
+    if _ORG_TEMPLATES_FILE.exists():
+        try:
+            data = json.loads(_ORG_TEMPLATES_FILE.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+    # First load — seed with agile templates
+    templates = _seed_org_templates()
+    _ORG_TEMPLATES_FILE.write_text(json.dumps(templates, indent=2), encoding="utf-8")
+    return templates
+
+
+def _save_org_templates(templates: dict):
+    _ORG_TEMPLATES_FILE.write_text(json.dumps(templates, indent=2), encoding="utf-8")
+
+
+def _seed_org_templates() -> dict:
+    """Create default agile team templates using built-in agents."""
+    templates = {}
+
+    # ── 1. SCRUM SPRINT TEAM ──────────────────────────────────────
+    templates["scrum_sprint"] = {
+        "id": "scrum_sprint",
+        "name": "Scrum Sprint Team",
+        "description": "Standard agile scrum team: Product Owner sets vision, Scrum Master coordinates, dev team executes. Runs sprint planning → development → QA → retrospective.",
+        "nodes": [
+            {"agent_id": "product",      "level": 0},  # Product Owner
+            {"agent_id": "coo",          "level": 1},  # Scrum Master / Delivery
+            {"agent_id": "cto",          "level": 1},  # Tech Lead
+            {"agent_id": "architect",    "level": 2},  # Backend Dev
+            {"agent_id": "eng_manager",  "level": 2},  # Frontend Dev
+            {"agent_id": "qa_director",  "level": 2},  # QA Lead
+        ],
+        "edges": [
+            {"from": "product",     "to": "coo",         "type": "directs"},
+            {"from": "product",     "to": "cto",         "type": "directs"},
+            {"from": "coo",         "to": "architect",   "type": "directs"},
+            {"from": "coo",         "to": "eng_manager", "type": "directs"},
+            {"from": "coo",         "to": "qa_director", "type": "directs"},
+            {"from": "cto",         "to": "architect",   "type": "directs"},
+            {"from": "cto",         "to": "eng_manager", "type": "directs"},
+        ],
+        "created_at": datetime.now().isoformat(),
+    }
+
+    # ── 2. PRODUCT DISCOVERY SQUAD ────────────────────────────────
+    templates["product_discovery"] = {
+        "id": "product_discovery",
+        "name": "Product Discovery Squad",
+        "description": "Dual-track agile: discovery + delivery. PM defines problems, researchers validate, designers prototype, engineers assess feasibility.",
+        "nodes": [
+            {"agent_id": "product",           "level": 0},  # Product Manager
+            {"agent_id": "researcher",        "level": 1},  # UX Researcher
+            {"agent_id": "analyst",           "level": 1},  # Data Analyst
+            {"agent_id": "creative_director", "level": 1},  # UX Designer
+            {"agent_id": "cto",              "level": 2},  # Tech Feasibility
+            {"agent_id": "strategist",       "level": 2},  # Business Viability
+        ],
+        "edges": [
+            {"from": "product",           "to": "researcher",        "type": "directs"},
+            {"from": "product",           "to": "analyst",           "type": "directs"},
+            {"from": "product",           "to": "creative_director", "type": "directs"},
+            {"from": "researcher",        "to": "cto",              "type": "directs"},
+            {"from": "researcher",        "to": "strategist",       "type": "directs"},
+            {"from": "creative_director", "to": "cto",              "type": "directs"},
+        ],
+        "created_at": datetime.now().isoformat(),
+    }
+
+    # ── 3. DEVOPS / PLATFORM TEAM ─────────────────────────────────
+    templates["devops_platform"] = {
+        "id": "devops_platform",
+        "name": "DevOps / Platform Team",
+        "description": "SRE & platform engineering: CTO leads architecture decisions, engineers handle infrastructure, security, and CI/CD, with QA automation for reliability.",
+        "nodes": [
+            {"agent_id": "cto",           "level": 0},  # VP Engineering
+            {"agent_id": "architect",     "level": 1},  # Platform Architect
+            {"agent_id": "security",      "level": 1},  # Security Engineer
+            {"agent_id": "eng_manager",   "level": 2},  # DevOps Engineer
+            {"agent_id": "qa_automation", "level": 2},  # SRE / Automation
+        ],
+        "edges": [
+            {"from": "cto",       "to": "architect",     "type": "directs"},
+            {"from": "cto",       "to": "security",      "type": "directs"},
+            {"from": "architect", "to": "eng_manager",   "type": "directs"},
+            {"from": "architect", "to": "qa_automation", "type": "directs"},
+            {"from": "security",  "to": "qa_automation", "type": "directs"},
+        ],
+        "created_at": datetime.now().isoformat(),
+    }
+
+    # ── 4. GROWTH / GTM SQUAD ─────────────────────────────────────
+    templates["growth_gtm"] = {
+        "id": "growth_gtm",
+        "name": "Growth & GTM Squad",
+        "description": "Go-to-market execution: CMO drives strategy, growth hacker runs experiments, content creates assets, analyst measures results.",
+        "nodes": [
+            {"agent_id": "cmo",          "level": 0},  # CMO / Head of Growth
+            {"agent_id": "growth",       "level": 1},  # Growth Hacker
+            {"agent_id": "trend_analyst","level": 1},  # Market Intelligence
+            {"agent_id": "revenue",      "level": 2},  # Sales / Revenue
+            {"agent_id": "analyst",      "level": 2},  # Metrics & Analytics
+        ],
+        "edges": [
+            {"from": "cmo",          "to": "growth",        "type": "directs"},
+            {"from": "cmo",          "to": "trend_analyst", "type": "directs"},
+            {"from": "growth",       "to": "revenue",       "type": "directs"},
+            {"from": "growth",       "to": "analyst",       "type": "directs"},
+            {"from": "trend_analyst","to": "analyst",       "type": "directs"},
+        ],
+        "created_at": datetime.now().isoformat(),
+    }
+
+    # ── 5. FULL STACK PRODUCT TEAM (SAFe-style) ───────────────────
+    templates["full_product_team"] = {
+        "id": "full_product_team",
+        "name": "Full Stack Product Team",
+        "description": "Cross-functional agile team (SAFe-inspired): CEO sets vision, product & tech leads coordinate, specialists execute across engineering, design, QA, and operations.",
+        "nodes": [
+            {"agent_id": "ceo_agent",        "level": 0},  # Release Train Engineer / CEO
+            {"agent_id": "product",          "level": 1},  # Product Manager
+            {"agent_id": "cto",              "level": 1},  # Engineering Lead
+            {"agent_id": "coo",              "level": 1},  # Delivery Manager
+            {"agent_id": "architect",        "level": 2},  # System Architect
+            {"agent_id": "eng_manager",      "level": 2},  # Dev Team Lead
+            {"agent_id": "creative_director","level": 2},  # UX/Design
+            {"agent_id": "qa_director",      "level": 2},  # QA Lead
+        ],
+        "edges": [
+            {"from": "ceo_agent", "to": "product",          "type": "directs"},
+            {"from": "ceo_agent", "to": "cto",              "type": "directs"},
+            {"from": "ceo_agent", "to": "coo",              "type": "directs"},
+            {"from": "product",   "to": "creative_director","type": "directs"},
+            {"from": "product",   "to": "qa_director",      "type": "directs"},
+            {"from": "cto",       "to": "architect",        "type": "directs"},
+            {"from": "cto",       "to": "eng_manager",      "type": "directs"},
+            {"from": "coo",       "to": "eng_manager",      "type": "directs"},
+            {"from": "coo",       "to": "qa_director",      "type": "directs"},
+        ],
+        "created_at": datetime.now().isoformat(),
+    }
+
+    log.info(f"Seeded {len(templates)} default agile org templates")
+
+    # ── SERVICE BUSINESS TEMPLATES ─────────────────────────────────────────
+    # These use the custom service agents seeded by _seed_service_agents()
+
+    # ── 6. RODENT / PEST CONTROL SERVICE ───────────────────────────────────
+    templates["svc_pest_control"] = {
+        "id": "svc_pest_control",
+        "name": "🐀 Rodent & Pest Control Service",
+        "description": (
+            "End-to-end pest control: customer submits photo → visual identifier "
+            "recognises species (rat, wasp, hornet, bed bug) & estimates cost → "
+            "intake captures property details → compliance verifies BPCA/RSPH certs → "
+            "quoter prices treatment plan → dispatcher assigns certified pest controller → "
+            "scheduler books visit → comms handles confirmations → billing invoices."
+        ),
+        "category": "service",
+        "nodes": [
+            {"agent_id": "svc_vision",           "level": 0},
+            {"agent_id": "svc_intake",           "level": 0},
+            {"agent_id": "svc_compliance",        "level": 1},
+            {"agent_id": "svc_quoter",            "level": 1},
+            {"agent_id": "svc_dispatcher",        "level": 2},
+            {"agent_id": "svc_scheduler",         "level": 2},
+            {"agent_id": "svc_customer_comms",    "level": 3},
+            {"agent_id": "svc_contractor_comms",  "level": 3},
+            {"agent_id": "svc_billing",           "level": 4},
+        ],
+        "edges": [
+            {"from": "svc_vision",      "to": "svc_compliance",       "type": "directs"},
+            {"from": "svc_vision",      "to": "svc_quoter",           "type": "directs"},
+            {"from": "svc_intake",      "to": "svc_compliance",       "type": "directs"},
+            {"from": "svc_intake",      "to": "svc_quoter",           "type": "directs"},
+            {"from": "svc_compliance",  "to": "svc_dispatcher",       "type": "directs"},
+            {"from": "svc_quoter",      "to": "svc_dispatcher",       "type": "directs"},
+            {"from": "svc_quoter",      "to": "svc_scheduler",        "type": "directs"},
+            {"from": "svc_dispatcher",  "to": "svc_customer_comms",   "type": "directs"},
+            {"from": "svc_dispatcher",  "to": "svc_contractor_comms", "type": "directs"},
+            {"from": "svc_scheduler",   "to": "svc_customer_comms",   "type": "directs"},
+            {"from": "svc_customer_comms",   "to": "svc_billing",     "type": "directs"},
+            {"from": "svc_contractor_comms", "to": "svc_billing",     "type": "directs"},
+        ],
+        "created_at": datetime.now().isoformat(),
+    }
+
+    # ── 7. EMERGENCY PLUMBING SERVICE ──────────────────────────────────────
+    templates["svc_emergency_plumbing"] = {
+        "id": "svc_emergency_plumbing",
+        "name": "🔧 Emergency Plumbing Service",
+        "description": (
+            "24/7 emergency plumbing: customer sends photo of burst pipe/leak/boiler fault → "
+            "visual identifier assesses damage severity & estimates repair cost → "
+            "intake triages urgency → compliance checks Gas Safe (if boiler) → "
+            "dispatcher finds nearest available plumber → scheduler confirms ETA → "
+            "customer gets live updates → contractor submits completion report → billing."
+        ),
+        "category": "service",
+        "nodes": [
+            {"agent_id": "svc_vision",           "level": 0},
+            {"agent_id": "svc_intake",           "level": 0},
+            {"agent_id": "svc_compliance",        "level": 1},
+            {"agent_id": "svc_dispatcher",        "level": 1},
+            {"agent_id": "svc_scheduler",         "level": 2},
+            {"agent_id": "svc_customer_comms",    "level": 2},
+            {"agent_id": "svc_contractor_comms",  "level": 3},
+            {"agent_id": "svc_billing",           "level": 3},
+        ],
+        "edges": [
+            {"from": "svc_vision",      "to": "svc_compliance",       "type": "directs"},
+            {"from": "svc_vision",      "to": "svc_dispatcher",       "type": "directs"},
+            {"from": "svc_intake",      "to": "svc_compliance",       "type": "directs"},
+            {"from": "svc_intake",      "to": "svc_dispatcher",       "type": "directs"},
+            {"from": "svc_compliance",  "to": "svc_scheduler",        "type": "directs"},
+            {"from": "svc_dispatcher",  "to": "svc_scheduler",        "type": "directs"},
+            {"from": "svc_dispatcher",  "to": "svc_customer_comms",   "type": "directs"},
+            {"from": "svc_scheduler",   "to": "svc_contractor_comms", "type": "directs"},
+            {"from": "svc_customer_comms",   "to": "svc_billing",     "type": "directs"},
+            {"from": "svc_contractor_comms", "to": "svc_billing",     "type": "directs"},
+        ],
+        "created_at": datetime.now().isoformat(),
+    }
+
+    # ── 8. DOMESTIC CLEANING SERVICE ───────────────────────────────────────
+    templates["svc_cleaning"] = {
+        "id": "svc_cleaning",
+        "name": "🧹 Domestic Cleaning Service",
+        "description": (
+            "Recurring & one-off cleaning: customer sends photos of property → "
+            "visual identifier assesses room count, size, condition & extras needed → "
+            "intake captures preferences → quoter prices based on scope → "
+            "dispatcher matches DBS-checked cleaners by area → scheduler manages "
+            "recurring calendar → customer comms handles reviews & rebookings → billing."
+        ),
+        "category": "service",
+        "nodes": [
+            {"agent_id": "svc_vision",           "level": 0},
+            {"agent_id": "svc_intake",           "level": 0},
+            {"agent_id": "svc_quoter",            "level": 1},
+            {"agent_id": "svc_dispatcher",        "level": 2},
+            {"agent_id": "svc_scheduler",         "level": 2},
+            {"agent_id": "svc_customer_comms",    "level": 3},
+            {"agent_id": "svc_contractor_comms",  "level": 3},
+            {"agent_id": "svc_billing",           "level": 4},
+        ],
+        "edges": [
+            {"from": "svc_vision",      "to": "svc_quoter",           "type": "directs"},
+            {"from": "svc_intake",      "to": "svc_quoter",           "type": "directs"},
+            {"from": "svc_quoter",      "to": "svc_dispatcher",       "type": "directs"},
+            {"from": "svc_quoter",      "to": "svc_scheduler",        "type": "directs"},
+            {"from": "svc_dispatcher",  "to": "svc_customer_comms",   "type": "directs"},
+            {"from": "svc_dispatcher",  "to": "svc_contractor_comms", "type": "directs"},
+            {"from": "svc_scheduler",   "to": "svc_customer_comms",   "type": "directs"},
+            {"from": "svc_customer_comms",   "to": "svc_billing",     "type": "directs"},
+            {"from": "svc_contractor_comms", "to": "svc_billing",     "type": "directs"},
+        ],
+        "created_at": datetime.now().isoformat(),
+    }
+
+    # ── 9. ELECTRICAL SERVICES ─────────────────────────────────────────────
+    templates["svc_electrical"] = {
+        "id": "svc_electrical",
+        "name": "⚡ Electrical Services",
+        "description": (
+            "Domestic & commercial electrical: customer sends photo of consumer unit, "
+            "wiring, or fault → visual identifier diagnoses issue & flags safety risks → "
+            "intake captures scope → compliance verifies NICEIC/NAPIT → "
+            "quoter itemises materials + labour → dispatcher assigns electrician → "
+            "completion includes certificates (Part P, BS 7671) → billing."
+        ),
+        "category": "service",
+        "nodes": [
+            {"agent_id": "svc_vision",           "level": 0},
+            {"agent_id": "svc_intake",           "level": 0},
+            {"agent_id": "svc_compliance",        "level": 1},
+            {"agent_id": "svc_quoter",            "level": 1},
+            {"agent_id": "svc_dispatcher",        "level": 2},
+            {"agent_id": "svc_scheduler",         "level": 2},
+            {"agent_id": "svc_customer_comms",    "level": 3},
+            {"agent_id": "svc_contractor_comms",  "level": 3},
+            {"agent_id": "svc_billing",           "level": 4},
+        ],
+        "edges": [
+            {"from": "svc_vision",      "to": "svc_compliance",       "type": "directs"},
+            {"from": "svc_vision",      "to": "svc_quoter",           "type": "directs"},
+            {"from": "svc_intake",      "to": "svc_compliance",       "type": "directs"},
+            {"from": "svc_intake",      "to": "svc_quoter",           "type": "directs"},
+            {"from": "svc_compliance",  "to": "svc_dispatcher",       "type": "directs"},
+            {"from": "svc_quoter",      "to": "svc_dispatcher",       "type": "directs"},
+            {"from": "svc_quoter",      "to": "svc_scheduler",        "type": "directs"},
+            {"from": "svc_dispatcher",  "to": "svc_customer_comms",   "type": "directs"},
+            {"from": "svc_dispatcher",  "to": "svc_contractor_comms", "type": "directs"},
+            {"from": "svc_scheduler",   "to": "svc_customer_comms",   "type": "directs"},
+            {"from": "svc_customer_comms",   "to": "svc_billing",     "type": "directs"},
+            {"from": "svc_contractor_comms", "to": "svc_billing",     "type": "directs"},
+        ],
+        "created_at": datetime.now().isoformat(),
+    }
+
+    # ── 10. PROPERTY MAINTENANCE (Landlord/Letting Agent) ──────────────────
+    templates["svc_property_maintenance"] = {
+        "id": "svc_property_maintenance",
+        "name": "🏠 Property Maintenance",
+        "description": (
+            "Landlord & letting agent repairs: tenant sends photo of issue → "
+            "visual identifier diagnoses problem (damp, mould, structural, appliance) → "
+            "intake triages urgency → quoter estimates repair → compliance checks certs → "
+            "dispatcher matches tradesperson → scheduler coordinates tenant access → "
+            "contractor completes with photos → billing splits as configured."
+        ),
+        "category": "service",
+        "nodes": [
+            {"agent_id": "svc_vision",           "level": 0},
+            {"agent_id": "svc_intake",           "level": 0},
+            {"agent_id": "svc_quoter",            "level": 1},
+            {"agent_id": "svc_compliance",        "level": 1},
+            {"agent_id": "svc_dispatcher",        "level": 2},
+            {"agent_id": "svc_scheduler",         "level": 2},
+            {"agent_id": "svc_customer_comms",    "level": 3},
+            {"agent_id": "svc_contractor_comms",  "level": 3},
+            {"agent_id": "svc_billing",           "level": 4},
+        ],
+        "edges": [
+            {"from": "svc_vision",      "to": "svc_quoter",           "type": "directs"},
+            {"from": "svc_vision",      "to": "svc_compliance",       "type": "directs"},
+            {"from": "svc_intake",      "to": "svc_quoter",           "type": "directs"},
+            {"from": "svc_intake",      "to": "svc_compliance",       "type": "directs"},
+            {"from": "svc_quoter",      "to": "svc_dispatcher",       "type": "directs"},
+            {"from": "svc_compliance",  "to": "svc_dispatcher",       "type": "directs"},
+            {"from": "svc_quoter",      "to": "svc_scheduler",        "type": "directs"},
+            {"from": "svc_dispatcher",  "to": "svc_customer_comms",   "type": "directs"},
+            {"from": "svc_dispatcher",  "to": "svc_contractor_comms", "type": "directs"},
+            {"from": "svc_scheduler",   "to": "svc_customer_comms",   "type": "directs"},
+            {"from": "svc_customer_comms",   "to": "svc_billing",     "type": "directs"},
+            {"from": "svc_contractor_comms", "to": "svc_billing",     "type": "directs"},
+        ],
+        "created_at": datetime.now().isoformat(),
+    }
+
+    # ── 11. REMOVALS & MAN WITH A VAN ─────────────────────────────────────
+    templates["svc_removals"] = {
+        "id": "svc_removals",
+        "name": "📦 Removals & Man with a Van",
+        "description": (
+            "House/office moves: customer sends photos of items/rooms → "
+            "visual identifier estimates volume, fragile items, special handling → "
+            "intake captures addresses & constraints → quoter calculates van size, "
+            "crew, distance → dispatcher assigns crew + vehicle → scheduler plans route → "
+            "customer gets tracking updates → billing handles deposits & final balance."
+        ),
+        "category": "service",
+        "nodes": [
+            {"agent_id": "svc_vision",           "level": 0},
+            {"agent_id": "svc_intake",           "level": 0},
+            {"agent_id": "svc_quoter",            "level": 1},
+            {"agent_id": "svc_dispatcher",        "level": 2},
+            {"agent_id": "svc_scheduler",         "level": 2},
+            {"agent_id": "svc_customer_comms",    "level": 3},
+            {"agent_id": "svc_contractor_comms",  "level": 3},
+            {"agent_id": "svc_billing",           "level": 4},
+        ],
+        "edges": [
+            {"from": "svc_vision",      "to": "svc_quoter",           "type": "directs"},
+            {"from": "svc_intake",      "to": "svc_quoter",           "type": "directs"},
+            {"from": "svc_quoter",      "to": "svc_dispatcher",       "type": "directs"},
+            {"from": "svc_quoter",      "to": "svc_scheduler",        "type": "directs"},
+            {"from": "svc_dispatcher",  "to": "svc_customer_comms",   "type": "directs"},
+            {"from": "svc_dispatcher",  "to": "svc_contractor_comms", "type": "directs"},
+            {"from": "svc_scheduler",   "to": "svc_customer_comms",   "type": "directs"},
+            {"from": "svc_customer_comms",   "to": "svc_billing",     "type": "directs"},
+            {"from": "svc_contractor_comms", "to": "svc_billing",     "type": "directs"},
+        ],
+        "created_at": datetime.now().isoformat(),
+    }
+
+    # ── 12. GARDEN & LANDSCAPING ───────────────────────────────────────────
+    templates["svc_garden"] = {
+        "id": "svc_garden",
+        "name": "🌿 Garden & Landscaping",
+        "description": (
+            "Garden maintenance & landscaping: customer sends photos of garden → "
+            "visual identifier assesses size, condition, plant species, disease/pests → "
+            "intake captures requirements → quoter prices per-visit or project → "
+            "dispatcher matches gardener/landscaper by specialism → scheduler manages "
+            "recurring slots → seasonal upsells (autumn clearance, spring planting)."
+        ),
+        "category": "service",
+        "nodes": [
+            {"agent_id": "svc_vision",           "level": 0},
+            {"agent_id": "svc_intake",           "level": 0},
+            {"agent_id": "svc_quoter",            "level": 1},
+            {"agent_id": "svc_dispatcher",        "level": 2},
+            {"agent_id": "svc_scheduler",         "level": 2},
+            {"agent_id": "svc_customer_comms",    "level": 3},
+            {"agent_id": "svc_contractor_comms",  "level": 3},
+            {"agent_id": "svc_billing",           "level": 4},
+        ],
+        "edges": [
+            {"from": "svc_vision",      "to": "svc_quoter",           "type": "directs"},
+            {"from": "svc_intake",      "to": "svc_quoter",           "type": "directs"},
+            {"from": "svc_quoter",      "to": "svc_dispatcher",       "type": "directs"},
+            {"from": "svc_quoter",      "to": "svc_scheduler",        "type": "directs"},
+            {"from": "svc_dispatcher",  "to": "svc_customer_comms",   "type": "directs"},
+            {"from": "svc_dispatcher",  "to": "svc_contractor_comms", "type": "directs"},
+            {"from": "svc_scheduler",   "to": "svc_customer_comms",   "type": "directs"},
+            {"from": "svc_customer_comms",   "to": "svc_billing",     "type": "directs"},
+            {"from": "svc_contractor_comms", "to": "svc_billing",     "type": "directs"},
+        ],
+        "created_at": datetime.now().isoformat(),
+    }
+
+    log.info(f"Seeded {len(templates)} total org templates (agile + service)")
+    return templates
+
+
+# ── Org Runs (in-memory, keyed by run_id) ─────────────────────────────
+_ORG_RUNS: dict = {}
+
+
+async def _org_execute_agent(agent_id: str, brief: str, directive: str) -> dict:
+    """Execute a single agent with a brief. Returns output + real cost."""
+    all_agents = _get_all_agents()
+    agent = all_agents.get(agent_id)
+    if not agent:
+        return {"output": f"[ERROR] Unknown agent: {agent_id}", "cost_usd": 0}
+
+    task_prompt = (
+        f"## DIRECTIVE\n{directive}\n\n"
+        f"## YOUR BRIEF\n{brief}\n\n"
+        "## INSTRUCTIONS\n"
+        "Respond concisely. Focus only on your area of expertise. "
+        "Keep your response under 600 words."
+    )
+    # Snapshot costs before dispatch to compute real delta
+    _pre_claude = _claude_usage["daily_cost_usd"]
+    _pre_or = _openrouter_usage["daily_cost_usd"]
+
+    result = await _ceo_dispatch(agent_id, task_prompt, source="org_run")
+    output = result.get("response", result.get("error", "No response"))
+
+    # Real cost = delta across all providers (dispatch may fallback)
+    cost = (_claude_usage["daily_cost_usd"] - _pre_claude) + \
+           (_openrouter_usage["daily_cost_usd"] - _pre_or)
+    return {"output": output, "cost_usd": round(cost, 6)}
+
+
+async def _org_compress_brief(agent_output: str, child_agents: list, directive: str) -> dict:
+    """Compress an agent's output into targeted briefs for its direct reports.
+    Returns {agent_id: brief_text} for each child."""
+    if not child_agents:
+        return {}
+    child_names = ", ".join(child_agents)
+    compress_prompt = (
+        f"You are a brief compiler. Given the output below, create a SHORT focused brief "
+        f"(max 200 words each) for each of these team members: {child_names}.\n"
+        f"Each brief should contain ONLY the information relevant to that team member's role.\n\n"
+        f"## DIRECTIVE\n{directive}\n\n"
+        f"## PARENT AGENT OUTPUT\n{agent_output}\n\n"
+        f"Format your response as:\n"
+    )
+    for cid in child_agents:
+        compress_prompt += f"### BRIEF FOR {cid}\n[brief here]\n\n"
+
+    # Use cheapest model for compression — route to OpenRouter (GPT-4o-mini)
+    messages = [
+        {"role": "system", "content": "You are a concise brief compiler. Extract and focus information."},
+        {"role": "user", "content": compress_prompt},
+    ]
+    try:
+        reply = None
+        if OPENROUTER_API_KEY:
+            reply = await _chat_openrouter(messages, max_tokens=1200, temperature=0.3)
+        if not reply:
+            reply = await _chat_llm(messages, max_tokens=1200, purpose="org_brief_compress")
+    except Exception:
+        # Fallback: send truncated parent output to all children
+        truncated = agent_output[:500]
+        return {cid: truncated for cid in child_agents}
+
+    # Parse briefs from response
+    briefs = {}
+    for cid in child_agents:
+        marker = f"### BRIEF FOR {cid}"
+        idx = reply.find(marker) if reply else -1
+        if idx >= 0:
+            start = idx + len(marker)
+            # Find next marker or end
+            next_markers = [reply.find(f"### BRIEF FOR {other}", start) for other in child_agents if other != cid]
+            next_markers = [m for m in next_markers if m > 0]
+            end = min(next_markers) if next_markers else len(reply)
+            briefs[cid] = reply[start:end].strip()
+        else:
+            briefs[cid] = agent_output[:400]  # fallback
+    return briefs
+
+
+async def _org_run_level(run_id: str, level: int):
+    """Execute all agents at a given level in the org run (parallel)."""
+    run = _ORG_RUNS.get(run_id)
+    if not run:
+        return
+
+    nodes_at_level = [n for n in run["nodes"] if n["level"] == level and n["status"] == "pending"]
+    if not nodes_at_level:
+        # Check if there are more levels
+        max_level = max(n["level"] for n in run["nodes"])
+        if level >= max_level:
+            run["status"] = "complete"
+            run["completed_at"] = datetime.now().isoformat()
+        else:
+            run["status"] = "awaiting_approval"
+            run["current_level"] = level
+        return
+
+    run["current_level"] = level
+    run["status"] = "running"
+
+    # Mark nodes as running
+    for n in nodes_at_level:
+        n["status"] = "running"
+
+    # Execute all agents at this level in parallel
+    async def _run_node(node):
+        try:
+            result = await _org_execute_agent(node["agent_id"], node["brief_in"], run["directive"])
+            node["output"] = result["output"]
+            node["cost_usd"] = result["cost_usd"]
+            node["status"] = "complete"
+            run["total_cost_usd"] += result["cost_usd"]
+        except Exception as e:
+            node["status"] = "error"
+            node["output"] = str(e)
+
+    await asyncio.gather(*[_run_node(n) for n in nodes_at_level])
+
+    # Now generate briefs for next level children
+    org = _load_org_templates().get(run["org_id"], {})
+    edges = org.get("edges", [])
+
+    for node in nodes_at_level:
+        if node["status"] != "complete":
+            continue
+        # Find children of this node
+        child_ids = [e["to"] for e in edges if e["from"] == node["agent_id"] and e.get("type") == "directs"]
+        if child_ids:
+            briefs = await _org_compress_brief(node["output"], child_ids, run["directive"])
+            for cid, brief_text in briefs.items():
+                for n in run["nodes"]:
+                    if n["agent_id"] == cid and n["status"] == "pending":
+                        n["brief_in"] = brief_text
+
+    # Set status to awaiting_approval (manual gate)
+    next_level = level + 1
+    has_next = any(n["level"] == next_level for n in run["nodes"])
+    if has_next:
+        run["status"] = "awaiting_approval"
+        run["approval_level"] = next_level
+    else:
+        # Final level done — run synthesis if configured
+        run["status"] = "complete"
+        run["completed_at"] = datetime.now().isoformat()
+
+
+# Google Gemini API key (loaded at top of file)
+
+
+async def _ceo_dispatch(agent_id: str, task: str, source: str = "dispatch",
+                        broadcast_id: str | None = None) -> dict:
     """Dispatch a task to a CEO sub-agent and return the result."""
-    agent = CEO_AGENTS.get(agent_id)
+    agent = _get_all_agents().get(agent_id)
     if not agent:
         return {"error": f"Unknown agent: {agent_id}"}
 
+    # ── Context injection: pull relevant past work from DB ─────────────
+    system_prompt = agent["system_prompt"]
+    try:
+        # Pull last 3 results from THIS agent + search for task-relevant results
+        prior_own = arbiter_db.get_agent_results(agent_id=agent_id, limit=3)
+        # Extract keywords from task for cross-agent search (first 5 significant words)
+        _stop = {"the", "a", "an", "and", "or", "for", "to", "in", "on", "of", "is", "it",
+                 "my", "our", "your", "this", "that", "what", "how", "why", "please", "can"}
+        keywords = [w for w in task.lower().split() if w not in _stop and len(w) > 2][:5]
+        prior_related = []
+        if keywords:
+            search_q = " ".join(keywords[:3])
+            prior_related = arbiter_db.get_agent_results(search=search_q, limit=3)
+            # De-duplicate against own results
+            own_ids = {r["id"] for r in prior_own}
+            prior_related = [r for r in prior_related if r["id"] not in own_ids]
+
+        if prior_own or prior_related:
+            ctx_parts = ["\n\n## Previous Work (from ARBITER memory — use as context, don't repeat verbatim)"]
+            for r in prior_own[:3]:
+                resp_preview = (r.get("response") or "")[:800]
+                if resp_preview:
+                    ctx_parts.append(f"[{r['created_at'][:10]}] Your prior work on \"{r['task'][:80]}\":\n{resp_preview}")
+            for r in prior_related[:2]:
+                resp_preview = (r.get("response") or "")[:600]
+                if resp_preview:
+                    ctx_parts.append(f"[{r['created_at'][:10]}] {r['agent_name']} on \"{r['task'][:80]}\":\n{resp_preview}")
+            if len(ctx_parts) > 1:  # More than just the header
+                system_prompt += "\n".join(ctx_parts)
+                log.info(f"CEO dispatch [{agent_id}]: injected {len(ctx_parts)-1} prior results as context")
+    except Exception as e:
+        log.warning(f"CEO context injection error (non-fatal): {e}")
+
     messages = [
-        {"role": "system", "content": agent["system_prompt"]},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": task},
     ]
 
@@ -1339,49 +3184,510 @@ async def _ceo_dispatch(agent_id: str, task: str) -> dict:
     model = agent["model"]
 
     try:
-        if provider == "gemini" and GOOGLE_API_KEY:
-            # Use Google Gemini via OpenAI-compatible endpoint
-            from openai import OpenAI as _OAI
-            gemini = _OAI(
-                api_key=GOOGLE_API_KEY,
-                base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        if provider == "claude" and ANTHROPIC_API_KEY:
+            # Strategic agents via Claude Sonnet (with budget safeguards)
+            block = _claude_check_budget()
+            if block:
+                log.warning(f"Claude blocked ({block}) — falling back to OpenRouter for [{agent_id}]")
+                if OPENROUTER_API_KEY:
+                    reply = await _chat_openrouter(
+                        messages, max_tokens=2400, temperature=0.6,
+                        model=_OPENROUTER_AGENT_MODEL,
+                    )
+                else:
+                    reply = await _chat_llm(messages, max_tokens=2400, purpose=f"ceo-{agent_id}")
+            else:
+                # Use _chat_claude which handles Anthropic format conversion + usage tracking
+                # But override the model to use Sonnet for agent work
+                client = _get_anthropic()
+                if client:
+                    # Convert messages to Anthropic format
+                    system_text = ""
+                    api_messages = []
+                    for m in messages:
+                        role = m.get("role", "user")
+                        content = m.get("content", "")
+                        if role == "system":
+                            system_text += content + "\n"
+                        else:
+                            api_role = "assistant" if role == "assistant" else "user"
+                            if api_messages and api_messages[-1]["role"] == api_role:
+                                api_messages[-1]["content"] += "\n" + content
+                            else:
+                                api_messages.append({"role": api_role, "content": content})
+                    if not api_messages or api_messages[0]["role"] != "user":
+                        api_messages.insert(0, {"role": "user", "content": "Please respond."})
+
+                    _create_kwargs = {
+                        "model": model,  # Uses _CLAUDE_AGENT_MODEL (Sonnet)
+                        "max_tokens": 2400,
+                        "temperature": 0.6,
+                        "messages": api_messages,
+                    }
+                    if system_text.strip():
+                        _create_kwargs["system"] = system_text.strip()
+                    resp = await asyncio.to_thread(client.messages.create, **_create_kwargs)
+                    reply = resp.content[0].text.strip() if resp.content else ""
+                    # Record usage for budget tracking
+                    input_tok = resp.usage.input_tokens if resp.usage else 0
+                    output_tok = resp.usage.output_tokens if resp.usage else 0
+                    _claude_record_usage(input_tok, output_tok)
+                    log.info(f"Claude agent [{agent_id}]: {input_tok}in/{output_tok}out tokens via {model}")
+                else:
+                    reply = await _chat_llm(messages, max_tokens=2400, purpose=f"ceo-{agent_id}")
+        elif provider == "gemini" and GOOGLE_API_KEY:
+            # Check free-tier cap before calling
+            gemini_block = _gemini_check_budget()
+            if gemini_block:
+                log.warning(f"Gemini blocked ({gemini_block}) — falling back to OpenRouter for [{agent_id}]")
+                if OPENROUTER_API_KEY:
+                    reply = await _chat_openrouter(
+                        messages, max_tokens=2400, temperature=0.6,
+                        model=_OPENROUTER_AGENT_MODEL,
+                    )
+                else:
+                    reply = await _chat_llm(messages, max_tokens=2400, purpose=f"ceo-{agent_id}")
+            else:
+                # Use Google Gemini via OpenAI-compatible endpoint (free tier)
+                from openai import OpenAI as _OAI
+                gemini = _OAI(
+                    api_key=GOOGLE_API_KEY,
+                    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+                )
+                try:
+                    resp = gemini.chat.completions.create(
+                        model=model, messages=messages,
+                        max_tokens=2400, temperature=0.6,
+                        timeout=_OPENROUTER_TIMEOUT,
+                    )
+                    reply = resp.choices[0].message.content.strip()
+                    # Capture tokens from OpenAI-compatible response
+                    _gin = getattr(resp.usage, 'prompt_tokens', 0) if resp.usage else 0
+                    _gout = getattr(resp.usage, 'completion_tokens', 0) if resp.usage else 0
+                    _gemini_record_success(_gin, _gout)
+                except Exception as gem_err:
+                    _gemini_record_error()
+                    log.warning(f"Gemini error for [{agent_id}]: {gem_err} — falling back to OpenRouter")
+                    if OPENROUTER_API_KEY:
+                        reply = await _chat_openrouter(
+                            messages, max_tokens=2400, temperature=0.6,
+                            model=_OPENROUTER_AGENT_MODEL,
+                        )
+                    else:
+                        reply = await _chat_llm(messages, max_tokens=2400, purpose=f"ceo-{agent_id}")
+        elif provider == "openrouter" and OPENROUTER_API_KEY:
+            # Route through OpenRouter with full cost safeguards
+            reply = await _chat_openrouter(
+                messages, max_tokens=2400, temperature=0.6,
+                model=model,
             )
-            resp = gemini.chat.completions.create(
-                model=model, messages=messages,
-                max_tokens=1200, temperature=0.6,
-            )
-            reply = resp.choices[0].message.content.strip()
         elif provider == "openai" and OPENAI_API_KEY:
             resp = oai.chat.completions.create(
                 model=model, messages=messages,
-                max_tokens=1200, temperature=0.6,
+                max_tokens=2400, temperature=0.6,
             )
             reply = resp.choices[0].message.content.strip()
         else:
-            # Fallback to ARBITER's standard LLM chain
-            reply = await _chat_llm(messages, max_tokens=1200, purpose=f"ceo-{agent_id}")
+            # Fallback to ARBITER's standard LLM chain (Ollama)
+            reply = await _chat_llm(messages, max_tokens=2400, purpose=f"ceo-{agent_id}")
     except Exception as e:
         log.error(f"CEO dispatch [{agent_id}] error: {e}")
+        arbiter_db.save_agent_result(
+            agent_id=agent_id, agent_name=agent["name"], task=task,
+            error=str(e), model=model, source=source,
+            broadcast_id=broadcast_id,
+        )
         return {"error": str(e), "agent_id": agent_id}
 
     if not reply:
-        return {"error": "No response from LLM", "agent_id": agent_id}
+        error_msg = "No response from LLM"
+        arbiter_db.save_agent_result(
+            agent_id=agent_id, agent_name=agent["name"], task=task,
+            error=error_msg, model=model, source=source,
+            broadcast_id=broadcast_id,
+        )
+        return {"error": error_msg, "agent_id": agent_id}
 
+    rid = arbiter_db.save_agent_result(
+        agent_id=agent_id, agent_name=agent["name"], task=task,
+        response=reply, model=model, source=source,
+        broadcast_id=broadcast_id,
+    )
     return {
         "agent_id": agent_id,
         "agent_name": agent["name"],
         "model": model,
         "response": reply,
+        "result_id": rid,
     }
 
 
 @app.get("/api/ceo/agents")
 async def ceo_agents():
-    """Return the CEO sub-agent definitions for the UI."""
+    """Return the CEO sub-agent definitions for the UI (built-in + custom)."""
+    all_agents = _get_all_agents()
+    return [
+        {**{k: v for k, v in a.items() if k != "system_prompt"},
+         "custom": a.get("custom", False)}
+        for a in all_agents.values()
+    ]
+
+
+# ── Custom Agent CRUD ─────────────────────────────────────────────────
+
+@app.get("/api/agents/custom")
+async def agents_custom_list():
+    """List all custom agents."""
+    agents = _load_custom_agents()
     return [
         {k: v for k, v in a.items() if k != "system_prompt"}
-        for a in CEO_AGENTS.values()
+        for a in agents.values()
     ]
+
+
+@app.post("/api/agents/custom")
+async def agents_custom_create(request: Request):
+    """Create a new custom agent."""
+    body = await request.json()
+    name = body.get("name", "").strip()
+    if not name:
+        return {"error": "name is required"}
+    if len(name) > _MAX_NAME_LEN:
+        return {"error": f"name too long (max {_MAX_NAME_LEN} chars)"}
+
+    agent_id = re.sub(r'[^a-z0-9]+', '_', name.lower()).strip('_')
+    if not agent_id:
+        return {"error": "Invalid agent name"}
+
+    # Check for conflicts with built-in agents
+    if agent_id in CEO_AGENTS:
+        return {"error": f"Agent ID '{agent_id}' conflicts with a built-in agent"}
+
+    description = body.get("description", "").strip()
+    if len(description) > _MAX_DESCRIPTION_LEN:
+        return {"error": f"description too long (max {_MAX_DESCRIPTION_LEN} chars)"}
+
+    tier_key = body.get("model_tier", "execution")
+    tier = _MODEL_TIERS.get(tier_key, _MODEL_TIERS["execution"])
+
+    system_prompt = body.get("system_prompt", "").strip()
+    if len(system_prompt) > _MAX_SYSTEM_PROMPT_LEN:
+        return {"error": f"system_prompt too long (max {_MAX_SYSTEM_PROMPT_LEN} chars)"}
+    if not system_prompt:
+        system_prompt = f"You are {name}. {description}. Follow the directive precisely."
+
+    agent = {
+        "id": agent_id,
+        "name": name,
+        "role": body.get("role", "Custom Agent"),
+        "model": tier["model"],
+        "provider": tier["provider"],
+        "icon": body.get("icon", "user"),
+        "colour": body.get("colour", "#00e5ff"),
+        "description": description,
+        "system_prompt": system_prompt,
+        "model_tier": tier_key,
+        "custom": True,
+        "created_at": datetime.now().isoformat(),
+    }
+
+    agents = _load_custom_agents()
+    agents[agent_id] = agent
+    _save_custom_agents(agents)
+
+    log.info(f"Custom agent created: {agent_id} ({name}, tier={tier_key})")
+    return {k: v for k, v in agent.items() if k != "system_prompt"}
+
+
+@app.put("/api/agents/custom/{agent_id}")
+async def agents_custom_update(agent_id: str, request: Request):
+    """Update a custom agent."""
+    agents = _load_custom_agents()
+    if agent_id not in agents:
+        return {"error": f"Custom agent '{agent_id}' not found"}
+
+    body = await request.json()
+    agent = agents[agent_id]
+
+    # ── Input length validation ──
+    if "name" in body and len(str(body["name"])) > _MAX_NAME_LEN:
+        return {"error": f"name too long (max {_MAX_NAME_LEN} chars)"}
+    if "description" in body and len(str(body["description"])) > _MAX_DESCRIPTION_LEN:
+        return {"error": f"description too long (max {_MAX_DESCRIPTION_LEN} chars)"}
+    if "system_prompt" in body and len(str(body["system_prompt"])) > _MAX_SYSTEM_PROMPT_LEN:
+        return {"error": f"system_prompt too long (max {_MAX_SYSTEM_PROMPT_LEN} chars)"}
+
+    for field in ("name", "role", "description", "system_prompt", "icon", "colour"):
+        if field in body:
+            agent[field] = body[field]
+
+    if "model_tier" in body:
+        tier = _MODEL_TIERS.get(body["model_tier"], _MODEL_TIERS["execution"])
+        agent["model"] = tier["model"]
+        agent["provider"] = tier["provider"]
+        agent["model_tier"] = body["model_tier"]
+
+    agents[agent_id] = agent
+    _save_custom_agents(agents)
+    return {k: v for k, v in agent.items() if k != "system_prompt"}
+
+
+@app.post("/api/agents/custom/{agent_id}/delete")
+async def agents_custom_delete(agent_id: str):
+    """Delete a custom agent."""
+    agents = _load_custom_agents()
+    if agent_id not in agents:
+        return {"error": f"Custom agent '{agent_id}' not found"}
+    del agents[agent_id]
+    _save_custom_agents(agents)
+    log.info(f"Custom agent deleted: {agent_id}")
+    return {"ok": True}
+
+
+# ── Org Template CRUD ─────────────────────────────────────────────────
+
+@app.get("/api/org/templates")
+async def org_templates_list():
+    """List all org templates."""
+    templates = _load_org_templates()
+    return [
+        {k: v for k, v in t.items()}
+        for t in templates.values()
+    ]
+
+
+@app.post("/api/org/templates")
+async def org_templates_create(request: Request):
+    """Create a new org template."""
+    body = await request.json()
+    name = body.get("name", "").strip()
+    if not name:
+        return {"error": "name is required"}
+    if len(name) > _MAX_NAME_LEN:
+        return {"error": f"name too long (max {_MAX_NAME_LEN} chars)"}
+    description = body.get("description", "").strip()
+    if len(description) > _MAX_DESCRIPTION_LEN:
+        return {"error": f"description too long (max {_MAX_DESCRIPTION_LEN} chars)"}
+    nodes = body.get("nodes", [])
+    if not isinstance(nodes, list) or len(nodes) > 50:
+        return {"error": "nodes must be a list with max 50 entries"}
+    edges = body.get("edges", [])
+    if not isinstance(edges, list) or len(edges) > 200:
+        return {"error": "edges must be a list with max 200 entries"}
+
+    template_id = arbiter_db._new_id()
+    template = {
+        "id": template_id,
+        "name": name,
+        "description": description,
+        "nodes": nodes,
+        "edges": edges,
+        "created_at": datetime.now().isoformat(),
+    }
+
+    templates = _load_org_templates()
+    templates[template_id] = template
+    _save_org_templates(templates)
+    log.info(f"Org template created: {template_id} ({name})")
+    return template
+
+
+@app.put("/api/org/templates/{template_id}")
+async def org_templates_update(template_id: str, request: Request):
+    """Update an org template."""
+    templates = _load_org_templates()
+    if template_id not in templates:
+        return {"error": "Template not found"}
+
+    body = await request.json()
+    template = templates[template_id]
+    for field in ("name", "description", "nodes", "edges"):
+        if field in body:
+            template[field] = body[field]
+
+    templates[template_id] = template
+    _save_org_templates(templates)
+    return template
+
+
+@app.post("/api/org/templates/{template_id}/delete")
+async def org_templates_delete(template_id: str):
+    """Delete an org template."""
+    templates = _load_org_templates()
+    if template_id not in templates:
+        return {"error": "Template not found"}
+    del templates[template_id]
+    _save_org_templates(templates)
+    return {"ok": True}
+
+
+# ── Org Execution (manual level-by-level with approval gates) ─────────
+
+@app.post("/api/org/run")
+async def org_run_create(request: Request):
+    """Start an org execution run. Executes level 0 (root) immediately."""
+    body = await request.json()
+    org_id = body.get("org_id", "")
+    directive = body.get("directive", "").strip()
+    if not org_id or not directive:
+        return {"error": "org_id and directive are required"}
+    if len(directive) > _MAX_DIRECTIVE_LEN:
+        return {"error": f"directive too long (max {_MAX_DIRECTIVE_LEN} chars)"}
+
+    templates = _load_org_templates()
+    org = templates.get(org_id)
+    if not org:
+        return {"error": f"Org template '{org_id}' not found"}
+
+    # Build run nodes from org template nodes
+    run_nodes = []
+    for node_def in org.get("nodes", []):
+        run_nodes.append({
+            "agent_id": node_def["agent_id"],
+            "level": node_def.get("level", 0),
+            "status": "pending",
+            "brief_in": directive if node_def.get("level", 0) == 0 else "",
+            "output": "",
+            "cost_usd": 0,
+        })
+
+    if not run_nodes:
+        return {"error": "Org template has no agents"}
+
+    run_id = arbiter_db._new_id()
+    run = {
+        "id": run_id,
+        "org_id": org_id,
+        "org_name": org.get("name", ""),
+        "directive": directive,
+        "status": "running",
+        "current_level": 0,
+        "approval_level": None,
+        "nodes": run_nodes,
+        "total_cost_usd": 0.0,
+        "started_at": datetime.now().isoformat(),
+        "completed_at": None,
+    }
+    _ORG_RUNS[run_id] = run
+
+    # Execute level 0 (root agents) immediately
+    await _org_run_level(run_id, 0)
+
+    return _ORG_RUNS[run_id]
+
+
+@app.get("/api/org/run/{run_id}")
+async def org_run_get(run_id: str):
+    """Get the status of an org run."""
+    run = _ORG_RUNS.get(run_id)
+    if not run:
+        return {"error": "Run not found"}
+    return run
+
+
+@app.post("/api/org/run/{run_id}/approve")
+async def org_run_approve(run_id: str):
+    """Approve the current level and execute the next level."""
+    run = _ORG_RUNS.get(run_id)
+    if not run:
+        return {"error": "Run not found"}
+    if run["status"] != "awaiting_approval":
+        return {"error": f"Run is not awaiting approval (status={run['status']})"}
+
+    next_level = run.get("approval_level", run["current_level"] + 1)
+    await _org_run_level(run_id, next_level)
+    return _ORG_RUNS[run_id]
+
+
+@app.post("/api/org/run/{run_id}/reject")
+async def org_run_reject(run_id: str):
+    """Reject and stop the org run."""
+    run = _ORG_RUNS.get(run_id)
+    if not run:
+        return {"error": "Run not found"}
+    run["status"] = "rejected"
+    run["completed_at"] = datetime.now().isoformat()
+    return run
+
+
+@app.get("/api/org/runs")
+async def org_runs_list():
+    """List recent org runs."""
+    runs = sorted(_ORG_RUNS.values(), key=lambda r: r.get("started_at", ""), reverse=True)[:20]
+    return [
+        {k: v for k, v in r.items() if k != "nodes"}
+        | {"node_count": len(r.get("nodes", [])),
+           "completed_count": sum(1 for n in r.get("nodes", []) if n["status"] == "complete")}
+        for r in runs
+    ]
+
+
+@app.get("/api/active-jobs")
+async def active_jobs():
+    """Return all active/recent pipelines, org runs, and agent dispatches for the dashboard HUD."""
+    jobs = []
+
+    # 1. Pipelines (running, waiting, pending)
+    try:
+        for pipe in arbiter_db.get_pipelines(limit=10):
+            if pipe["status"] in ("running", "waiting", "pending"):
+                stages = pipe.get("stages", [])
+                done = sum(1 for s in stages if s.get("status") == "complete")
+                running_stage = next((s for s in stages if s.get("status") == "running"), None)
+                jobs.append({
+                    "id": pipe["id"],
+                    "kind": "pipeline",
+                    "label": (pipe.get("directive") or "")[:80],
+                    "status": pipe["status"],
+                    "progress": done,
+                    "total": len(stages),
+                    "current_agent": running_stage["agent_name"] if running_stage else None,
+                    "created_at": pipe.get("created_at"),
+                })
+    except Exception as e:
+        log.debug(f"active-jobs pipeline scan: {e}")
+
+    # 2. Org / CEO team runs (in-memory)
+    for run in _ORG_RUNS.values():
+        if run.get("status") in ("running", "awaiting_approval"):
+            nodes = run.get("nodes", [])
+            done = sum(1 for n in nodes if n.get("status") == "complete")
+            running_nodes = [n for n in nodes if n.get("status") == "running"]
+            jobs.append({
+                "id": run["id"],
+                "kind": "team",
+                "label": (run.get("directive") or "")[:80],
+                "status": run["status"],
+                "progress": done,
+                "total": len(nodes),
+                "current_agent": running_nodes[0]["agent_name"] if running_nodes else None,
+                "created_at": run.get("started_at"),
+                "team_name": run.get("org_name", ""),
+            })
+
+    # 3. Recent agent dispatches (last 5 from DB, only very recent ones)
+    try:
+        recent = arbiter_db.get_agent_results(limit=5)
+        from datetime import timedelta
+        cutoff = (datetime.utcnow() - timedelta(minutes=10)).isoformat()
+        for r in recent:
+            if r.get("created_at", "") >= cutoff:
+                jobs.append({
+                    "id": r["id"],
+                    "kind": "agent",
+                    "label": (r.get("task") or "")[:80],
+                    "status": "complete" if r.get("response") else ("error" if r.get("error") else "running"),
+                    "agent_name": r.get("agent_name", r.get("agent_id", "")),
+                    "model": r.get("model"),
+                    "created_at": r.get("created_at"),
+                })
+    except Exception as e:
+        log.debug(f"active-jobs agent scan: {e}")
+
+    # Sort: running first, then by created_at desc
+    status_order = {"running": 0, "waiting": 1, "pending": 1, "awaiting_approval": 1, "complete": 2, "error": 3}
+    jobs.sort(key=lambda j: (status_order.get(j["status"], 9), -(hash(j.get("created_at") or ""))))
+    return {"jobs": jobs}
 
 
 @app.post("/api/ceo/dispatch")
@@ -1404,16 +3710,1824 @@ async def ceo_broadcast(request: Request):
     if not task:
         return {"error": "task required"}
     import asyncio as _aio
+    bid = arbiter_db._new_id()
     results = await _aio.gather(
-        *[_ceo_dispatch(aid, task) for aid in CEO_AGENTS],
+        *[_ceo_dispatch(aid, task, source="broadcast", broadcast_id=bid)
+          for aid in _get_all_agents()],
         return_exceptions=True,
     )
     return {
+        "broadcast_id": bid,
         "results": [
             r if isinstance(r, dict) else {"error": str(r)}
             for r in results
         ]
     }
+
+
+@app.get("/api/ceo/activity")
+async def ceo_activity(limit: int = 30):
+    """Return recent agent activity grouped into workflows.
+
+    Broadcasts are grouped by broadcast_id.
+    Individual dispatches appear as single-agent workflows.
+    Returns newest-first.
+    """
+    rows = arbiter_db.get_agent_results(limit=limit)
+    # Group by broadcast_id where present; singles stand alone
+    workflows: list[dict] = []
+    seen_bids: dict[str, int] = {}  # broadcast_id -> index in workflows
+
+    for r in rows:
+        bid = r.get("broadcast_id")
+        if bid:
+            if bid in seen_bids:
+                workflows[seen_bids[bid]]["agents"].append(r)
+            else:
+                seen_bids[bid] = len(workflows)
+                workflows.append({
+                    "id": bid,
+                    "type": "broadcast",
+                    "task": r["task"],
+                    "created_at": r["created_at"],
+                    "agents": [r],
+                })
+        else:
+            workflows.append({
+                "id": r["id"],
+                "type": "dispatch",
+                "task": r["task"],
+                "created_at": r["created_at"],
+                "agents": [r],
+            })
+
+    # Sort by created_at descending
+    workflows.sort(key=lambda w: w["created_at"], reverse=True)
+    return {"workflows": workflows[:limit]}
+
+
+# ── CEO Pipeline Orchestration ─────────────────────────────────────────
+
+# Default pipeline templates: which agents run in which order, and what
+# task each agent receives (use {directive} and {prior_output} placeholders).
+_PIPELINE_TEMPLATES = {
+    # ── FULL: End-to-end business evaluation (8 agents) ─────────────
+    # Researcher→Analyst→Visionary→Strategist→Product→CTO→Risk→Chief of Staff
+    "full": [
+        {
+            "agent_id": "researcher",
+            "agent_name": "Researcher",
+            "description": "Market intelligence & evidence gathering",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Deliver a research brief: executive summary, market intelligence, "
+                "competitive landscape, audience & demand signals, trend analysis (6-18 month), sources.\n"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "analyst",
+            "agent_name": "Analyst",
+            "description": "Data analysis & signal extraction",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Analyse the research. Extract key metrics, segment breakdown, opportunity sizing, "
+                "risk factors, and ranked recommendations.\n\n"
+                "## RESEARCH INPUT\n{prior_output}"
+            ),
+            "gate": True,
+        },
+        {
+            "agent_id": "visionary",
+            "agent_name": "Visionary",
+            "description": "Creative concepts & future opportunities",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Based on the research and analysis, generate original opportunities, product concepts, "
+                "story angles, and differentiated positioning ideas.\n\n"
+                "## PRIOR ANALYSIS\n{all_outputs}"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "strategist",
+            "agent_name": "Strategist",
+            "description": "Strategic direction & priorities",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Synthesise all prior work. Recommend where to play and how to win. "
+                "Include rationale, trade-offs, risks, priorities, and a 30/60/90 day plan.\n\n"
+                "## ALL PRIOR OUTPUTS\n{all_outputs}"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "product",
+            "agent_name": "Product",
+            "description": "Product roadmap & MVP design",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Turn the strategy into a product plan: user problem, solution, MVP scope, "
+                "roadmap, validation plan, and success metrics.\n\n"
+                "## ALL PRIOR OUTPUTS\n{all_outputs}"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "cto",
+            "agent_name": "CTO",
+            "description": "Technical feasibility & architecture",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Assess technical feasibility. Provide architecture, build plan, security, "
+                "cost estimates, risks, and engineering tasks.\n\n"
+                "## ALL PRIOR OUTPUTS\n{all_outputs}"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "risk",
+            "agent_name": "Risk",
+            "description": "Risk & compliance assessment",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Identify legal, privacy, security, and operational risks. "
+                "Provide severity assessment, mitigations, and required controls.\n\n"
+                "## ALL PRIOR OUTPUTS\n{all_outputs}"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "chief_of_staff",
+            "agent_name": "Chief of Staff",
+            "description": "Executive synthesis & decision",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "You are the final synthesiser. Review all agent outputs. Resolve conflicts, "
+                "produce an executive summary, recommended plan, immediate next steps, "
+                "and a confidence score (0-100).\n\n"
+                "## ALL AGENT OUTPUTS\n{all_outputs}"
+            ),
+            "gate": False,
+        },
+    ],
+    # ── RESEARCH: Deep research + analysis (2 agents, free) ──────────
+    "research": [
+        {
+            "agent_id": "researcher",
+            "agent_name": "Researcher",
+            "description": "Deep research & intelligence",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Deliver a comprehensive research brief: executive summary, market intelligence, "
+                "competitive landscape, audience & demand, trends, sources.\n"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "analyst",
+            "agent_name": "Analyst",
+            "description": "Analyse findings & extract insights",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Extract quantitative insights: key metrics with benchmarks, "
+                "trend analysis, segment breakdown, ranked recommendations.\n\n"
+                "## RESEARCH INPUT\n{prior_output}"
+            ),
+            "gate": False,
+        },
+    ],
+    # ── CONTENT: Research → CMO content creation ─────────────────────
+    "content": [
+        {
+            "agent_id": "researcher",
+            "agent_name": "Researcher",
+            "description": "Background research for content",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Research for content creation: key facts, audience insights, "
+                "trending angles, competitor content gaps, hook ideas, sources.\n"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "cmo",
+            "agent_name": "CMO",
+            "description": "Draft positioning & content",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Create positioning and content assets: strategy brief, "
+                "2+ content pieces with hooks and CTAs, repurposing plan.\n\n"
+                "## RESEARCH INPUT\n{prior_output}"
+            ),
+            "gate": False,
+        },
+    ],
+    # ── TECHNICAL: Research → CTO review ─────────────────────────────
+    "technical": [
+        {
+            "agent_id": "researcher",
+            "agent_name": "Researcher",
+            "description": "Technical landscape research",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Research the technical landscape: technology options, architecture patterns, "
+                "cost analysis, community maturity, case studies, sources.\n"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "cto",
+            "agent_name": "CTO",
+            "description": "Technical review & architecture",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Provide feasibility verdict, recommended architecture, build plan, "
+                "risk register, cost estimate, implementation phases.\n\n"
+                "## RESEARCH INPUT\n{prior_output}"
+            ),
+            "gate": False,
+        },
+    ],
+    # ── GTM: Go-to-market pipeline ───────────────────────────────────
+    "gtm": [
+        {
+            "agent_id": "researcher",
+            "agent_name": "Researcher",
+            "description": "Market & audience research",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Research for go-to-market: target audience, market dynamics, "
+                "competitor positioning, demand signals, sources.\n"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "cmo",
+            "agent_name": "CMO",
+            "description": "Positioning & campaigns",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Build go-to-market positioning, messaging pillars, campaign concepts, "
+                "content themes, and next actions.\n\n"
+                "## RESEARCH INPUT\n{prior_output}"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "revenue",
+            "agent_name": "Revenue",
+            "description": "Revenue strategy & sales motions",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Define ICPs, revenue model, pricing strategy, sales motions, "
+                "partnership opportunities, and 90-day revenue targets.\n\n"
+                "## ALL PRIOR OUTPUTS\n{all_outputs}"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "coo",
+            "agent_name": "COO",
+            "description": "Execution plan & timeline",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Turn the GTM strategy into a delivery plan: workstreams, milestones, "
+                "tasks, timeline, dependencies, and immediate actions.\n\n"
+                "## ALL PRIOR OUTPUTS\n{all_outputs}"
+            ),
+            "gate": False,
+        },
+    ],
+    # ── STRATEGY: Deep strategic analysis ────────────────────────────
+    "strategy": [
+        {
+            "agent_id": "researcher",
+            "agent_name": "Researcher",
+            "description": "Strategic landscape research",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Research the strategic landscape: market position, competitive dynamics, "
+                "customer signals, emerging trends, sources.\n"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "visionary",
+            "agent_name": "Visionary",
+            "description": "Creative opportunities & concepts",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Generate differentiated opportunities, overlooked angles, "
+                "and future-facing concepts based on the research.\n\n"
+                "## RESEARCH INPUT\n{prior_output}"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "strategist",
+            "agent_name": "Strategist",
+            "description": "Strategic recommendation",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Synthesise research and ideas into a strategic recommendation: "
+                "where to play, how to win, trade-offs, risks, 30/60/90 day plan.\n\n"
+                "## ALL PRIOR OUTPUTS\n{all_outputs}"
+            ),
+            "gate": False,
+        },
+    ],
+    # ── STORY: Story creation pipeline ───────────────────────────────
+    "story": [
+        {
+            "agent_id": "researcher",
+            "agent_name": "Researcher",
+            "description": "Audience & theme research",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Research the target audience, age group, trending themes, "
+                "comparable successful stories, and educational opportunities.\n"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "child_dev",
+            "agent_name": "Child Dev",
+            "description": "Developmental review",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Review the research and recommend developmental goals, age-appropriate themes, "
+                "emotional learning objectives, and safety considerations.\n\n"
+                "## RESEARCH INPUT\n{prior_output}"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "story_architect",
+            "agent_name": "Story Architect",
+            "description": "Write the story",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Create a complete children's story incorporating the research and developmental guidance. "
+                "Include all story elements, interactive moments, and parent takeaways.\n\n"
+                "## ALL PRIOR OUTPUTS\n{all_outputs}"
+            ),
+            "gate": True,
+        },
+        {
+            "agent_id": "creative_director",
+            "agent_name": "Creative Director",
+            "description": "Art direction for the story",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Create comprehensive art direction for this story: visual style, colour palette, "
+                "character design briefs, illustration notes per scene, animation direction.\n\n"
+                "## ALL PRIOR OUTPUTS\n{all_outputs}"
+            ),
+            "gate": False,
+        },
+    ],
+    # ── CHARACTER: Character/IP creation ─────────────────────────────
+    "character": [
+        {
+            "agent_id": "researcher",
+            "agent_name": "Researcher",
+            "description": "Market & IP research",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Research successful children's characters, IP franchises, "
+                "merchandising trends, and gaps in the market.\n"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "character_designer",
+            "agent_name": "Character Designer",
+            "description": "Create characters",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Design memorable characters with franchise potential. "
+                "Include personality, visual description, backstory, and merchandising ideas.\n\n"
+                "## RESEARCH INPUT\n{prior_output}"
+            ),
+            "gate": True,
+        },
+        {
+            "agent_id": "creative_director",
+            "agent_name": "Creative Director",
+            "description": "Visual direction",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Develop visual direction for these characters: art style, "
+                "colour palette, consistency rules, animation direction.\n\n"
+                "## ALL PRIOR OUTPUTS\n{all_outputs}"
+            ),
+            "gate": False,
+        },
+    ],
+    # ── ENGINEERING: Full engineering pipeline ────────────────────────
+    "engineering": [
+        {
+            "agent_id": "architect",
+            "agent_name": "Architect",
+            "description": "System architecture",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Design the system architecture: components, data flow, "
+                "technology choices, trade-offs, and implementation plan.\n"
+            ),
+            "gate": True,
+        },
+        {
+            "agent_id": "eng_manager",
+            "agent_name": "Eng Manager",
+            "description": "Delivery planning",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Convert the architecture into epics, stories, tasks, "
+                "estimates, dependencies, and a delivery roadmap.\n\n"
+                "## ARCHITECTURE\n{prior_output}"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "qa_director",
+            "agent_name": "QA Director",
+            "description": "Test strategy",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Create test strategy, acceptance criteria, and quality plan "
+                "for the proposed architecture and delivery plan.\n\n"
+                "## ALL PRIOR OUTPUTS\n{all_outputs}"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "security",
+            "agent_name": "Security",
+            "description": "Security audit",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Audit the architecture for security vulnerabilities: "
+                "auth, data protection, infrastructure, AI safety. Provide remediations.\n\n"
+                "## ALL PRIOR OUTPUTS\n{all_outputs}"
+            ),
+            "gate": False,
+        },
+    ],
+    # ── QA: Quality assurance pipeline ────────────────────────────────
+    "qa": [
+        {
+            "agent_id": "qa_director",
+            "agent_name": "QA Director",
+            "description": "Test strategy & plan",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Create comprehensive test strategy, plan, acceptance criteria, "
+                "edge cases, and quality score assessment.\n"
+            ),
+            "gate": True,
+        },
+        {
+            "agent_id": "qa_automation",
+            "agent_name": "QA Automation",
+            "description": "Write test code",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Write executable test code based on the test strategy. "
+                "Include unit, integration, API, and E2E tests.\n\n"
+                "## TEST STRATEGY\n{prior_output}"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "security",
+            "agent_name": "Security",
+            "description": "Security testing",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Perform security testing assessment: vulnerabilities, "
+                "severity, exploitability, and required remediations.\n\n"
+                "## ALL PRIOR OUTPUTS\n{all_outputs}"
+            ),
+            "gate": False,
+        },
+    ],
+    # ── FUNDRAISE: Investor readiness pipeline ───────────────────────
+    "fundraise": [
+        {
+            "agent_id": "intelligence",
+            "agent_name": "Intelligence",
+            "description": "Market intelligence",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Comprehensive market intelligence: TAM/SAM/SOM, competitor analysis, "
+                "market trends, growth drivers, and investment landscape.\n"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "financial",
+            "agent_name": "Financial",
+            "description": "Financial model & forecast",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Build financial model with 12/24/60 month forecasts, "
+                "unit economics, scenarios, and assumptions.\n\n"
+                "## MARKET INTELLIGENCE\n{prior_output}"
+            ),
+            "gate": True,
+        },
+        {
+            "agent_id": "investor",
+            "agent_name": "Investor",
+            "description": "Investment memo",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Write an investment memo: thesis, risks, valuation logic, "
+                "key questions, and invest/pass recommendation.\n\n"
+                "## ALL PRIOR OUTPUTS\n{all_outputs}"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "ceo_agent",
+            "agent_name": "CEO",
+            "description": "Founder response",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Review the investment analysis. Prepare founder responses to investor questions, "
+                "strategic narrative, and fundraising next steps.\n\n"
+                "## ALL PRIOR OUTPUTS\n{all_outputs}"
+            ),
+            "gate": False,
+        },
+    ],
+    # ── GROWTH: Growth & acquisition pipeline ────────────────────────
+    "growth_plan": [
+        {
+            "agent_id": "trend_analyst",
+            "agent_name": "Trend Analyst",
+            "description": "Trend discovery",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Identify trending topics, content formats, platform opportunities, "
+                "and audience interests relevant to this growth initiative.\n"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "growth",
+            "agent_name": "Growth",
+            "description": "Growth strategy",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Build ethical growth strategy: SEO, social, content, partnerships, "
+                "community, referrals, app store optimisation. Include ROI estimates.\n\n"
+                "## TREND ANALYSIS\n{prior_output}"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "cmo",
+            "agent_name": "CMO",
+            "description": "Campaign execution",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Turn the growth strategy into actionable campaigns: "
+                "messaging, content calendar, channel plans, and KPIs.\n\n"
+                "## ALL PRIOR OUTPUTS\n{all_outputs}"
+            ),
+            "gate": False,
+        },
+    ],
+    # ── CONTENT CREATION: Full content pipeline ──────────────────────
+    "content_creation": [
+        {
+            "agent_id": "trend_analyst",
+            "agent_name": "Trend Analyst",
+            "description": "Content trend analysis",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Identify trending content formats, audience interests, "
+                "platform opportunities, and viral potential for this topic.\n"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "content_visionary",
+            "agent_name": "Content Visionary",
+            "description": "Content concepts",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Generate high-potential content concepts with franchise, "
+                "series, and commercial potential. Think like Pixar/Disney.\n\n"
+                "## TREND ANALYSIS\n{prior_output}"
+            ),
+            "gate": True,
+        },
+        {
+            "agent_id": "creative_director",
+            "agent_name": "Creative Director",
+            "description": "Visual & creative direction",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Develop visual direction for the content: art style, "
+                "colour palette, character design, illustration briefs.\n\n"
+                "## ALL PRIOR OUTPUTS\n{all_outputs}"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "cmo",
+            "agent_name": "CMO",
+            "description": "Distribution strategy",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Create distribution and marketing plan for this content: "
+                "channels, messaging, launch strategy, repurposing plan.\n\n"
+                "## ALL PRIOR OUTPUTS\n{all_outputs}"
+            ),
+            "gate": False,
+        },
+    ],
+    # ── PRODUCT LAUNCH: End-to-end product pipeline ──────────────────
+    "product_launch": [
+        {
+            "agent_id": "intelligence",
+            "agent_name": "Intelligence",
+            "description": "Market & competitive intel",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Deliver market intelligence: competitive landscape, "
+                "user needs, pricing benchmarks, and market opportunities.\n"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "product",
+            "agent_name": "Product",
+            "description": "Product specification",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Define the product: user problem, solution, MVP scope, "
+                "features, roadmap, and success metrics.\n\n"
+                "## MARKET INTELLIGENCE\n{prior_output}"
+            ),
+            "gate": True,
+        },
+        {
+            "agent_id": "architect",
+            "agent_name": "Architect",
+            "description": "Technical architecture",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Design the technical architecture for this product. "
+                "Include components, data flow, costs, and implementation plan.\n\n"
+                "## ALL PRIOR OUTPUTS\n{all_outputs}"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "eng_manager",
+            "agent_name": "Eng Manager",
+            "description": "Delivery plan",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Create the delivery plan: epics, stories, sprints, "
+                "dependencies, estimates, and milestones.\n\n"
+                "## ALL PRIOR OUTPUTS\n{all_outputs}"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "cmo",
+            "agent_name": "CMO",
+            "description": "Launch marketing",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Create launch marketing plan: positioning, messaging, "
+                "campaigns, channels, timeline, and KPIs.\n\n"
+                "## ALL PRIOR OUTPUTS\n{all_outputs}"
+            ),
+            "gate": False,
+        },
+    ],
+    # ── SOCIAL MEDIA: Content creation & campaign strategy ────────
+    "social_media": [
+        {
+            "agent_id": "trend_analyst",
+            "agent_name": "Trend Analyst",
+            "description": "Platform trends & audience insights",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Analyse current social media trends, trending formats, "
+                "hashtags, audience demographics, and platform-specific "
+                "opportunities (TikTok, Instagram, YouTube, LinkedIn, X). "
+                "Identify what content resonates with the target audience.\n"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "content_visionary",
+            "agent_name": "Content Visionary",
+            "description": "Content strategy & series concepts",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Create a content strategy: content pillars, series concepts, "
+                "posting cadence, platform-specific formats, and a content "
+                "calendar. Include hooks, CTAs, and engagement tactics.\n\n"
+                "## TREND ANALYSIS\n{prior_output}"
+            ),
+            "gate": True,
+        },
+        {
+            "agent_id": "creative_director",
+            "agent_name": "Creative Director",
+            "description": "Visual & brand direction",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Define visual direction for the social content: brand "
+                "aesthetics, thumbnail styles, video formats, carousel "
+                "layouts, colour palettes, and typography guidelines.\n\n"
+                "## ALL PRIOR OUTPUTS\n{all_outputs}"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "growth",
+            "agent_name": "Growth",
+            "description": "Campaign & distribution plan",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Create the campaign and distribution plan: paid vs organic "
+                "strategy, influencer outreach, cross-platform promotion, "
+                "community engagement tactics, and KPI targets.\n\n"
+                "## ALL PRIOR OUTPUTS\n{all_outputs}"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "cmo",
+            "agent_name": "CMO",
+            "description": "Final campaign brief",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Synthesise everything into a final social media campaign "
+                "brief: executive summary, platform breakdown, content "
+                "schedule, budget allocation, success metrics, and "
+                "actionable next steps.\n\n"
+                "## ALL PRIOR OUTPUTS\n{all_outputs}"
+            ),
+            "gate": False,
+        },
+    ],
+    # ── SOFTWARE ARCHITECTURE: Technical design & planning ────────
+    "software_architecture": [
+        {
+            "agent_id": "researcher",
+            "agent_name": "Researcher",
+            "description": "Technology landscape research",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Research the technology landscape: existing solutions, "
+                "frameworks, infrastructure patterns, cloud services, "
+                "and industry best practices relevant to this project.\n"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "architect",
+            "agent_name": "Architect",
+            "description": "System architecture design",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Design the complete system architecture: components, "
+                "services, data models, API contracts, infrastructure, "
+                "scalability approach, and technology stack decisions. "
+                "Include diagrams (described in text) and trade-off analysis.\n\n"
+                "## TECHNOLOGY RESEARCH\n{prior_output}"
+            ),
+            "gate": True,
+        },
+        {
+            "agent_id": "cto",
+            "agent_name": "CTO",
+            "description": "Technical review & feasibility",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Review the proposed architecture: validate feasibility, "
+                "identify technical risks, assess performance concerns, "
+                "recommend improvements, and evaluate build-vs-buy decisions.\n\n"
+                "## ALL PRIOR OUTPUTS\n{all_outputs}"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "security",
+            "agent_name": "Security",
+            "description": "Security architecture review",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Perform a security architecture review: threat modelling, "
+                "authentication/authorization design, data protection, "
+                "network security, and compliance requirements (GDPR, SOC2).\n\n"
+                "## ALL PRIOR OUTPUTS\n{all_outputs}"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "eng_manager",
+            "agent_name": "Eng Manager",
+            "description": "Implementation roadmap",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Create the implementation roadmap: phases, epics, stories, "
+                "team structure, sprint plan, dependencies, estimates, "
+                "and milestones. Include risk mitigation for each phase.\n\n"
+                "## ALL PRIOR OUTPUTS\n{all_outputs}"
+            ),
+            "gate": False,
+        },
+    ],
+    # ── LEGAL & COMPLIANCE: Risk, regulatory & compliance ─────────
+    "legal_compliance": [
+        {
+            "agent_id": "researcher",
+            "agent_name": "Researcher",
+            "description": "Regulatory landscape research",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Research the regulatory and legal landscape: applicable "
+                "regulations (GDPR, COPPA, CCPA, AI Act, etc.), industry "
+                "standards, competitor compliance approaches, and recent "
+                "enforcement actions or legal precedents.\n"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "risk",
+            "agent_name": "Risk",
+            "description": "Risk & compliance assessment",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Perform a comprehensive risk and compliance assessment: "
+                "identify legal risks, data protection obligations, "
+                "liability exposure, IP considerations, terms of service "
+                "requirements, and regulatory compliance gaps.\n\n"
+                "## REGULATORY RESEARCH\n{prior_output}"
+            ),
+            "gate": True,
+        },
+        {
+            "agent_id": "security",
+            "agent_name": "Security",
+            "description": "Data protection & security audit",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Audit data protection and security compliance: data flows, "
+                "consent mechanisms, encryption standards, access controls, "
+                "breach response procedures, and data retention policies.\n\n"
+                "## ALL PRIOR OUTPUTS\n{all_outputs}"
+            ),
+            "gate": False,
+        },
+        {
+            "agent_id": "chief_of_staff",
+            "agent_name": "Chief of Staff",
+            "description": "Compliance action plan",
+            "task_template": (
+                "## DIRECTIVE\n{directive}\n\n"
+                "## TASK\n"
+                "Synthesise all findings into an actionable compliance plan: "
+                "priority matrix, remediation steps, policy documents needed, "
+                "training requirements, monitoring procedures, and timeline "
+                "for achieving full compliance.\n\n"
+                "## ALL PRIOR OUTPUTS\n{all_outputs}"
+            ),
+            "gate": False,
+        },
+    ],
+}
+
+
+def _create_pipeline_stages(template_name: str, directive: str) -> list[dict]:
+    """Build pipeline stages from a template. Returns list of stage dicts."""
+    template = _PIPELINE_TEMPLATES.get(template_name, _PIPELINE_TEMPLATES["full"])
+    stages = []
+    for t in template:
+        stages.append({
+            "agent_id": t["agent_id"],
+            "agent_name": t["agent_name"],
+            "description": t["description"],
+            "task_template": t["task_template"],
+            "gate": t.get("gate", False),
+            "manual": t.get("manual", False),
+            "ready_after": t.get("ready_after", None),  # stage index after which this becomes ready
+            "status": "pending",   # pending | running | complete | error | waiting | ready
+            "output": None,
+            "error": None,
+            "result_id": None,
+            "started_at": None,
+            "completed_at": None,
+        })
+    return stages
+
+
+def _pipeline_update_ready(stages: list[dict]):
+    """Mark manual stages as 'ready' when their ready_after dependency is complete."""
+    for i, s in enumerate(stages):
+        if not s.get("manual") or s["status"] not in ("pending", "ready"):
+            continue
+        ready_after = s.get("ready_after")
+        if ready_after is not None:
+            # Specific dependency — ready when that stage is complete
+            if 0 <= ready_after < len(stages) and stages[ready_after]["status"] == "complete":
+                s["status"] = "ready"
+        else:
+            # No explicit dependency — ready when all prior non-manual stages are complete
+            prior_done = all(
+                stages[j]["status"] == "complete"
+                for j in range(i)
+                if not stages[j].get("manual")
+            )
+            if prior_done and i > 0:
+                s["status"] = "ready"
+
+
+# ── Pipeline Report Generation ─────────────────────────────────────────
+_PIPELINE_REPORT_PROMPT = """\
+You are a senior strategy consultant producing an EXECUTIVE REPORT dashboard.
+Output ONLY valid JSON — no markdown fences, no explanation.
+
+You will receive outputs from specialist agents who have analysed a business directive.
+Your job: synthesise ALL their findings into ONE comprehensive visual dashboard.
+
+PANEL SCHEMA (exact key names required; ? = optional):
+
+  title           "CAPS STRING — EXECUTIVE REPORT"
+  summary         "2-3 sentence executive summary synthesising all findings"
+
+  hero            {value:str, label:str, delta?:str, delta_status?:"good"|"bad"}
+  stats           [{label:str, value:str, status?:"good"|"warn"|"bad"}]  — 6-10 key numbers
+  key_metrics     [{label:str, value:str, status?:"good"|"warn"|"bad", context?:str}]
+
+  swot            {strengths:[str], weaknesses:[str], opportunities:[str], threats:[str]}
+  scorecard       [{label:str, score:0-100, value:str}]  — rate each agent's area
+  risk_matrix     [{severity:"critical"|"high"|"medium"|"low", risk:str, mitigation:str}]
+  gauges          [{label:str, value:0-100, display:str, context?:str}]
+
+  chart           {type:"radar", labels:[str], datasets:[{label:str, data:[num]}]}
+                  Use radar with labels=["Market Fit","Strategic Clarity","Product Readiness","Technical Feasibility","Risk Mitigation","Revenue Potential","Creative Strength","Execution Readiness"]
+                  datasets=[{label:"Current Assessment", data:[scores 0-100]}]
+
+  table           {headers:[str], rows:[[str]]}  — action items matrix
+
+  funnel          [{label:str, value:0-100, display:str, pct:str}]  — pipeline/conversion funnel
+
+  insights        [{type:"risk"|"opportunity"|"warning"|"info", text:str}]  — 6-8 key findings
+  recommendations [{priority:"high"|"medium"|"low", text:str}]  — 5-8 actionable next steps
+  timeline        [{date:str, event:str, status:"done"|"active"|"pending", detail?:str}]  — implementation roadmap
+
+RULES:
+- Extract EVERY number, percentage, date, and metric from the agent outputs — do not summarise away data
+- Cross-reference findings between agents — highlight agreements and contradictions
+- Scorecard MUST rate: Research Quality, Strategic Direction, Product Vision, Technical Feasibility, Risk Assessment, Market Positioning, Creative Direction, Execution Plan
+- stats array MUST have 8-10 items with REAL numbers extracted from the research (market size, growth %, prices, conversion rates etc.)
+- Recommendations must be specific, actionable, with owner and timeline — never generic advice
+- risk_matrix MUST have 4-6 entries with concrete mitigations
+- Timeline should cover the next 90 days minimum with at least 6 milestones
+- insights array MUST have 6-8 entries, each referencing which agent contributed the finding
+- MINIMUM 12 components. This is the final deliverable — make it comprehensive and data-dense.
+- Use the FULL token budget — a longer, more detailed report is always better than a short one.
+- Every section should contain SPECIFIC data from the agent outputs, not vague summaries.\
+"""
+
+
+async def _generate_pipeline_report(pipeline_id: str, directive: str, stages: list[dict]):
+    """Generate a comprehensive visual report from all pipeline agent outputs.
+    Runs as a background task after pipeline completion."""
+    try:
+        log.info(f"Pipeline [{pipeline_id}] generating executive report...")
+
+        # Build context from all agent outputs
+        agent_outputs = []
+        for s in stages:
+            if s.get("output"):
+                agent_outputs.append(
+                    f"═══ {s['agent_name'].upper()} ({s.get('description', '')}) ═══\n"
+                    f"{s['output']}\n"
+                )
+
+        if not agent_outputs:
+            log.warning(f"Pipeline [{pipeline_id}] no agent outputs for report")
+            return
+
+        all_context = "\n".join(agent_outputs)
+        # Truncate if massive (keep first 24000 chars — enough for 8 agents at 2400 tokens each)
+        if len(all_context) > 24000:
+            all_context = all_context[:24000] + "\n\n[...truncated for token budget]"
+
+        messages = [
+            {"role": "system", "content": _PIPELINE_REPORT_PROMPT},
+            {"role": "user", "content": (
+                f"BUSINESS DIRECTIVE: {directive}\n\n"
+                f"AGENT OUTPUTS:\n{all_context}\n\n"
+                "Generate the comprehensive executive report dashboard JSON now. "
+                "Extract every data point. Minimum 12 components."
+            )},
+        ]
+
+        # Use Claude for report generation (best at structured JSON synthesis)
+        # Falls back to OpenRouter if Claude is unavailable or over budget
+        report_json = None
+        if ANTHROPIC_API_KEY and not _claude_check_budget():
+            report_json = await _chat_claude(
+                messages, max_tokens=6000, temperature=0.3,
+            )
+            if report_json:
+                log.info(f"Pipeline [{pipeline_id}] report generated via Claude")
+
+        if not report_json and OPENROUTER_API_KEY:
+            # Fallback to OpenRouter
+            report_json = await _chat_openrouter(
+                messages, max_tokens=5000, temperature=0.3,
+                model=_OPENROUTER_AGENT_MODEL,
+            )
+
+        if not report_json:
+            # Last resort: main LLM chain
+            report_json = await _chat_llm(messages, max_tokens=4000, purpose="pipeline-report")
+
+        if not report_json:
+            log.warning(f"Pipeline [{pipeline_id}] report generation returned nothing")
+            return
+
+        # Clean markdown fences if present
+        report_json = report_json.strip()
+        if report_json.startswith("```"):
+            first_nl = report_json.index("\n") if "\n" in report_json else 3
+            report_json = report_json[first_nl + 1:]
+        if report_json.endswith("```"):
+            report_json = report_json[:-3]
+        report_json = report_json.strip()
+
+        try:
+            report = json.loads(report_json)
+        except json.JSONDecodeError:
+            report_json = _repair_truncated_json(report_json)
+            report = json.loads(report_json)
+
+        if not isinstance(report, dict) or not report.get("title"):
+            log.warning(f"Pipeline [{pipeline_id}] report invalid structure")
+            return
+
+        # Store the report
+        arbiter_db.save_pipeline_report(pipeline_id, report)
+        log.info(f"Pipeline [{pipeline_id}] executive report saved: {report.get('title', '?')} "
+                 f"({len(report)} components)")
+
+        # Save markdown + JSON locally alongside the pipeline
+        _save_report_files(pipeline_id, directive, stages, report)
+
+    except Exception as e:
+        log.error(f"Pipeline [{pipeline_id}] report generation failed: {type(e).__name__}: {e}")
+
+
+def _save_report_files(pipeline_id: str, directive: str, stages: list[dict], report: dict):
+    """Save report as markdown + JSON files locally."""
+    from datetime import datetime as _dt
+    reports_dir = Path(__file__).parent / "reports"
+    reports_dir.mkdir(exist_ok=True)
+
+    ts = _dt.utcnow().strftime("%Y%m%d_%H%M%S")
+    slug = re.sub(r'[^a-z0-9]+', '_', directive[:50].lower()).strip('_')
+    base = f"{ts}_{slug}_{pipeline_id[:8]}"
+
+    # Save JSON
+    json_path = reports_dir / f"{base}.json"
+    json_path.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
+
+    # Build markdown
+    md_lines = [f"# {report.get('title', 'EXECUTIVE REPORT')}\n"]
+    md_lines.append(f"**Pipeline:** `{pipeline_id}`  ")
+    md_lines.append(f"**Directive:** {directive}  ")
+    md_lines.append(f"**Generated:** {_dt.utcnow().isoformat()}Z\n")
+
+    if report.get("summary"):
+        md_lines.append(f"## Executive Summary\n\n{report['summary']}\n")
+
+    # Stage outputs
+    md_lines.append("## Agent Outputs\n")
+    for s in stages:
+        if s.get("output"):
+            md_lines.append(f"### {s.get('agent_name', s.get('agent_id', '?'))}\n")
+            md_lines.append(f"{s['output']}\n")
+
+    # Report sections
+    for key in ("insights", "recommendations", "risk_matrix", "timeline"):
+        items = report.get(key)
+        if items and isinstance(items, list):
+            md_lines.append(f"## {key.replace('_', ' ').title()}\n")
+            for item in items:
+                if isinstance(item, dict):
+                    parts = [f"{k}: {v}" for k, v in item.items()]
+                    md_lines.append(f"- {' | '.join(parts)}")
+                else:
+                    md_lines.append(f"- {item}")
+            md_lines.append("")
+
+    if report.get("swot"):
+        md_lines.append("## SWOT Analysis\n")
+        swot = report["swot"]
+        for quad in ("strengths", "weaknesses", "opportunities", "threats"):
+            items = swot.get(quad, [])
+            md_lines.append(f"### {quad.title()}\n")
+            for item in items:
+                md_lines.append(f"- {item}")
+            md_lines.append("")
+
+    md_path = reports_dir / f"{base}.md"
+    md_path.write_text("\n".join(md_lines), encoding="utf-8")
+    log.info(f"Pipeline [{pipeline_id}] reports saved: {md_path.name}, {json_path.name}")
+
+
+@app.get("/api/reports")
+async def list_reports():
+    """List all saved markdown reports for in-app browsing."""
+    reports_dir = Path(__file__).parent / "reports"
+    reports_dir.mkdir(exist_ok=True)
+    results = []
+    for f in sorted(reports_dir.glob("*.md"), reverse=True):
+        # Parse filename: YYYYMMDD_HHMMSS_slug_pipelineId.md
+        name = f.stem
+        parts = name.split("_", 2)
+        ts_str = f"{parts[0]}_{parts[1]}" if len(parts) >= 2 else name
+        slug = "_".join(parts[2:]) if len(parts) > 2 else name
+        results.append({
+            "filename": f.name,
+            "slug": slug,
+            "timestamp": ts_str,
+            "size": f.stat().st_size,
+        })
+    return {"reports": results}
+
+
+@app.get("/api/reports/{filename}")
+async def get_report_content(filename: str):
+    """Return the raw markdown content of a saved report."""
+    from starlette.responses import Response
+    reports_dir = Path(__file__).parent / "reports"
+    # ── Path traversal protection ──
+    if ".." in filename or "/" in filename or "\\" in filename:
+        return JSONResponse(status_code=400, content={"error": "Invalid filename"})
+    path = reports_dir / filename
+    if not path.resolve().is_relative_to(reports_dir.resolve()):
+        return JSONResponse(status_code=400, content={"error": "Invalid filename"})
+    if not path.exists() or not path.suffix == ".md":
+        return {"error": "Report not found"}
+    content = path.read_text(encoding="utf-8")
+    return Response(content=content, media_type="text/markdown")
+
+
+@app.get("/api/ceo/pipeline/{pipeline_id}/report/download")
+async def ceo_pipeline_report_download(pipeline_id: str, fmt: str = "md"):
+    """Download the pipeline report as markdown or JSON."""
+    from starlette.responses import Response
+    reports_dir = Path(__file__).parent / "reports"
+    reports_dir.mkdir(exist_ok=True)
+
+    # ── Sanitize pipeline_id to prevent path traversal via glob ──
+    if not re.match(r'^[a-zA-Z0-9_-]+$', pipeline_id):
+        return JSONResponse(status_code=400, content={"error": "Invalid pipeline ID"})
+
+    # Find matching files
+    ext = ".md" if fmt == "md" else ".json"
+    matches = sorted(reports_dir.glob(f"*_{pipeline_id[:8]}{ext}"), reverse=True)
+    if not matches:
+        # Try generating from DB
+        pipe = arbiter_db.get_pipeline(pipeline_id)
+        if not pipe or not pipe.get("report"):
+            return {"error": "Report not found"}
+        _save_report_files(pipeline_id, pipe.get("directive", ""), pipe.get("stages", []), pipe["report"])
+        matches = sorted(reports_dir.glob(f"*_{pipeline_id[:8]}{ext}"), reverse=True)
+        if not matches:
+            return {"error": "Report generation failed"}
+
+    content = matches[0].read_text(encoding="utf-8")
+    media = "text/markdown" if fmt == "md" else "application/json"
+    return Response(
+        content=content,
+        media_type=media,
+        headers={"Content-Disposition": f'attachment; filename="{matches[0].name}"'},
+    )
+
+
+async def _pipeline_run_next(pipeline_id: str) -> dict:
+    """Execute the next pending stage in a pipeline. Stops at gates."""
+    pipe = arbiter_db.get_pipeline(pipeline_id)
+    if not pipe:
+        return {"error": "Pipeline not found"}
+    if pipe["status"] in ("complete", "cancelled"):
+        return {"error": f"Pipeline already {pipe['status']}"}
+
+    stages = pipe["stages"]
+    idx = pipe["current_idx"]
+
+    # Find the next stage to run
+    while idx < len(stages):
+        stage = stages[idx]
+
+        # If this is a manual stage, mark it as ready and skip past it
+        if stage.get("manual") and stage["status"] in ("pending", "ready"):
+            stage["status"] = "ready"
+            # Mark any other manual stages that depend on earlier completions as ready too
+            _pipeline_update_ready(stages)
+            arbiter_db.update_pipeline(pipeline_id, stages, idx, "ready")
+            log.info(f"Pipeline [{pipeline_id}] stage {idx} ({stage['agent_name']}) is MANUAL — marked ready, skipping")
+            # Skip past manual stage — continue with next auto stage
+            idx += 1
+            continue
+
+        # If this stage has a gate and the previous stage just completed,
+        # pause for human approval
+        if stage["gate"] and stage["status"] == "pending" and idx > 0:
+            # Check if we were explicitly told to advance (status would be 'approved')
+            if stage["status"] != "approved":
+                stage["status"] = "waiting"
+                arbiter_db.update_pipeline(pipeline_id, stages, idx, "waiting")
+                log.info(f"Pipeline [{pipeline_id}] paused at stage {idx} ({stage['agent_name']}) — waiting for CEO approval")
+                return arbiter_db.get_pipeline(pipeline_id)
+
+        # Build the task with prior output
+        prior_output = ""
+        if idx > 0 and stages[idx - 1].get("output"):
+            prior_output = stages[idx - 1]["output"]
+
+        # Build combined outputs from ALL prior stages (for {all_outputs} placeholder)
+        all_outputs_parts = []
+        for prev_i in range(idx):
+            prev = stages[prev_i]
+            if prev.get("output"):
+                all_outputs_parts.append(
+                    f"## {prev['agent_name']} Output\n{prev['output']}"
+                )
+        all_outputs = "\n\n---\n\n".join(all_outputs_parts) if all_outputs_parts else ""
+
+        task = stage["task_template"].format(
+            directive=pipe["directive"],
+            prior_output=prior_output,
+            all_outputs=all_outputs,
+        )
+
+        # Run the agent
+        stage["status"] = "running"
+        stage["started_at"] = datetime.utcnow().isoformat()
+        arbiter_db.update_pipeline(pipeline_id, stages, idx, "running")
+
+        result = await _ceo_dispatch(
+            stage["agent_id"], task,
+            source="pipeline", broadcast_id=pipeline_id,
+        )
+
+        if result.get("error"):
+            stage["status"] = "error"
+            stage["error"] = result["error"]
+            stage["completed_at"] = datetime.utcnow().isoformat()
+            arbiter_db.update_pipeline(pipeline_id, stages, idx, "error")
+            log.error(f"Pipeline [{pipeline_id}] stage {idx} ({stage['agent_name']}) failed: {result['error']}")
+            return arbiter_db.get_pipeline(pipeline_id)
+
+        # Stage succeeded
+        stage["status"] = "complete"
+        stage["output"] = result.get("response", "")
+        stage["result_id"] = result.get("result_id")
+        stage["completed_at"] = datetime.utcnow().isoformat()
+        idx += 1
+
+        # Update ready status on manual stages after each completion
+        _pipeline_update_ready(stages)
+
+        # Check if next stage has a gate
+        if idx < len(stages) and stages[idx].get("gate"):
+            stages[idx]["status"] = "waiting"
+            arbiter_db.update_pipeline(pipeline_id, stages, idx, "waiting")
+            log.info(f"Pipeline [{pipeline_id}] paused at gate before stage {idx} ({stages[idx]['agent_name']})")
+            return arbiter_db.get_pipeline(pipeline_id)
+
+    # Check if any manual stages are still pending/ready
+    has_unfinished_manual = any(
+        s.get("manual") and s["status"] in ("pending", "ready")
+        for s in stages
+    )
+    if has_unfinished_manual:
+        # Auto stages are done but manual stages remain — mark as "ready" not "complete"
+        arbiter_db.update_pipeline(pipeline_id, stages, idx, "ready")
+        log.info(f"Pipeline [{pipeline_id}] auto stages done — manual stages still ready")
+        return arbiter_db.get_pipeline(pipeline_id)
+
+    # All stages complete — generate the report
+    arbiter_db.update_pipeline(pipeline_id, stages, idx, "complete")
+    log.info(f"Pipeline [{pipeline_id}] complete — {len(stages)} stages finished")
+
+    # Fire-and-forget report generation (don't block the response)
+    asyncio.create_task(_generate_pipeline_report(pipeline_id, pipe.get("directive", ""), stages))
+
+    return arbiter_db.get_pipeline(pipeline_id)
+
+
+@app.post("/api/ceo/pipeline")
+async def ceo_pipeline_create(request: Request):
+    """Create a new CEO pipeline. Generates a plan and starts execution.
+
+    Body: { "directive": "...", "template": "full|research|content|technical" }
+    """
+    body = await request.json()
+    directive = body.get("directive", "").strip()
+    template_name = body.get("template", "full")
+    if not directive:
+        return {"error": "directive required"}
+
+    # Check custom workflows first, then built-in templates
+    custom_wfs = _load_custom_workflows()
+    if template_name in custom_wfs:
+        cw = custom_wfs[template_name]
+        stages = []
+        for a in cw["agents"]:
+            agent = CEO_AGENTS.get(a["agent_id"])
+            if not agent:
+                continue
+            hint = a.get("task_hint", "")
+            task_tmpl = hint if hint else "Analyse and provide expert insights on: {directive}\n\nPrior context:\n{prior_output}"
+            stages.append({
+                "agent_id": a["agent_id"],
+                "agent_name": a["agent_name"],
+                "description": hint or agent["description"],
+                "task_template": task_tmpl,
+                "gate": False,
+                "manual": False,
+                "ready_after": None,
+                "status": "pending",
+                "output": None,
+                "error": None,
+                "result_id": None,
+                "started_at": None,
+                "completed_at": None,
+            })
+    elif template_name in _PIPELINE_TEMPLATES:
+        stages = _create_pipeline_stages(template_name, directive)
+    else:
+        return {"error": f"Unknown template: {template_name}. Options: {list(_PIPELINE_TEMPLATES.keys())}"}
+    pipeline_id = arbiter_db.save_pipeline(directive, stages)
+    log.info(f"Pipeline [{pipeline_id}] created: '{directive[:60]}' with {len(stages)} stages ({template_name})")
+
+    # Start execution (runs until first gate or completion)
+    result = await _pipeline_run_next(pipeline_id)
+    return result
+
+
+@app.get("/api/ceo/pipeline/templates")
+async def ceo_pipeline_templates():
+    """Return available pipeline templates."""
+    return {
+        name: [
+            {"agent_id": s["agent_id"], "agent_name": s["agent_name"],
+             "description": s["description"], "gate": s.get("gate", False),
+             "manual": s.get("manual", False)}
+            for s in stages
+        ]
+        for name, stages in _PIPELINE_TEMPLATES.items()
+    }
+
+
+@app.get("/api/ceo/pipeline/{pipeline_id}")
+async def ceo_pipeline_get(pipeline_id: str):
+    """Get the current state of a pipeline."""
+    pipe = arbiter_db.get_pipeline(pipeline_id)
+    if not pipe:
+        return {"error": "Pipeline not found"}
+    return pipe
+
+
+@app.get("/api/ceo/pipelines")
+async def ceo_pipelines_list(status: str | None = None, limit: int = 20):
+    """List all pipelines, optionally filtered by status."""
+    return {"pipelines": arbiter_db.get_pipelines(status=status, limit=limit)}
+
+
+@app.post("/api/ceo/pipeline/{pipeline_id}/approve")
+async def ceo_pipeline_approve(pipeline_id: str, request: Request):
+    """Approve a gate and continue the pipeline to the next stage.
+
+    Body (optional): { "feedback": "..." }
+    Feedback is appended to the next agent's context.
+    """
+    pipe = arbiter_db.get_pipeline(pipeline_id)
+    if not pipe:
+        return {"error": "Pipeline not found"}
+    if pipe["status"] != "waiting":
+        return {"error": f"Pipeline is not waiting for approval (status: {pipe['status']})"}
+
+    stages = pipe["stages"]
+    idx = pipe["current_idx"]
+    stage = stages[idx]
+
+    if stage["status"] != "waiting":
+        return {"error": f"Stage {idx} is not waiting (status: {stage['status']})"}
+
+    # Check for optional feedback from CEO
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    feedback = body.get("feedback", "").strip() if isinstance(body, dict) else ""
+
+    # If CEO provided feedback, append it to the prior output so the next agent sees it
+    if feedback and idx > 0 and stages[idx - 1].get("output"):
+        stages[idx - 1]["output"] += f"\n\n## CEO Feedback\n{feedback}"
+
+    # Mark stage as approved and continue
+    stage["status"] = "approved"
+    arbiter_db.update_pipeline(pipeline_id, stages, idx, "running")
+    log.info(f"Pipeline [{pipeline_id}] stage {idx} approved by CEO")
+
+    # Continue execution
+    result = await _pipeline_run_next(pipeline_id)
+    return result
+
+
+@app.post("/api/ceo/pipeline/{pipeline_id}/reject")
+async def ceo_pipeline_reject(pipeline_id: str, request: Request):
+    """Reject a gate — cancels the pipeline with an optional reason."""
+    pipe = arbiter_db.get_pipeline(pipeline_id)
+    if not pipe:
+        return {"error": "Pipeline not found"}
+
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    reason = body.get("reason", "Rejected by CEO") if isinstance(body, dict) else "Rejected by CEO"
+
+    stages = pipe["stages"]
+    idx = pipe["current_idx"]
+    if idx < len(stages):
+        stages[idx]["status"] = "rejected"
+        stages[idx]["error"] = reason
+
+    arbiter_db.update_pipeline(pipeline_id, stages, idx, "cancelled")
+    log.info(f"Pipeline [{pipeline_id}] rejected at stage {idx}: {reason}")
+    return arbiter_db.get_pipeline(pipeline_id)
+
+
+@app.post("/api/ceo/pipeline/{pipeline_id}/cancel")
+async def ceo_pipeline_cancel(pipeline_id: str):
+    """Cancel a pipeline at any active stage (running, waiting, ready, pending)."""
+    pipe = arbiter_db.get_pipeline(pipeline_id)
+    if not pipe:
+        return {"error": "Pipeline not found"}
+    if pipe["status"] in ("complete", "cancelled", "error"):
+        return {"error": f"Pipeline already in terminal state: {pipe['status']}"}
+
+    stages = pipe["stages"]
+    idx = pipe["current_idx"]
+    # Mark the current (or next pending) stage as cancelled
+    for s in stages:
+        if s["status"] in ("running", "waiting", "ready", "pending"):
+            s["status"] = "cancelled"
+            s["error"] = "Cancelled by user"
+
+    arbiter_db.update_pipeline(pipeline_id, stages, idx, "cancelled")
+    log.info(f"Pipeline [{pipeline_id}] cancelled by user at stage {idx}")
+    return arbiter_db.get_pipeline(pipeline_id)
+
+
+@app.post("/api/ceo/pipeline/{pipeline_id}/regenerate")
+async def ceo_pipeline_regenerate(pipeline_id: str, request: Request):
+    """Re-run the last completed stage with optional new instructions."""
+    pipe = arbiter_db.get_pipeline(pipeline_id)
+    if not pipe:
+        return {"error": "Pipeline not found"}
+    if pipe["status"] not in ("waiting", "error"):
+        return {"error": f"Can only regenerate from waiting or error state (current: {pipe['status']})"}
+
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    new_instructions = body.get("instructions", "").strip() if isinstance(body, dict) else ""
+
+    stages = pipe["stages"]
+    idx = pipe["current_idx"]
+
+    # Find the last completed stage to re-run
+    rerun_idx = idx - 1 if idx > 0 and stages[idx]["status"] == "waiting" else idx
+    if rerun_idx < 0:
+        return {"error": "No stage to regenerate"}
+
+    # If new instructions provided, update the task template for the re-run
+    stage = stages[rerun_idx]
+    if new_instructions:
+        # Append instructions to the existing template
+        stage["task_template"] += f"\n\n## Additional Instructions from CEO\n{new_instructions}"
+
+    # Reset stage for re-run
+    stage["status"] = "pending"
+    stage["output"] = None
+    stage["error"] = None
+    stage["result_id"] = None
+    stage["started_at"] = None
+    stage["completed_at"] = None
+
+    # Also reset all stages after it
+    for s in stages[rerun_idx + 1:]:
+        s["status"] = "pending"
+        s["output"] = None
+        s["error"] = None
+        s["result_id"] = None
+        s["started_at"] = None
+        s["completed_at"] = None
+
+    arbiter_db.update_pipeline(pipeline_id, stages, rerun_idx, "running")
+    log.info(f"Pipeline [{pipeline_id}] regenerating from stage {rerun_idx} ({stage['agent_name']})")
+
+    result = await _pipeline_run_next(pipeline_id)
+    return result
+
+
+@app.post("/api/ceo/pipeline/{pipeline_id}/trigger/{stage_idx}")
+async def ceo_pipeline_trigger(pipeline_id: str, stage_idx: int):
+    """Manually trigger a 'ready' stage (e.g. Publisher). Queues behind any running stages."""
+    pipe = arbiter_db.get_pipeline(pipeline_id)
+    if not pipe:
+        return {"error": "Pipeline not found"}
+
+    stages = pipe["stages"]
+    if stage_idx < 0 or stage_idx >= len(stages):
+        return {"error": f"Invalid stage index: {stage_idx}"}
+
+    stage = stages[stage_idx]
+    if stage["status"] != "ready":
+        return {"error": f"Stage {stage_idx} ({stage['agent_name']}) is not ready (status: {stage['status']})"}
+
+    # Check if any earlier non-complete stages are still running — queue behind them
+    for i in range(stage_idx):
+        if stages[i]["status"] in ("running", "waiting", "pending"):
+            stage["status"] = "queued"
+            arbiter_db.update_pipeline(pipeline_id, stages, pipe["current_idx"], pipe["status"])
+            log.info(f"Pipeline [{pipeline_id}] stage {stage_idx} ({stage['agent_name']}) queued — waiting for stage {i}")
+            return arbiter_db.get_pipeline(pipeline_id)
+
+    # All prior stages done — run this stage now
+    prior_output = ""
+    if stage_idx > 0 and stages[stage_idx - 1].get("output"):
+        prior_output = stages[stage_idx - 1]["output"]
+
+    all_outputs_parts = []
+    for prev_i in range(stage_idx):
+        prev = stages[prev_i]
+        if prev.get("output"):
+            all_outputs_parts.append(f"## {prev['agent_name']} Output\n{prev['output']}")
+    all_outputs = "\n\n---\n\n".join(all_outputs_parts) if all_outputs_parts else ""
+
+    task = stage["task_template"].format(
+        directive=pipe["directive"],
+        prior_output=prior_output,
+        all_outputs=all_outputs,
+    )
+
+    stage["status"] = "running"
+    stage["started_at"] = datetime.utcnow().isoformat()
+    arbiter_db.update_pipeline(pipeline_id, stages, stage_idx, "running")
+
+    result = await _ceo_dispatch(
+        stage["agent_id"], task,
+        source="pipeline", broadcast_id=pipeline_id,
+    )
+
+    if result.get("error"):
+        stage["status"] = "error"
+        stage["error"] = result["error"]
+        stage["completed_at"] = datetime.utcnow().isoformat()
+        arbiter_db.update_pipeline(pipeline_id, stages, stage_idx, "error")
+        return arbiter_db.get_pipeline(pipeline_id)
+
+    stage["status"] = "complete"
+    stage["output"] = result.get("response", "")
+    stage["result_id"] = result.get("result_id")
+    stage["completed_at"] = datetime.utcnow().isoformat()
+
+    # Check if all stages are now complete
+    all_done = all(s["status"] == "complete" for s in stages)
+    final_status = "complete" if all_done else pipe["status"]
+    arbiter_db.update_pipeline(pipeline_id, stages, stage_idx, final_status)
+    log.info(f"Pipeline [{pipeline_id}] manual stage {stage_idx} ({stage['agent_name']}) complete")
+
+    if all_done:
+        asyncio.create_task(_generate_pipeline_report(pipeline_id, pipe.get("directive", ""), stages))
+
+    return arbiter_db.get_pipeline(pipeline_id)
+
+
+# ── Custom Workflows ─────────────────────────────────────────────────
+_CUSTOM_WF_PATH = Path(__file__).parent / "custom_workflows.json"
+
+
+def _load_custom_workflows() -> dict:
+    if _CUSTOM_WF_PATH.exists():
+        try:
+            return json.loads(_CUSTOM_WF_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_custom_workflows(data: dict):
+    _CUSTOM_WF_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+@app.get("/api/ceo/custom-workflows")
+async def ceo_custom_workflows_list():
+    """Return all saved custom workflows."""
+    return _load_custom_workflows()
+
+
+@app.post("/api/ceo/custom-workflows")
+async def ceo_custom_workflow_save(request: Request):
+    """Save a custom workflow.
+
+    Body: { "name": "...", "description": "...", "icon": "🔧",
+            "colour": "#00e5ff",
+            "agents": [{"agent_id": "...", "task_hint": "..."},...] }
+    """
+    body = await request.json()
+    name = body.get("name", "").strip()
+    desc = body.get("description", "").strip()
+    agents = body.get("agents", [])
+    icon = body.get("icon", "⚡")
+    colour = body.get("colour", "#00e5ff")
+    if not name:
+        return {"error": "name required"}
+    if not agents or len(agents) < 1:
+        return {"error": "at least one agent required"}
+    # Validate agent IDs exist
+    for a in agents:
+        if a.get("agent_id") not in CEO_AGENTS:
+            return {"error": f"Unknown agent: {a.get('agent_id')}"}
+
+    slug = name.lower().replace(" ", "_")[:40]
+    wf = _load_custom_workflows()
+    wf[slug] = {
+        "name": name,
+        "description": desc,
+        "icon": icon,
+        "colour": colour,
+        "agents": [
+            {
+                "agent_id": a["agent_id"],
+                "agent_name": CEO_AGENTS[a["agent_id"]]["name"],
+                "task_hint": a.get("task_hint", ""),
+            }
+            for a in agents
+        ],
+    }
+    _save_custom_workflows(wf)
+    log.info(f"Custom workflow saved: {slug} ({len(agents)} agents)")
+    return {"ok": True, "slug": slug}
+
+
+@app.post("/api/ceo/custom-workflows/{slug}/delete")
+async def ceo_custom_workflow_delete(slug: str):
+    """Delete a custom workflow."""
+    wf = _load_custom_workflows()
+    if slug not in wf:
+        return {"error": "Workflow not found"}
+    del wf[slug]
+    _save_custom_workflows(wf)
+    return {"ok": True}
+
+
+# ── History / Persistence API ─────────────────────────────────────────
+
+@app.get("/api/history/agents")
+async def history_agents(
+    agent_id: str | None = None, limit: int = 50, offset: int = 0,
+    search: str | None = None,
+):
+    """Browse past CEO agent results."""
+    return {"results": arbiter_db.get_agent_results(
+        agent_id=agent_id, limit=limit, offset=offset, search=search,
+    )}
+
+
+@app.get("/api/history/agents/{result_id}")
+async def history_agent_detail(result_id: str):
+    """Get a single agent result by ID."""
+    result = arbiter_db.get_agent_result(result_id)
+    if not result:
+        return {"error": "Not found"}
+    return result
+
+
+@app.get("/api/history/broadcasts/{broadcast_id}")
+async def history_broadcast(broadcast_id: str):
+    """Get all results from a broadcast."""
+    return {"results": arbiter_db.get_broadcast_results(broadcast_id)}
+
+
+@app.get("/api/history/briefings")
+async def history_briefings(category: str | None = None, limit: int = 50, offset: int = 0):
+    """Browse past briefings (morning, market, evening)."""
+    return {"briefings": arbiter_db.get_briefings(
+        category=category, limit=limit, offset=offset,
+    )}
+
+
+@app.get("/api/history/conversations")
+async def history_conversations(limit: int = 50, offset: int = 0):
+    """List past conversation sessions."""
+    return {"sessions": arbiter_db.get_sessions(limit=limit, offset=offset)}
+
+
+@app.get("/api/history/conversations/{session_id}")
+async def history_conversation_detail(session_id: str):
+    """Get all turns from a specific conversation session."""
+    return {"turns": arbiter_db.get_conversation(session_id)}
+
+
+@app.get("/api/history/insights")
+async def history_insights(
+    insight_type: str | None = None, severity: str | None = None,
+    limit: int = 50, offset: int = 0,
+):
+    """Browse past proactive insights."""
+    return {"insights": arbiter_db.get_insights(
+        insight_type=insight_type, severity=severity,
+        limit=limit, offset=offset,
+    )}
+
+
+@app.get("/api/history/search")
+async def history_search(q: str, limit: int = 20):
+    """Search across all persisted data."""
+    if not q:
+        return {"error": "q parameter required"}
+    return arbiter_db.search_all(q, limit=limit)
 
 
 # ── Urgent Bulletins (cross-system) ───────────────────────────────────
@@ -2941,7 +7055,7 @@ async def _panel_email(intent: str) -> dict | None:
 
         stats = [
             {"label": "Unread", "value": str(es.get("unread", 0)), "status": "warn" if es.get("unread", 0) > 10 else None},
-            {"label": "Today", "value": str(es.get("today", 0)), "status": None},
+            {"label": "Customer", "value": str(es.get("customer", 0)), "status": "good" if es.get("customer", 0) > 0 else None},
             {"label": "Urgent", "value": str(es.get("urgent", 0)), "status": "bad" if es.get("urgent", 0) > 0 else "good"},
             {"label": "Replied", "value": str(es.get("replied", 0)), "status": None},
         ]
@@ -3498,7 +7612,7 @@ async def _panel_dynamic(user_msg: str, llm_reply: str, extra_ctx: str = "") -> 
             )},
         ]
 
-        panel_json = await _chat_llm(messages, max_tokens=3500, temperature=0.3, purpose="panel")
+        panel_json = await _chat_llm(messages, max_tokens=2000, temperature=0.3, purpose="panel")
 
         if not panel_json:
             return None
@@ -4669,6 +8783,10 @@ async def jarvis_chat(request: Request):
 @app.post("/api/jarvis/vision")
 async def jarvis_vision(request: Request):
     """Process a camera frame + user query using Claude's vision capability."""
+    # ── Body size guard — reject payloads > 10 MB ──
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > 10 * 1024 * 1024:
+        return JSONResponse(status_code=413, content={"error": "Payload too large (max 10 MB)"})
     body = await request.json()
     query = body.get("query", "").strip() or "What can you see in this image? Describe it and identify any objects."
     image_b64 = body.get("image", "")
@@ -4790,9 +8908,9 @@ def _generate_template_followups(user_msg: str, reply: str, topic: str = None) -
             {"text": "What's the full infrastructure overview?", "hint": "broader"},
         ],
         "email": [
-            {"text": "Show me the urgent emails", "hint": "deeper"},
-            {"text": "How does volume compare to last week?", "hint": "compare"},
-            {"text": "Which emails need a reply today?", "hint": "action"},
+            {"text": "Show me customer emails that need replies", "hint": "action"},
+            {"text": "Read the latest urgent email", "hint": "deeper"},
+            {"text": "Draft a reply to the most recent customer email", "hint": "action"},
             {"text": "What's the overall inbox status?", "hint": "broader"},
         ],
         "news": [
@@ -4900,44 +9018,12 @@ def _generate_template_followups(user_msg: str, reply: str, topic: str = None) -
 
 async def _generate_followups(user_msg: str, reply: str, topic: str = None) -> list | None:
     """Generate 3-4 contextual follow-up questions for the dialogue tree.
-    Uses deterministic templates as PRIMARY source, with LLM enrichment as bonus."""
+    Uses deterministic templates ONLY — no LLM call. Instant, free, never fails."""
     # Skip for vague/short queries
     if len(user_msg.split()) < 3 and not topic:
         return None
 
-    # Always generate template-based followups (instant, never fails)
-    template_followups = _generate_template_followups(user_msg, reply, topic)
-
-    # Try LLM-generated followups for richer, more contextual options
-    try:
-        messages = [
-            {"role": "system", "content": _FOLLOWUP_PROMPT},
-            {"role": "user", "content": f"USER: {user_msg[:200]}\nAI: {reply[:400]}\nTOPIC: {topic or 'general'}"},
-        ]
-
-        raw = await _chat_llm(messages, max_tokens=250, temperature=0.6, purpose="followups")
-
-        if raw:
-            import json as _json_fu
-            # Strip markdown fences more aggressively
-            cleaned = re.sub(r'```(?:json)?\s*', '', raw)
-            cleaned = re.sub(r'```', '', cleaned).strip()
-            # Try to extract JSON array from anywhere in the response
-            _arr_match = re.search(r'(\[[\s\S]*\])', cleaned)
-            if _arr_match:
-                llm_followups = _json_fu.loads(_arr_match.group(1))
-                if isinstance(llm_followups, list) and len(llm_followups) >= 2:
-                    # Validate each item has 'text' field
-                    valid = [f for f in llm_followups if isinstance(f, dict) and f.get("text")]
-                    if len(valid) >= 2:
-                        log.info(f"LLM followups generated: {len(valid)} items")
-                        return valid[:4]
-    except Exception as e:
-        log.debug(f"LLM followup generation failed: {e}")
-
-    # Template followups as reliable fallback
-    log.info(f"Using template followups for topic={topic}")
-    return template_followups
+    return _generate_template_followups(user_msg, reply, topic)
 
 
 # ── Text-to-Speech (edge-tts) ─────────────────────────────────────────
@@ -5123,15 +9209,113 @@ async def _chat_claude(messages: list, max_tokens: int = 400, temperature: float
         return None
 
 
+async def _chat_openrouter(
+    messages: list,
+    max_tokens: int = 2000,
+    temperature: float = 0.3,
+    model: str | None = None,
+    skip_budget_check: bool = False,
+) -> str | None:
+    """Call OpenRouter API with full cost safeguards.
+    Uses GPT-4o-mini by default — $0.15/M input, $0.60/M output.
+    Falls back gracefully if not configured or budget exhausted.
+
+    Safeguards:
+    - Daily budget cap (default $0.10/day ≈ $3/month)
+    - Per-minute rate limit (default 30 RPM)
+    - Per-session request limit (default 500)
+    - Circuit breaker (3 consecutive errors → 5 min fallback)
+    - Request timeout (default 60s — prevents hanging)
+    - 402 handling (credits exhausted → clean fallback)
+    """
+    if not OPENROUTER_API_KEY:
+        return None
+
+    # ── Check safeguards ──
+    if not skip_budget_check:
+        block_reason = _or_check_budget()
+        if block_reason:
+            log.warning(f"OpenRouter blocked: {block_reason} — falling back")
+            return None
+
+    _model = model or _OPENROUTER_PANEL_MODEL
+    try:
+        async with httpx.AsyncClient(timeout=_OPENROUTER_TIMEOUT) as client:
+            resp = await client.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://arbiter.local",
+                    "X-Title": "ARBITER Mission Control",
+                },
+                json={
+                    "model": _model,
+                    "messages": messages,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                },
+            )
+            # ── Handle HTTP errors ──
+            if resp.status_code == 402:
+                log.error("OpenRouter credits exhausted (402) — all future calls will fall back to Ollama")
+                _or_record_error()
+                # Set circuit breaker to long duration — credits won't magically refill
+                _openrouter_usage["circuit_open_until"] = datetime.utcnow() + timedelta(hours=24)
+                return None
+            if resp.status_code == 429:
+                log.warning("OpenRouter rate limited (429) — backing off")
+                _or_record_error()
+                return None
+            if resp.status_code != 200:
+                log.warning(f"OpenRouter error {resp.status_code}: {resp.text[:200]}")
+                _or_record_error()
+                return None
+
+            data = resp.json()
+            text = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+
+            # ── Record usage ──
+            usage = data.get("usage", {})
+            in_tok = usage.get("prompt_tokens", 0)
+            out_tok = usage.get("completion_tokens", 0)
+            if in_tok or out_tok:
+                _or_record_usage(in_tok, out_tok)
+            else:
+                # No usage data — estimate from message lengths
+                est_in = sum(len(m.get("content", "")) for m in messages) // 4
+                est_out = len(text) // 4 if text else 0
+                _or_record_usage(est_in, est_out)
+
+            return text or None
+    except httpx.TimeoutException:
+        log.warning(f"OpenRouter timeout after {_OPENROUTER_TIMEOUT}s — request killed")
+        _or_record_error()
+        return None
+    except Exception as e:
+        log.warning(f"OpenRouter error: {type(e).__name__}: {e}")
+        _or_record_error()
+        return None
+
+
 async def _chat_llm(messages: list, max_tokens: int = 400,
                     temperature: float = 0.6, purpose: str = "chat") -> str | None:
     """Unified LLM call with automatic fallback chain.
 
     Priority: Claude (fast, cheap) → Ollama (free, local) → OpenAI (legacy).
+    For 'panel' purpose: routes to OpenRouter (GPT-4o-mini) first for cost savings.
     Falls back automatically on failure or when safeguards block Claude.
     """
     reply = None
     provider = LLM_PROVIDER
+
+    # ── OpenRouter (for panel/structured output — 10x cheaper than Claude) ──
+    if purpose == "panel" and OPENROUTER_API_KEY:
+        reply = await _chat_openrouter(messages, max_tokens=max_tokens, temperature=temperature)
+        if reply:
+            log.info(f"Panel routed to OpenRouter ({_OPENROUTER_PANEL_MODEL}) — saved ~90% vs Claude")
+            return reply
+        # Fall through to Claude if OpenRouter fails
 
     # ── Claude (primary if configured) ──
     if provider == "claude" or (provider != "ollama" and ANTHROPIC_API_KEY):
@@ -5241,7 +9425,79 @@ async def _execute_tool(name: str, inputs: dict) -> str:
             return json.dumps(rc_mon.summary(), default=str)
 
         elif name == "get_emails":
-            return json.dumps(email_mon.summary(), default=str)
+            from email_monitor import redact_for_llm as _rfl
+            summary = email_mon.summary()
+            # Include recent emails with snippets — redacted for LLM safety
+            recent = email_mon.recent(10)
+            for e in recent:
+                e["snippet"] = _rfl(e.get("snippet", ""))
+                e["subject"] = _rfl(e.get("subject", ""))
+                e.pop("body", None)  # never send full body in list context
+            customer = email_mon.customer_emails(5)
+            for e in customer:
+                e["snippet"] = _rfl(e.get("snippet", ""))
+                e["subject"] = _rfl(e.get("subject", ""))
+                e.pop("body", None)
+            summary["recent"] = recent
+            summary["customer_emails"] = customer
+            return json.dumps(summary, default=str)
+
+        elif name == "get_email_detail":
+            from email_monitor import redact_for_llm as _rfl
+            uid = inputs.get("uid", "")
+            if not uid:
+                return '{"error": "uid is required"}'
+            detail = email_mon.get_email_detail(uid)
+            if not detail:
+                return '{"error": "Email not found"}'
+            # ── Redact confidential data before returning to Claude context ──
+            detail["body"] = _rfl(detail.get("body", ""))
+            detail["snippet"] = _rfl(detail.get("snippet", ""))
+            detail["subject"] = _rfl(detail.get("subject", ""))
+            return json.dumps(detail, default=str)
+
+        elif name == "draft_email_reply":
+            from email_monitor import redact_for_llm as _rfl
+            uid = inputs.get("uid", "")
+            if not uid:
+                return '{"error": "uid is required"}'
+            detail = email_mon.get_email_detail(uid)
+            if not detail:
+                return '{"error": "Email not found"}'
+            instructions = inputs.get("instructions", "")
+            # ── Redact all content before LLM sees it ──
+            prompt = (
+                f"Draft a professional reply to this email.\n\n"
+                f"FROM: {_rfl(detail['sender'])}\nSUBJECT: {_rfl(detail['subject'])}\n"
+                f"BODY:\n{_rfl(detail['body'][:3000])}\n\n"
+            )
+            if instructions:
+                prompt += f"SPECIFIC INSTRUCTIONS: {instructions}\n\n"
+            prompt += (
+                "RULES: Professional but warm. UK English. Max 150 words. "
+                "Don't invent commitments/prices/dates — use [PLACEHOLDER]. "
+                "Return ONLY the reply body text."
+            )
+            msgs = [
+                {"role": "system", "content": "You are a professional email reply drafter."},
+                {"role": "user", "content": prompt},
+            ]
+            draft = None
+            if ANTHROPIC_API_KEY and not _claude_check_budget():
+                draft = await _chat_claude(msgs, max_tokens=400, temperature=0.5)
+            if not draft and OPENROUTER_API_KEY:
+                draft = await _chat_openrouter(msgs, max_tokens=400, temperature=0.5)
+            if not draft:
+                draft = await _chat_llm(msgs, max_tokens=400, purpose="email-draft-tool")
+            subject = detail.get("subject", "")
+            if not subject.lower().startswith("re:"):
+                subject = f"Re: {subject}"
+            return json.dumps({
+                "draft": (draft or "").strip(),
+                "to": detail.get("sender", ""),
+                "subject": subject,
+                "in_reply_to": detail.get("message_id", ""),
+            }, default=str)
 
         elif name == "get_roadmap":
             return json.dumps(_load_roadmap(), default=str)
@@ -5333,6 +9589,51 @@ async def _execute_tool(name: str, inputs: dict) -> str:
                 })
             return "\n\n".join(parts)
 
+        elif name == "search_history":
+            query = inputs.get("query", "").strip()
+            if not query:
+                return '{"error": "query is required"}'
+            category = inputs.get("category", "all")
+            limit = min(inputs.get("limit", 10), 20)  # cap at 20 to control context size
+            agent_id = inputs.get("agent_id")
+
+            if category == "all":
+                raw = arbiter_db.search_all(query, limit=limit)
+                # Trim large response fields to keep context lean
+                for table in raw.values():
+                    for item in table:
+                        for key in ("response", "message", "content"):
+                            if key in item and item[key] and len(str(item[key])) > 500:
+                                item[key] = str(item[key])[:500] + "…"
+                        item.pop("panel_json", None)
+                        item.pop("data_json", None)
+                return json.dumps(raw, default=str)
+            elif category == "agents":
+                results = arbiter_db.get_agent_results(
+                    agent_id=agent_id, search=query, limit=limit,
+                )
+                for r in results:
+                    if r.get("response") and len(r["response"]) > 800:
+                        r["response"] = r["response"][:800] + "…"
+                return json.dumps({"agent_results": results}, default=str)
+            elif category == "briefings":
+                results = arbiter_db.get_briefings(limit=limit)
+                # Filter by query in title/message
+                filtered = [b for b in results
+                            if query.lower() in (b.get("title", "") + b.get("message", "")).lower()]
+                return json.dumps({"briefings": filtered[:limit]}, default=str)
+            elif category == "insights":
+                results = arbiter_db.get_insights(limit=limit)
+                filtered = [i for i in results
+                            if query.lower() in (i.get("title", "") + i.get("message", "")).lower()]
+                return json.dumps({"insights": filtered[:limit]}, default=str)
+            elif category == "conversations":
+                # Search across all conversations
+                raw = arbiter_db.search_all(query, limit=limit)
+                return json.dumps({"conversations": raw.get("conversations", [])}, default=str)
+            else:
+                return json.dumps(arbiter_db.search_all(query, limit=limit), default=str)
+
         elif name == "search_products":
             query = inputs.get("query", "").strip()
             category = inputs.get("category", "other")
@@ -5395,23 +9696,84 @@ async def _execute_tool(name: str, inputs: dict) -> str:
         return f'{{"error": "{type(e).__name__}: {str(e)[:120]}"}}'
 
 
+# ── Selective Tool Loading ─────────────────────────────────────────────
+# Only send tools relevant to the query topic. Saves ~800-1200 input tokens
+# per call by not sending 11 tool schemas when only 3-4 are needed.
+_TOOL_BY_NAME = {t["name"]: t for t in _CLAUDE_TOOLS}
+
+# Core tools always included (cheap, high utility)
+_ALWAYS_TOOLS = {"search_web", "search_history"}
+
+# Topic → additional tools to include
+_TOPIC_TOOLS: dict[str | None, set[str]] = {
+    "stocks":   {"get_stocks", "get_market_intel"},
+    "weather":  {"get_weather"},
+    "services": {"get_service_health"},
+    "gcp":      {"get_service_health"},
+    "revenue":  {"get_revenue"},
+    "email":    {"get_emails", "get_email_detail", "draft_email_reply"},
+    "roadmap":  {"get_roadmap"},
+}
+
+def _select_tools(topic: str | None, user_msg: str) -> list[dict]:
+    """Return a filtered tool list based on topic and message content.
+    Falls back to full tool list for ambiguous/unknown queries."""
+    msg_lower = user_msg.lower()
+
+    # Keywords that signal specific tools are needed
+    _keyword_tools: list[tuple[set[str], list[str]]] = [
+        ({"get_stocks", "get_market_intel"}, ["stock", "share", "market", "invest", "portfolio", "ticker", "s&p", "ftse"]),
+        ({"get_weather"},                    ["weather", "temperature", "forecast", "rain", "sun"]),
+        ({"get_service_health"},             ["service", "health", "gcp", "outage", "incident", "uptime"]),
+        ({"get_revenue"},                    ["revenue", "mrr", "subscriber", "churn", "revenuecat"]),
+        ({"get_emails", "get_email_detail", "draft_email_reply"}, ["email", "inbox", "unread", "mail", "reply", "customer email"]),
+        ({"get_roadmap"},                    ["roadmap", "milestone", "deadline", "sprint"]),
+        ({"search_collectables"},            ["pokemon", "card", "collectable", "psa", "grading", "charizard", "trading card", "tcg"]),
+        ({"search_products"},                ["buy", "price", "shop", "product", "nike", "adidas", "headphone", "compare price"]),
+    ]
+
+    needed = set(_ALWAYS_TOOLS)
+
+    # Add topic-specific tools
+    if topic and topic in _TOPIC_TOOLS:
+        needed.update(_TOPIC_TOOLS[topic])
+
+    # Scan message for keyword matches
+    for tools, keywords in _keyword_tools:
+        if any(kw in msg_lower for kw in keywords):
+            needed.update(tools)
+
+    # If only core tools matched, send ALL tools (ambiguous query — let Claude decide)
+    if needed == _ALWAYS_TOOLS:
+        return _CLAUDE_TOOLS
+
+    selected = [_TOOL_BY_NAME[name] for name in needed if name in _TOOL_BY_NAME]
+    log.info(f"Selective tools: {len(selected)}/{len(_CLAUDE_TOOLS)} tools for topic={topic}")
+    return selected
+
+
 async def _chat_claude_tools(
     user_msg: str,
     system: str,
     history: list,
     max_rounds: int = 5,
+    tools: list[dict] | None = None,
 ) -> tuple[str | None, dict[str, str]]:
     """Claude tool-use conversation loop — ChatGPT-style on-demand data fetching.
 
-    Sends user_msg + _CLAUDE_TOOLS definitions to Claude. Claude calls tools as
+    Sends user_msg + tool definitions to Claude. Claude calls tools as
     needed; we execute them in parallel and return results. This repeats until
     Claude produces a final text reply (stop_reason == 'end_turn').
+
+    Args:
+        tools: Optional filtered tool list. Defaults to _CLAUDE_TOOLS (all tools).
 
     Returns:
         (reply_text, tool_results)
         reply_text is None if Claude failed or hit max_rounds without finishing.
         tool_results is a dict keyed by tool name → raw result string.
     """
+    _tools = tools if tools is not None else _CLAUDE_TOOLS
     client = _get_anthropic()
     if not client:
         return None, {}
@@ -5442,7 +9804,7 @@ async def _chat_claude_tools(
                 model=_CLAUDE_MODEL,
                 max_tokens=2400,
                 system=system,
-                tools=_CLAUDE_TOOLS,
+                tools=_tools,
                 messages=messages,
             )
         except Exception as e:
@@ -5486,7 +9848,7 @@ async def _chat_claude_tools(
                 result_content.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
-                    "content": result_str[:6000],  # cap per-result to stay within limits
+                    "content": result_str[:3000],  # cap per-result to control input token cost
                 })
                 log.info(f"  {block.name}({block.input}) → {len(result_str)} chars")
 
@@ -5523,8 +9885,11 @@ async def _jarvis_chat_claude(
         year=_now.year,
     )
 
+    # ── Select only relevant tools to reduce input tokens ──────────────
+    selected_tools = _select_tools(topic, user_msg)
+
     # ── Tool-calling loop ─────────────────────────────────────────────
-    reply, tool_data = await _chat_claude_tools(user_msg, system, history)
+    reply, tool_data = await _chat_claude_tools(user_msg, system, history, tools=selected_tools)
     if not reply:
         return None  # triggers Ollama fallback in jarvis_chat()
 

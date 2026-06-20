@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ARBITER — Mission Control</title>
-    <link rel="stylesheet" href="/static/style.css?v=20260615f">
+    <link rel="stylesheet" href="/static/style.css?v=20260620j">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js"></script>
 </head>
@@ -33,8 +33,8 @@
         </div>
         <div class="brand-status">
             <div class="system-status" id="system-badge">● INITIALISING</div>
-            <span class="mc-indicator" id="s-content-db" data-label="Content DB"><span class="ind-dot offline">●</span></span>
-            <span class="mc-indicator" id="s-engage-db" data-label="Engage DB"><span class="ind-dot offline">●</span></span>
+            <span class="mc-indicator" id="s-comfyui" data-label="ComfyUI · RTX 3080"><span class="ind-dot offline">●</span></span>
+            <span class="mc-indicator" id="s-openrouter" data-label="OpenRouter"><span class="ind-dot offline">●</span></span>
             <span class="mc-indicator" id="s-llm" data-label="LLM"><span class="ind-dot offline">●</span></span>
         </div>
     </div>
@@ -45,18 +45,29 @@
         <div class="clock-date" id="clock-date">Loading...</div>
     </div>
 
+    <!-- ═══ GLOBAL MUTE CONTROLS (always visible, outside clock to survive vision-mode) ═══ -->
+    <div class="mc-global-mute" id="mc-global-mute">
+        <button class="mc-mute-btn" id="mc-mic-mute-btn" onclick="_toggleMicMute()" title="Mute / Unmute microphone (disables wake word)">
+            <span id="mc-mic-mute-icon"></span>
+        </button>
+        <button class="mc-mute-btn" id="mc-mute-btn" onclick="_toggleMute()" title="Mute / Unmute ARBITER voice">
+            <span id="mc-mute-icon"></span>
+        </button>
+    </div>
+
+    <!-- ═══ JOB TRACKER (floating top-right HUD) ═══════════════ -->
+    <div class="job-tracker empty" id="job-tracker"></div>
+
+    <!-- ═══ NOTIFICATION BANNER STACK (top-left, auto-clear) ═══ -->
+    <div id="notif-stack" class="notif-stack"></div>
+
     <!-- ═══ MAIN VIEWPORT ═══════════════════════════════════════ -->
     <main class="mc-viewport">
 
         <!-- LEFT SIDE — Bulletins + System + System Logs + Conversation Logs -->
         <aside class="mc-float-left" id="float-left">
-            <!-- Bulletins — top-left critical info -->
-            <div class="float-section bulletin-panel">
-                <div class="float-label"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg> BULLETINS</div>
-                <div class="bulletin-feed" id="bulletin-feed-live">
-                    <div class="feed-empty">ALL NOMINAL</div>
-                </div>
-            </div>
+            <!-- Notification banners stack (top-left, auto-clear) -->
+            <!-- Moved to body-level #notif-stack -->
             <!-- System Info sliders (clickable to expand graphs) -->
             <div class="float-section sys-info-panel" id="sys-info-panel" style="cursor:pointer;">
                 <div class="float-label"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg> SYSTEM <span style="font-size:11px;opacity:0.5;letter-spacing:1px;margin-left:6px;">▼ CLICK FOR GRAPHS</span></div>
@@ -84,6 +95,13 @@
                 <div class="log-section-label">── CONVERSATION LOGS ──</div>
                 <div class="convo-log" id="convo-log">
                     <div class="convo-line system">ARBITER online. Awaiting input...</div>
+                </div>
+            </div>
+            <!-- Active Agents / Jobs Queue -->
+            <div class="float-section active-agents-panel" id="active-agents-panel">
+                <div class="log-section-label">── ACTIVE AGENTS ──</div>
+                <div class="active-agents-list" id="active-agents-list">
+                    <div class="aa-empty">NO ACTIVE JOBS</div>
                 </div>
             </div>
         </aside>
@@ -144,6 +162,11 @@
             <div class="orb-wrapper" id="orb-container">
                 <canvas id="orb-canvas" width="640" height="640"></canvas>
                 <div class="orb-state" id="orb-state" style="display:none;"></div>
+            </div>
+            <!-- Large clock below orb (visible in idle/sleep) -->
+            <div class="orb-clock" id="orb-clock">
+                <div class="orb-clock-time" id="orb-clock-time">00:00</div>
+                <div class="orb-clock-date" id="orb-clock-date"></div>
             </div>
             <button class="btn-stop" id="btn-stop" style="display:none;" title="Stop speaking">■ STOP</button>
 
@@ -238,13 +261,7 @@
             </div>
         </div>
 
-        <!-- Weather -->
-        <div class="dock-panel" data-dock="weather" title="Weather — UK">
-            <div class="dp-header"><span class="dp-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg></span><span class="dp-title">WEATHER</span></div>
-            <div class="dp-stats">
-                <div class="dp-stat"><span class="dp-val" id="dock-wx-temp">—</span><span class="dp-lbl" id="dock-wx-desc">—</span></div>
-            </div>
-        </div>
+        <!-- Workflows tile removed — merged into Agent Orchestrator -->
         <!-- Deadlines -->
         <div class="dock-panel" data-dock="deadlines" title="Key Deadlines & Roadmap">
             <div class="dp-header"><span class="dp-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></span><span class="dp-title">DEADLINES</span></div>
@@ -268,19 +285,27 @@
                 <div class="dp-stat"><span class="dp-val alert" id="dock-cicd-fail">—</span><span class="dp-lbl">FAIL</span></div>
             </div>
         </div>
-        <!-- Claude Token Usage -->
-        <div class="dock-panel" data-dock="claude" title="Claude API Token Usage">
-            <div class="dp-header"><span class="dp-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 14a1 1 0 1 1 1-1 1 1 0 0 1-1 1zm1-5h-2V7h2z"/></svg></span><span class="dp-title">CLAUDE</span></div>
+        <!-- LLM Token Usage -->
+        <div class="dock-panel" data-dock="claude" title="LLM API Token Usage">
+            <div class="dp-header"><span class="dp-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 14a1 1 0 1 1 1-1 1 1 0 0 1-1 1zm1-5h-2V7h2z"/></svg></span><span class="dp-title">LLM</span></div>
             <div class="dp-stats">
-                <div class="dp-stat"><span class="dp-val" id="dock-claude-cost">—</span><span class="dp-lbl">COST</span></div>
-                <div class="dp-stat"><span class="dp-val" id="dock-claude-reqs">—</span><span class="dp-lbl">REQS</span></div>
+                <div class="dp-stat"><span class="dp-val" id="dock-claude-cost">—</span><span class="dp-lbl"><span class="dp-status-dot" id="dock-claude-dot"></span>CLAUDE</span></div>
+                <div class="dp-stat"><span class="dp-val" id="dock-or-cost">—</span><span class="dp-lbl"><span class="dp-status-dot" id="dock-or-dot"></span>OPENRT</span></div>
+                <div class="dp-stat"><span class="dp-val" id="dock-gem-calls">—</span><span class="dp-lbl"><span class="dp-status-dot" id="dock-gem-dot"></span>GEMINI</span></div>
             </div>
         </div>
-        <!-- CEO Orchestration -->
-        <div class="dock-panel" data-dock="ceo" title="CEO Orchestration Layer">
-            <div class="dp-header"><span class="dp-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg></span><span class="dp-title">CEO</span></div>
+        <!-- Agent Orchestrator -->
+        <div class="dock-panel" data-dock="ceo" title="Agent Orchestrator">
+            <div class="dp-header"><span class="dp-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg></span><span class="dp-title">ORCH</span></div>
             <div class="dp-stats">
-                <div class="dp-stat"><span class="dp-val nominal" id="dock-ceo-agents">5</span><span class="dp-lbl">AGENTS</span></div>
+                <div class="dp-stat"><span class="dp-val nominal" id="dock-ceo-agents">6</span><span class="dp-lbl">AGENTS</span></div>
+            </div>
+        </div>
+        <!-- CEO Mode -->
+        <div class="dock-panel" data-dock="org" title="CEO — Team Orchestration">
+            <div class="dp-header"><span class="dp-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span><span class="dp-title">CEO</span></div>
+            <div class="dp-stats">
+                <div class="dp-stat"><span class="dp-val nominal" id="dock-org-teams">0</span><span class="dp-lbl">TEAMS</span></div>
             </div>
         </div>
         <!-- Camera Vision -->
@@ -317,6 +342,7 @@
             <div class="chart-container" style="height:180px;margin-top:12px;">
                 <canvas id="email-chart"></canvas>
             </div>
+            <div id="email-list" style="margin-top:12px;max-height:300px;overflow-y:auto;"></div>
         </div>
 
         <!-- Revenue -->
@@ -334,12 +360,7 @@
             </div>
         </div>
 
-        <!-- Weather -->
-        <div id="dock-panel-weather" class="dock-panel-inner">
-            <div class="weather-card" id="weather-card">
-                <div class="weather-loading">Locating…</div>
-            </div>
-        </div>
+        <!-- Workflows panel removed — content merged into Agent Orchestrator -->
 
         <!-- Deadlines / Roadmap -->
         <div id="dock-panel-deadlines" class="dock-panel-inner">
@@ -395,17 +416,17 @@
             </div>
         </div>
 
-        <!-- CEO Orchestration -->
+        <!-- Agent Orchestrator -->
         <div id="dock-panel-ceo" class="dock-panel-inner">
             <div class="ceo-orch">
-                <!-- Master CEO card -->
+                <!-- Master Orchestrator card -->
                 <div class="ceo-master-card" id="ceo-master-card">
                     <div class="ceo-master-icon"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 20h20l-2-8-4 4-4-8-4 8-4-4z"/><path d="M5 20v2h14v-2"/></svg></div>
                     <div class="ceo-master-info">
                         <div class="ceo-master-status ready"><span class="ceo-dot"></span> ONLINE</div>
-                        <div class="ceo-master-name">CEO ORCHESTRATOR</div>
+                        <div class="ceo-master-name">AGENT ORCHESTRATOR</div>
                         <div class="ceo-master-role">Strategic Command Layer</div>
-                        <div class="ceo-master-desc">Routes directives to specialised sub-agents. Coordinates multi-model responses across research, marketing, sales, engineering & analytics.</div>
+                        <div class="ceo-master-desc">Routes directives to specialised sub-agents. Coordinates multi-model responses across research, strategy, product, engineering, marketing & risk.</div>
                     </div>
                     <div class="ceo-master-stats">
                         <div class="ceo-master-stat"><span class="ceo-master-stat-val" id="ceo-stat-routes">0</span><span class="ceo-master-stat-lbl">ROUTES</span></div>
@@ -413,25 +434,88 @@
                     </div>
                 </div>
 
-                <!-- Broadcast input -->
-                <div class="ceo-broadcast-row">
-                    <input type="text" class="ceo-broadcast-input" id="ceo-broadcast-input" placeholder="Broadcast a directive to all agents..." autocomplete="off" />
-                    <button class="ceo-broadcast-btn" id="ceo-broadcast-btn" title="Send to all agents">⌁ BROADCAST</button>
+                <!-- Pipeline launcher + status (single compact row) -->
+                <div class="ceo-pipeline-row" id="ceo-pipeline-row">
+                    <select class="ceo-template-select" id="ceo-template-select" title="Pipeline template" onchange="_ceoTemplateChanged(this.value)">
+                        <option value="full">◈ FULL</option>
+                    </select>
+                    <input type="text" class="ceo-pipeline-input" id="ceo-pipeline-input" placeholder="Business directive..." autocomplete="off" />
+                    <button class="ceo-pipeline-btn" id="ceo-pipeline-btn" title="Launch sequential pipeline">▶</button>
+                    <span class="ceo-pipe-status-inline" id="ceo-pipeline-status" style="display:none;">
+                        <span class="ceo-pipe-label" id="ceo-pipe-label">RUNNING</span>
+                        <span class="ceo-pipe-stage" id="ceo-pipe-stage">—</span>
+                        <button class="ceo-pipe-approve-btn pipeline-approve-btn" id="ceo-pipe-approve" style="display:none;" title="Approve gate">✓</button>
+                        <button class="ceo-pipe-reject-btn pipeline-reject-btn" id="ceo-pipe-reject" style="display:none;" title="Reject">✕</button>
+                        <span class="ceo-pipe-report-group" id="ceo-pipe-report-group" style="display:none;">
+                            <button class="ceo-pipe-report-btn view" id="ceo-pipe-preview" title="View report" onclick="_ceoPipelinePreviewReport()"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg> VIEW</button>
+                            <button class="ceo-pipe-report-btn save" id="ceo-pipe-report" title="Download PDF" onclick="_ceoPipelineDownloadPDF()"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> PDF</button>
+                        </span>
+                        <button class="ceo-pipe-cancel-btn" id="ceo-pipe-cancel" style="display:none;" title="Cancel pipeline" onclick="_ceoPipelineCancel()">✕</button>
+                    </span>
                 </div>
 
                 <!-- Connection lines -->
                 <div class="ceo-connections"><div class="ceo-conn-line"></div><div class="ceo-conn-spread"></div></div>
 
-                <!-- Sub-agent heading -->
-                <div class="ceo-section-header">SUB-AGENTS</div>
+                <!-- ── Node Graph (ComfyUI-style agent workflow view) ── -->
+                <div class="wf-graph-wrap" id="wf-graph-wrap">
+                    <!-- Stats bar -->
+                    <div class="wf-graph-stats">
+                        <span class="wf-gs"><span class="wf-gs-val" id="wf-stat-active">0</span> ACTIVE</span>
+                        <span class="wf-gs"><span class="wf-gs-val" id="wf-stat-complete">0</span> COMPLETE</span>
+                        <span class="wf-gs"><span class="wf-gs-val" id="wf-stat-errors">0</span> ERRORS</span>
+                        <button class="org-btn org-btn-create-agent" id="ceo-create-wf-btn" title="Create custom workflow" style="margin-left:auto" onclick="_cwbOpen()">+ WORKFLOW</button>
+                        <button class="org-btn org-btn-create-agent" id="ceo-create-agent-btn" title="Create custom agent">+ AGENT</button>
+                    </div>
+                    <!-- SVG connection layer -->
+                    <svg class="wf-graph-svg" id="wf-graph-svg"></svg>
+                    <!-- Agent nodes rendered by JS -->
+                    <div class="wf-graph-nodes" id="wf-graph-nodes"></div>
+                </div>
 
-                <!-- Agent grid -->
-                <div class="ceo-agent-grid" id="ceo-agent-grid"></div>
+                <!-- Workflow run history (compact, below graph) -->
+                <div class="wf-runs" id="wf-runs"></div>
             </div>
         </div>
 
-        <!-- Claude Token Usage -->
+        <!-- CEO Mode -->
+        <div id="dock-panel-org" class="dock-panel-inner">
+            <div class="org-mode">
+                <!-- Header bar with Create button -->
+                <div class="org-header-bar">
+                    <span class="org-header-title">CEO</span>
+                    <div class="org-header-actions">
+                        <button class="org-btn org-btn-new-team" id="org-new-team-btn" title="Create new team">+ TEAM</button>
+                    </div>
+                </div>
+
+                <!-- Org template list -->
+                <div class="org-teams-list" id="org-teams-list">
+                    <div class="org-empty">No teams created yet. Click <b>+ TEAM</b> to build your first team.</div>
+                </div>
+
+                <!-- Active org run view (hidden until a run starts) -->
+                <div class="org-run-view" id="org-run-view" style="display:none;">
+                    <div class="org-run-header">
+                        <span class="org-run-title" id="org-run-title">—</span>
+                        <span class="org-run-cost" id="org-run-cost">$0.000</span>
+                    </div>
+                    <div class="org-run-chart" id="org-run-chart"></div>
+                    <div class="org-run-controls" id="org-run-controls" style="display:none;">
+                        <div class="org-run-level-info" id="org-run-level-info">Level 1 complete — review outputs before continuing</div>
+                        <div class="org-run-gate-btns">
+                            <button class="org-btn org-btn-approve" id="org-run-approve">✓ APPROVE & CONTINUE</button>
+                            <button class="org-btn org-btn-reject" id="org-run-reject">✕ STOP</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- LLM Token Usage -->
         <div id="dock-panel-claude" class="dock-panel-inner">
+            <!-- Claude Section -->
+            <div class="float-label" style="font-size:10px; letter-spacing:1.5px; margin-bottom:8px; color:var(--cyan);">CLAUDE (CHAT / VOICE)</div>
             <div class="readout-grid">
                 <div class="readout-cell"><span class="rv" id="cl-model">—</span><span class="rl">MODEL</span></div>
                 <div class="readout-cell"><span class="rv accent" id="cl-cost">—</span><span class="rl">$ COST TODAY</span></div>
@@ -443,13 +527,69 @@
                 <div class="readout-cell"><span class="rv" id="cl-circuit">—</span><span class="rl">CIRCUIT BREAKER</span></div>
             </div>
             <div class="claude-usage-bar" id="claude-usage-bar" style="margin-top:10px;">
-                <div class="float-label" style="font-size:10px; letter-spacing:1px; margin-bottom:4px;">BUDGET USAGE</div>
+                <div class="float-label" style="font-size:10px; letter-spacing:1px; margin-bottom:4px;">CLAUDE BUDGET</div>
                 <div style="background:rgba(0,200,255,0.08); border-radius:3px; height:8px; overflow:hidden;">
                     <div id="cl-budget-fill" style="height:100%; background:var(--cyan); border-radius:3px; transition:width 0.5s ease; width:0%;"></div>
                 </div>
                 <div style="display:flex; justify-content:space-between; font-family:var(--font-mono); font-size:9px; color:var(--cyan-dim); margin-top:3px;">
                     <span id="cl-budget-pct">0%</span>
                     <span id="cl-blocked-status">OPERATIONAL</span>
+                </div>
+            </div>
+            <!-- OpenRouter Section -->
+            <div style="border-top:1px solid rgba(0,200,255,0.1); margin-top:14px; padding-top:12px;">
+                <div class="float-label" style="font-size:10px; letter-spacing:1.5px; margin-bottom:8px; color:var(--green);">OPENROUTER (AGENTS / PANELS)</div>
+                <div class="readout-grid">
+                    <div class="readout-cell"><span class="rv" id="or-model">—</span><span class="rl">AGENT MODEL</span></div>
+                    <div class="readout-cell"><span class="rv accent" id="or-cost">—</span><span class="rl">$ COST TODAY</span></div>
+                    <div class="readout-cell"><span class="rv" id="or-balance" style="color:var(--green)">—</span><span class="rl">$ ACCOUNT BAL.</span></div>
+                    <div class="readout-cell"><span class="rv" id="or-budget">—</span><span class="rl">$ DAILY CAP</span></div>
+                    <div class="readout-cell"><span class="rv" id="or-input-tok">—</span><span class="rl">▼ INPUT TOKENS</span></div>
+                    <div class="readout-cell"><span class="rv" id="or-output-tok">—</span><span class="rl">▲ OUTPUT TOKENS</span></div>
+                    <div class="readout-cell"><span class="rv" id="or-reqs">—</span><span class="rl">REQUESTS</span></div>
+                    <div class="readout-cell"><span class="rv" id="or-rpm">—</span><span class="rl">RPM LIMIT</span></div>
+                    <div class="readout-cell"><span class="rv" id="or-circuit">—</span><span class="rl">CIRCUIT BREAKER</span></div>
+                </div>
+                <div style="margin-top:10px;">
+                    <div class="float-label" style="font-size:10px; letter-spacing:1px; margin-bottom:4px;">OPENROUTER BUDGET</div>
+                    <div style="background:rgba(0,230,118,0.08); border-radius:3px; height:8px; overflow:hidden;">
+                        <div id="or-budget-fill" style="height:100%; background:var(--green); border-radius:3px; transition:width 0.5s ease; width:0%;"></div>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; font-family:var(--font-mono); font-size:9px; color:rgba(0,230,118,0.6); margin-top:3px;">
+                        <span id="or-budget-pct">0%</span>
+                        <span id="or-blocked-status">OPERATIONAL</span>
+                    </div>
+                </div>
+            </div>
+            <!-- Gemini Section -->
+            <div style="border-top:1px solid rgba(0,200,255,0.1); margin-top:14px; padding-top:12px;">
+                <div class="float-label" style="font-size:10px; letter-spacing:1.5px; margin-bottom:8px; color:var(--purple, #b388ff);">GEMINI (RESEARCH / ANALYSIS) — FREE TIER</div>
+                <div class="readout-grid">
+                    <div class="readout-cell"><span class="rv" id="gem-model">—</span><span class="rl">MODEL</span></div>
+                    <div class="readout-cell"><span class="rv accent" id="gem-calls">—</span><span class="rl">CALLS TODAY</span></div>
+                    <div class="readout-cell"><span class="rv" id="gem-cap">—</span><span class="rl">DAILY CAP</span></div>
+                    <div class="readout-cell"><span class="rv" id="gem-session">—</span><span class="rl">SESSION CALLS</span></div>
+                    <div class="readout-cell"><span class="rv" id="gem-input-tok">—</span><span class="rl">INPUT TOKENS</span></div>
+                    <div class="readout-cell"><span class="rv" id="gem-output-tok">—</span><span class="rl">OUTPUT TOKENS</span></div>
+                    <div class="readout-cell"><span class="rv" id="gem-circuit">—</span><span class="rl">CIRCUIT BREAKER</span></div>
+                    <div class="readout-cell"><span class="rv" id="gem-cost-label">$0.00</span><span class="rl">$ COST (FREE)</span></div>
+                </div>
+                <div style="margin-top:10px;">
+                    <div class="float-label" style="font-size:10px; letter-spacing:1px; margin-bottom:4px;">FREE TIER USAGE</div>
+                    <div style="background:rgba(179,136,255,0.08); border-radius:3px; height:8px; overflow:hidden;">
+                        <div id="gem-budget-fill" style="height:100%; background:var(--purple, #b388ff); border-radius:3px; transition:width 0.5s ease; width:0%;"></div>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; font-family:var(--font-mono); font-size:9px; color:rgba(179,136,255,0.6); margin-top:3px;">
+                        <span id="gem-budget-pct">0%</span>
+                        <span id="gem-blocked-status">OPERATIONAL</span>
+                    </div>
+                </div>
+            </div>
+            <!-- Combined totals -->
+            <div style="border-top:1px solid rgba(0,200,255,0.1); margin-top:14px; padding-top:10px;">
+                <div style="display:flex; justify-content:space-between; font-family:var(--font-mono); font-size:10px; letter-spacing:0.5px;">
+                    <span style="color:var(--text-dim);">COMBINED DAILY SPEND</span>
+                    <span style="color:var(--amber);" id="llm-total-cost">—</span>
                 </div>
             </div>
         </div>
@@ -465,6 +605,8 @@
             <button class="startup-dismiss" id="startup-dismiss">CONTINUE ANYWAY</button>
         </div>
     </div>
+
+    <!-- Pipeline report overlay removed — reports now save as PDF + markdown locally -->
 
     <!-- ═══ SESSION REPORT OVERLAY ═══ -->
     <div class="report-overlay" id="report-overlay">
@@ -500,6 +642,108 @@
         <div id="panel-systems"></div>
     </div>
 
-    <script src="/static/jarvis.js?v=20260619b"></script>
+    <!-- Report Preview Overlay -->
+    <div id="pipeline-report-overlay" class="pipeline-report-overlay">
+        <div class="pipeline-report-container">
+            <div class="pipeline-report-header">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity:0.6"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+                <span id="pipeline-report-title" class="pipeline-report-title">REPORT</span>
+                <span id="pipeline-report-meta" class="pipeline-report-meta"></span>
+                <div class="pipeline-report-actions">
+                    <button class="pr-action-btn" id="pr-btn-pdf" onclick="_reportPrintPDF()" title="Download as PDF"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> PDF</button>
+                    <button class="pr-action-btn" id="pr-btn-history" onclick="_reportShowHistory()" title="Saved reports"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> HISTORY</button>
+                </div>
+                <button class="pipeline-report-close" onclick="_ceoPipelineCloseReport()">✕</button>
+            </div>
+            <div id="pipeline-report-body" class="pipeline-report-body"></div>
+        </div>
+    </div>
+
+    <!-- ═══ CEO MODE MODALS (must be at body level, not inside dock-panels) ═══ -->
+
+    <!-- Agent Creator Modal -->
+    <div class="org-modal-overlay" id="org-agent-modal" style="display:none;">
+        <div class="org-modal">
+            <div class="org-modal-header">
+                <span>CREATE AGENT</span>
+                <button class="org-modal-close" id="org-agent-modal-close">✕</button>
+            </div>
+            <div class="org-modal-body">
+                <label class="org-field"><span>NAME</span><input type="text" id="org-agent-name" placeholder="e.g. Data Scientist" autocomplete="off"/></label>
+                <label class="org-field"><span>ROLE</span><input type="text" id="org-agent-role" placeholder="e.g. ML & Analytics Lead" autocomplete="off"/></label>
+                <label class="org-field"><span>DESCRIPTION</span><input type="text" id="org-agent-desc" placeholder="What this agent does..." autocomplete="off"/></label>
+                <label class="org-field"><span>MODEL TIER</span>
+                    <select id="org-agent-tier">
+                        <option value="execution">Execution (GPT-4o-mini — cheapest)</option>
+                        <option value="research">Research (Gemini Flash — free tier)</option>
+                        <option value="strategic">Strategic (Claude Haiku — premium)</option>
+                    </select>
+                </label>
+                <label class="org-field"><span>ICON</span>
+                    <select id="org-agent-icon">
+                        <option value="user">User</option>
+                        <option value="search">Search</option>
+                        <option value="zap">Zap</option>
+                        <option value="shield">Shield</option>
+                        <option value="compass">Compass</option>
+                        <option value="cpu">CPU</option>
+                        <option value="bar-chart">Chart</option>
+                        <option value="star">Star</option>
+                        <option value="book">Book</option>
+                        <option value="briefcase">Briefcase</option>
+                        <option value="layers">Layers</option>
+                        <option value="tool">Tool</option>
+                        <option value="globe">Globe</option>
+                        <option value="megaphone">Megaphone</option>
+                        <option value="trending-up">Trending</option>
+                        <option value="clipboard">Clipboard</option>
+                        <option value="edit">Edit</option>
+                    </select>
+                </label>
+                <label class="org-field"><span>COLOUR</span><input type="color" id="org-agent-colour" value="#00e5ff"/></label>
+                <label class="org-field full"><span>SYSTEM PROMPT</span><textarea id="org-agent-prompt" rows="5" placeholder="You are a specialist in..."></textarea></label>
+            </div>
+            <div class="org-modal-footer">
+                <button class="org-btn org-btn-save" id="org-agent-save">CREATE AGENT</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Team Builder Modal -->
+    <div class="org-modal-overlay" id="org-team-modal" style="display:none;">
+        <div class="org-modal org-modal-wide">
+            <div class="org-modal-header">
+                <span id="org-team-modal-title">CREATE TEAM</span>
+                <button class="org-modal-close" id="org-team-modal-close">✕</button>
+            </div>
+            <div class="org-modal-body">
+                <label class="org-field"><span>TEAM NAME</span><input type="text" id="org-team-name" placeholder="e.g. Product Launch Squad" autocomplete="off"/></label>
+                <label class="org-field"><span>DESCRIPTION</span><input type="text" id="org-team-desc" placeholder="What this team does..." autocomplete="off"/></label>
+                <div class="org-team-builder">
+                    <div class="org-team-palette">
+                        <div class="org-team-palette-title" style="display:flex;align-items:center;justify-content:space-between;">
+                            AVAILABLE AGENTS
+                            <button class="org-btn" id="org-team-new-agent-btn" style="font-size:8px;padding:2px 6px;margin:0;" title="Create a new agent">+ AGENT</button>
+                        </div>
+                        <div class="org-team-palette-list" id="org-team-palette-list"></div>
+                    </div>
+                    <div class="org-team-canvas">
+                        <div class="org-team-canvas-title">TEAM STRUCTURE</div>
+                        <div class="org-team-levels" id="org-team-levels">
+                            <div class="org-team-level" data-level="0"><div class="org-level-label">LEVEL 0 — LEADERSHIP</div><div class="org-level-slots" data-level="0"></div></div>
+                            <div class="org-team-level" data-level="1"><div class="org-level-label">LEVEL 1 — DEPARTMENT HEADS</div><div class="org-level-slots" data-level="1"></div></div>
+                            <div class="org-team-level" data-level="2"><div class="org-level-label">LEVEL 2 — CONTRIBUTORS</div><div class="org-level-slots" data-level="2"></div></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="org-modal-footer">
+                <span class="org-cost-estimate" id="org-cost-estimate">EST. COST: ~$0.000</span>
+                <button class="org-btn org-btn-save" id="org-team-save">SAVE TEAM</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/jarvis.js?v=20260620j"></script>
 </body>
 </html>
