@@ -278,7 +278,7 @@ h1 {
 .mc-clock {
     position: fixed; top: 0; right: 0; z-index: 100;
     display: flex; align-items: center; gap: clamp(8px, 0.8vw, 16px);
-    padding: clamp(8px, 0.7vw, 14px) 58px clamp(8px, 0.7vw, 14px) clamp(12px, 1.2vw, 24px);
+    padding: clamp(8px, 0.7vw, 14px) clamp(12px, 1.2vw, 24px);
     font-family: var(--font-mono);
     background: linear-gradient(225deg, rgba(0,20,40,0.85) 0%, rgba(0,8,18,0.6) 100%);
     border-bottom: 1px solid rgba(0,240,255,0.12);
@@ -287,30 +287,15 @@ h1 {
     backdrop-filter: blur(12px);
     transform: translateX(0);
 }
-/* Global mute — sits below the clock, always visible */
-.mc-global-mute {
-    position: fixed; top: 4px; right: 4px;
-    z-index: 10000;
-    display: flex; align-items: center; gap: 3px;
-    pointer-events: auto !important;
-    opacity: 1 !important;
-    transform: none !important;
-    visibility: visible !important;
-}
-.mc-mute-btn {
+.clock-settings-btn {
     display: flex; align-items: center; justify-content: center;
-    background: rgba(4,10,30,0.85); border: 1px solid rgba(0,240,255,0.15);
-    border-radius: 4px; padding: 3px; cursor: pointer;
-    color: var(--cyan); line-height: 0;
-    transition: all 0.2s;
-    backdrop-filter: blur(12px);
+    background: none; border: 1px solid rgba(0,240,255,0.12);
+    border-radius: 4px; padding: 2px; cursor: pointer;
+    color: var(--cyan-dim); line-height: 0; transition: all 0.2s;
+    margin-left: 4px;
 }
-.mc-mute-btn:hover { border-color: var(--cyan); color: #fff; background: rgba(0,240,255,0.08); }
-.mc-mute-btn.muted { color: var(--text-dim); border-color: rgba(255,255,255,0.06); opacity: 0.6; }
-.mc-mute-btn.muted:hover { color: var(--cyan); opacity: 1; }
-#mc-mic-mute-btn.muted { color: var(--red); border-color: rgba(255,68,68,0.3); opacity: 1; }
-#mc-mic-mute-btn.muted:hover { color: #ff8a80; border-color: rgba(255,68,68,0.5); }
-#mc-settings-btn.active { color: #fff; border-color: var(--cyan); background: rgba(0,240,255,0.12); }
+.clock-settings-btn:hover { color: var(--cyan); border-color: var(--cyan); }
+.clock-settings-btn.active { color: #fff; border-color: var(--cyan); background: rgba(0,240,255,0.12); }
 
 /* ── Settings Overlay ────────────────────────────────────────────── */
 .settings-overlay {
@@ -1620,7 +1605,7 @@ body.locked .orb-clock { opacity: 1; pointer-events: auto; transform: translateY
     font-family: var(--font-mono); font-size: 10px;
     color: var(--text-bright); line-height: 1.6; text-align: left;
     background: rgba(0,0,0,0.3); border-radius: 6px;
-    padding: 10px 12px; max-height: 180px; overflow-y: auto;
+    padding: 10px 12px; max-height: 400px; overflow-y: auto;
     border: 1px solid rgba(0,240,255,0.06);
     white-space: pre-wrap; word-wrap: break-word; width: 100%;
     scrollbar-width: thin; scrollbar-color: rgba(0,200,255,0.2) transparent;
@@ -1873,7 +1858,7 @@ body.locked .orb-clock { opacity: 1; pointer-events: auto; transform: translateY
     font-family: var(--font-mono); font-size: 9px;
     color: var(--text-bright); line-height: 1.5;
     background: rgba(0,0,0,0.3); border-radius: 0 0 8px 8px;
-    padding: 8px 12px; max-height: 120px; overflow-y: auto;
+    padding: 8px 12px; max-height: 400px; overflow-y: auto;
     white-space: pre-wrap; word-wrap: break-word;
     border-top: 1px solid rgba(0,240,255,0.04);
     display: none;
@@ -2732,6 +2717,23 @@ body.locked .orb-clock { opacity: 1; pointer-events: auto; transform: translateY
 .pr-section-content h4 { color: var(--text-bright); margin: 12px 0 4px; font-size: 13px; }
 .pr-section-content strong { color: var(--text-bright); }
 .pr-section-content hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
+
+/* Markdown tables */
+.md-table {
+    width: 100%; border-collapse: collapse; margin: 10px 0;
+    font-family: var(--font-mono); font-size: 11px;
+}
+.md-table th {
+    background: rgba(0,200,255,0.08); color: var(--cyan);
+    padding: 6px 10px; text-align: left; font-weight: 700;
+    border-bottom: 1px solid rgba(0,240,255,0.15);
+    letter-spacing: 0.5px; font-size: 10px;
+}
+.md-table td {
+    padding: 5px 10px; color: var(--text-main);
+    border-bottom: 1px solid rgba(0,240,255,0.05);
+}
+.md-table tr:hover td { background: rgba(0,200,255,0.04); }
 
 /* Report history list */
 .pr-history-item {
@@ -5061,7 +5063,7 @@ body.locked .job-tracker { display: none; }
 }
 .org-run-node-output {
     font-size: 10px; color: var(--text-dim); line-height: 1.5;
-    max-height: 120px; overflow-y: auto; padding: 6px 8px;
+    max-height: 300px; overflow-y: auto; padding: 6px 8px;
     background: rgba(0,0,0,0.2); border-radius: 3px; margin-top: 6px;
     white-space: pre-wrap; word-break: break-word;
 }
