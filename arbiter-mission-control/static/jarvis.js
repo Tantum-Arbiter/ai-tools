@@ -1122,6 +1122,17 @@ class VoiceEngine {
         this._initUI();
         this._initLock();
 
+        // Auto-restore last session on page load
+        this._autoRestoreLastSession();
+
+        // Auto-save session when leaving the page (close tab, refresh, navigate away)
+        window.addEventListener('beforeunload', () => this._saveCurrentSession());
+
+        // Also save periodically (every 30s) as a safety net
+        setInterval(() => {
+            if (this._sessionCache.length > 0) this._saveCurrentSession();
+        }, 30_000);
+
         // Log boot status to conversation log
         const srAvailable = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
         const browserInfo = navigator.userAgent.includes('Chrome') ? 'Chrome' :
@@ -3228,6 +3239,33 @@ class VoiceEngine {
     }
 
     // ── Session Persistence (localStorage) ──────────────────────
+
+    _autoRestoreLastSession() {
+        try {
+            const sessions = this._loadAllSessions();
+            if (sessions.length === 0) return;
+            // Restore the most recent session (first in the array)
+            const last = sessions[0];
+            if (!last || !last.cache || last.cache.length === 0) return;
+            this._sessionCache = last.cache;
+            this._sessionId = last.id;
+            this._sessionName = last.name;
+            this.history = last.history || [];
+            this._updateSessionBadge();
+            // Replay last few exchanges into chat view
+            const msgs = document.getElementById('chat-messages');
+            if (msgs) {
+                for (const entry of this._sessionCache.slice(-5)) {
+                    this._chatAddMessage(entry.query, 'user', true);
+                    if (entry.reply) this._chatAddMessage(entry.reply, 'assistant', true);
+                }
+            }
+            console.log(`[SESSION] Auto-restored: "${last.name}" (${last.count} queries, ${(this.history || []).length} history turns)`);
+        } catch (e) {
+            console.warn('[SESSION] Auto-restore failed:', e);
+        }
+    }
+
     _saveCurrentSession() {
         if (this._sessionCache.length === 0) return;
         try {
