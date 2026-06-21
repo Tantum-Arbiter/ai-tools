@@ -8825,7 +8825,7 @@ async function _ceoDispatch(agentId, inputEl, nodeEl) {
         } else {
             _nodeSetStatus(agentId, 'complete');
             if (output) {
-                output.innerHTML = (data.response || 'No response') + providerBadge;
+                output.innerHTML = _renderMarkdown(data.response || 'No response') + providerBadge;
             }
             _wfUpdateLive(wfId, agentId, 'complete', data.response, data.model);
             _jobComplete(_jtId);
@@ -9035,9 +9035,8 @@ function _ceoPipelineUpdateUI(pipe) {
             _nodeSetStatus(aid, 'complete');
             if (output) {
                 output.classList.add('active');
-                // Truncate long outputs for display
                 const txt = stage.output || 'Complete';
-                output.textContent = txt.length > 600 ? txt.substring(0, 600) + '…' : txt;
+                output.innerHTML = _renderMarkdown(txt);
             }
             _ceoReadCount++;
         } else if (stage.status === 'error') {
@@ -9287,16 +9286,55 @@ function _reportPrintPDF() {
 
 // ── Markdown rendering helper ──
 function _renderMarkdown(mdText) {
-    return mdText
-        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-        .replace(/^# (.+)$/gm, '<h2>$1</h2>')
-        .replace(/^## (.+)$/gm, '<h3>$1</h3>')
-        .replace(/^### (.+)$/gm, '<h4>$1</h4>')
-        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-        .replace(/^- (.+)$/gm, '<div style="padding-left:12px;">• $1</div>')
-        .replace(/^\d+\.\s(.+)$/gm, '<div style="padding-left:12px;">$&</div>')
-        .replace(/^---$/gm, '<hr>')
-        .replace(/`([^`]+)`/g, '<code style="background:rgba(0,200,255,0.08);padding:1px 4px;border-radius:3px;font-size:11px;">$1</code>');
+    const lines = mdText.split('\n');
+    const out = [];
+    let inTable = false;
+    let tableRows = [];
+
+    function flushTable() {
+        if (!tableRows.length) return;
+        let html = '<table class="md-table"><thead><tr>';
+        const headers = tableRows[0].split('|').map(c => c.trim()).filter(c => c);
+        headers.forEach(h => { html += `<th>${_escHtml(h)}</th>`; });
+        html += '</tr></thead><tbody>';
+        for (let r = 2; r < tableRows.length; r++) {
+            const cells = tableRows[r].split('|').map(c => c.trim()).filter(c => c);
+            html += '<tr>';
+            cells.forEach(c => { html += `<td>${_escHtml(c)}</td>`; });
+            html += '</tr>';
+        }
+        html += '</tbody></table>';
+        out.push(html);
+        tableRows = [];
+        inTable = false;
+    }
+
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const isTableRow = /^\|(.+)\|$/.test(line.trim());
+        const isSeparator = /^\|[\s:|-]+\|$/.test(line.trim());
+
+        if (isTableRow || isSeparator) {
+            if (!inTable) inTable = true;
+            tableRows.push(line.trim());
+            continue;
+        }
+        if (inTable) flushTable();
+
+        const escaped = line.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const rendered = escaped
+            .replace(/^# (.+)$/, '<h2>$1</h2>')
+            .replace(/^## (.+)$/, '<h3>$1</h3>')
+            .replace(/^### (.+)$/, '<h4>$1</h4>')
+            .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+            .replace(/^- (.+)$/, '<div style="padding-left:12px;">• $1</div>')
+            .replace(/^(\d+\.)\s(.+)$/, '<div style="padding-left:12px;">$1 $2</div>')
+            .replace(/^---$/, '<hr>')
+            .replace(/`([^`]+)`/g, '<code style="background:rgba(0,200,255,0.08);padding:1px 4px;border-radius:3px;font-size:11px;">$1</code>');
+        out.push(rendered);
+    }
+    if (inTable) flushTable();
+    return out.join('\n');
 }
 
 async function _ceoPipelinePreviewReport() {
@@ -9499,7 +9537,7 @@ function _ceoPipelineShowStageReport(agentId) {
                             <span class="report-section-num">${i + 1}</span>
                             <span class="report-section-query">${_escHtmlGlobal(heading.substring(0, 80))}</span>
                         </div>
-                        <div class="report-summary-block" style="white-space:pre-wrap;font-size:12px;line-height:1.6;color:var(--text-main);max-height:400px;overflow-y:auto;">${_escHtmlGlobal(content || heading)}</div>`;
+                        <div class="report-summary-block pr-section-content" style="font-size:12px;line-height:1.6;color:var(--text-main);max-height:400px;overflow-y:auto;">${_renderMarkdown(content || heading)}</div>`;
                     body.appendChild(secEl);
                 });
             } else {
@@ -9510,7 +9548,7 @@ function _ceoPipelineShowStageReport(agentId) {
                         <span class="report-section-num">◆</span>
                         <span class="report-section-query">${agentName} OUTPUT</span>
                     </div>
-                    <div class="report-summary-block" style="white-space:pre-wrap;font-size:12px;line-height:1.6;color:var(--text-main);max-height:600px;overflow-y:auto;">${_escHtmlGlobal(output)}</div>`;
+                    <div class="report-summary-block pr-section-content" style="font-size:12px;line-height:1.6;color:var(--text-main);max-height:600px;overflow-y:auto;">${_renderMarkdown(output)}</div>`;
                 body.appendChild(secEl);
             }
         }
