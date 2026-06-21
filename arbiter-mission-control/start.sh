@@ -68,11 +68,14 @@ elif command -v md5 >/dev/null 2>&1; then
 fi
 
 if [ ! -f "$MARKER" ] || [ "$(cat "$MARKER" 2>/dev/null)" != "$REQS_HASH" ]; then
-  info "Installing dependencies..."
-  pip install --upgrade pip -q 2>/dev/null
-  pip install -r requirements.txt -q
-  echo "$REQS_HASH" > "$MARKER"
-  ok "Dependencies installed"
+  info "Installing dependencies (this may take a minute on first run)..."
+  pip install --upgrade pip --quiet || warn "pip upgrade failed (non-fatal)"
+  if pip install -r requirements.txt; then
+    echo "$REQS_HASH" > "$MARKER"
+    ok "Dependencies installed"
+  else
+    die "Failed to install dependencies. Check the error above."
+  fi
 else
   ok "Dependencies up to date"
 fi
@@ -84,7 +87,8 @@ if [ ! -f ".env" ]; then
     warn ".env created from .env.example — edit it with your API keys before first use"
     warn "  → Open: ${ROOT}/.env"
   else
-    warn "No .env file found. The server will start but some features may not work."
+    touch .env
+    warn "No .env file found. Created empty .env — some features may not work."
   fi
 else
   ok ".env file present"
@@ -98,7 +102,8 @@ printf "\n${BOLD}── Pre-flight ──${RESET}\n"
 
 # Check for Anthropic key (primary LLM)
 if grep -q "^ANTHROPIC_API_KEY=sk-ant-your-key-here" .env 2>/dev/null || \
-   grep -q "^ANTHROPIC_API_KEY=$" .env 2>/dev/null; then
+   grep -q "^ANTHROPIC_API_KEY=$" .env 2>/dev/null || \
+   ! grep -q "^ANTHROPIC_API_KEY=" .env 2>/dev/null; then
   warn "ANTHROPIC_API_KEY is not configured — Claude chat will fall back to Ollama"
 fi
 
@@ -117,5 +122,10 @@ printf "\n${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━�
 printf "${BOLD}  ARBITER Mission Control${RESET}\n"
 printf "  ${DIM}http://${HOST}:${PORT}${RESET}\n"
 printf "${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n\n"
+
+# Verify uvicorn is available before exec
+if ! command -v uvicorn >/dev/null 2>&1; then
+  die "uvicorn not found in venv. Try: rm -rf venv && ./start.sh"
+fi
 
 exec uvicorn server:app --reload --host "$HOST" --port "$PORT"
