@@ -36,11 +36,12 @@
   "jest": {
     "preset": "ts-jest",
     "testEnvironment": "node",
-    "testMatch": ["**/lib/__tests__/**/*.test.ts"],
+    "testMatch": ["**/__tests__/**/*.test.ts"],
     "collectCoverageFrom": [
       "lib/**/*.ts",
-      "!lib/**/*.d.ts",
-      "!lib/**/__tests__/**"
+      "components/**/*.ts",
+      "!**/*.d.ts",
+      "!**/__tests__/**"
     ]
   }
 }
