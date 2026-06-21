@@ -7646,6 +7646,7 @@ async function _orgLoadTemplates() {
         const resp = await fetch('/api/org/templates');
         _orgTemplates = await resp.json();
         _orgRenderTeamsList();
+        _orgRenderHistory();
         // Update dock badge
         const badge = document.getElementById('dock-org-teams');
         if (badge) badge.textContent = Array.isArray(_orgTemplates) ? _orgTemplates.length : 0;
@@ -8142,8 +8143,9 @@ function _orgRenderRun() {
                 const statusClass = node.status === 'complete' ? 'complete' : node.status === 'running' ? 'running' : node.status === 'error' ? 'error' : 'pending';
                 const statusIcon = node.status === 'complete' ? '✓' : node.status === 'running' ? '◌' : node.status === 'error' ? '✗' : '○';
                 const costStr = node.cost_usd > 0 ? `$${node.cost_usd.toFixed(3)}` : '';
+                const clickable = node.output ? `onclick="_orgViewAgentOutput('${_activeOrgRun.id}','${node.agent_id}')" style="--tile-accent:${col}; flex-direction:column; align-items:stretch; max-width:280px; min-width:200px; cursor:pointer"` : `style="--tile-accent:${col}; flex-direction:column; align-items:stretch; max-width:280px; min-width:200px"`;
                 html += `
-                    <div class="org-agent-tile org-run-tile-${statusClass}" style="--tile-accent:${col}; flex-direction:column; align-items:stretch; max-width:280px; min-width:200px">
+                    <div class="org-agent-tile org-run-tile-${statusClass}" ${clickable}>
                         <div style="display:flex; align-items:center; gap:8px">
                             <div class="org-tile-icon">${_SVG(agent.icon || 'user', 18)}</div>
                             <div class="org-tile-info">
@@ -8154,7 +8156,7 @@ function _orgRenderRun() {
                             <span class="org-run-status-badge org-run-status-${statusClass}">${statusIcon}</span>
                         </div>
                         ${costStr ? `<div style="font-size:7px;font-family:var(--font-mono);color:var(--text-dim);margin-top:4px">${costStr}</div>` : ''}
-                        ${node.output ? `<div class="org-run-node-output">${_renderMarkdown(node.output)}</div>` : ''}
+                        ${node.output ? `<div class="org-run-node-output">${_renderMarkdown(node.output.substring(0, 300))}${node.output.length > 300 ? '…' : ''}</div>` : ''}
                         ${node.brief_in && node.status !== 'pending' ? `<div class="org-run-node-brief"><b>BRIEF:</b> ${_escHtml(node.brief_in.substring(0, 150))}…</div>` : ''}
                     </div>`;
             }
@@ -8178,11 +8180,7 @@ function _orgRenderRun() {
         if (levelInfoEl) levelInfoEl.innerHTML = '✓ CEO run complete';
         const approveBtn = document.getElementById('org-run-approve');
         const rejectBtn = document.getElementById('org-run-reject');
-        if (approveBtn) {
-            approveBtn.textContent = '⊞ VIEW REPORT';
-            approveBtn.style.display = '';
-            approveBtn.onclick = () => _orgPreviewReport(_activeOrgRun.id);
-        }
+        if (approveBtn) { approveBtn.style.display = ''; approveBtn.textContent = '📄 VIEW REPORT'; approveBtn.disabled = false; approveBtn.onclick = () => _orgViewRunReport(_activeOrgRun.id); }
         if (rejectBtn) { rejectBtn.textContent = '← BACK'; rejectBtn.onclick = _orgCloseRun; }
     } else if (_activeOrgRun.status === 'rejected') {
         if (controlsEl) controlsEl.style.display = 'block';
@@ -8235,11 +8233,11 @@ function _orgCloseRun() {
     const teamsList = document.getElementById('org-teams-list');
     if (runView) runView.style.display = 'none';
     if (teamsList) teamsList.style.display = '';
-    // Reset buttons
     const approveBtn = document.getElementById('org-run-approve');
     const rejectBtn = document.getElementById('org-run-reject');
     if (approveBtn) { approveBtn.style.display = ''; approveBtn.textContent = '✓ APPROVE & CONTINUE'; approveBtn.onclick = _orgRunApprove; }
     if (rejectBtn) { rejectBtn.style.display = ''; rejectBtn.textContent = '✕ STOP'; rejectBtn.onclick = _orgRunReject; }
+    _orgRenderHistory();
 }
 
 function _orgStartRunPolling() {
@@ -8261,37 +8259,81 @@ function _orgStopRunPolling() {
     if (_orgRunPollTimer) { clearInterval(_orgRunPollTimer); _orgRunPollTimer = null; }
 }
 
-async function _orgPreviewReport(runId) {
+async function _orgRenderHistory() {
+    const histEl = document.getElementById('org-run-history');
+    if (!histEl) return;
+    try {
+        const resp = await fetch('/api/org/runs');
+        const runs = await resp.json();
+        if (!Array.isArray(runs) || runs.length === 0) { histEl.innerHTML = ''; return; }
+        histEl.innerHTML = `<div class="org-history-header">RECENT RUNS</div>` +
+            runs.map(r => {
+                const statusCls = r.status === 'complete' ? 'complete' : r.status === 'running' ? 'running' : r.status === 'rejected' ? 'error' : 'pending';
+                const statusIcon = r.status === 'complete' ? '✓' : r.status === 'running' ? '◌' : r.status === 'rejected' ? '✕' : '○';
+                const time = r.started_at ? _wfTimeAgo(r.started_at) : '';
+                const progress = `${r.completed_count || 0}/${r.node_count || 0}`;
+                return `<div class="org-history-card ${statusCls}" onclick="_orgViewRunReport('${r.id}')">
+                    <span class="org-history-status org-run-status-${statusCls}">${statusIcon}</span>
+                    <span class="org-history-name">${_escHtml((r.org_name || 'Team').substring(0, 30))}</span>
+                    <span class="org-history-directive">${_escHtml((r.directive || '').substring(0, 60))}</span>
+                    <span class="org-history-progress">${progress}</span>
+                    <span class="org-history-cost">$${(r.total_cost_usd || 0).toFixed(3)}</span>
+                    <span class="org-history-time">${time}</span>
+                </div>`;
+            }).join('');
+    } catch (e) {
+        console.error('[ORG] History load failed:', e);
+    }
+}
+
+async function _orgViewRunReport(runId) {
     const overlay = document.getElementById('pipeline-report-overlay');
     const body = document.getElementById('pipeline-report-body');
     const titleEl = document.getElementById('pipeline-report-title');
     const metaEl = document.getElementById('pipeline-report-meta');
     if (!overlay || !body) return;
 
-    body.innerHTML = '<div style="color:var(--text-dim);padding:40px;text-align:center;">Loading report…</div>';
-    if (titleEl) titleEl.textContent = 'CEO ORGANISATION REPORT';
+    body.innerHTML = '<div style="color:var(--text-dim);padding:20px;font-family:var(--font-mono);font-size:11px">Loading report...</div>';
+    if (titleEl) titleEl.textContent = 'CEO TEAM REPORT';
     if (metaEl) metaEl.textContent = '';
-    overlay.classList.add('active');
-    document.body.classList.add('report-active');
+    overlay.style.display = 'flex';
 
     try {
         const resp = await fetch(`/api/org/run/${runId}/report/download?fmt=md`);
-        if (!resp.ok) {
-            body.innerHTML = '<div style="color:var(--text-dim);padding:40px;text-align:center;">No report data available.</div>';
-            return;
-        }
-        const mdText = await resp.text();
-        body.innerHTML = '';
-        if (titleEl) titleEl.textContent = 'CEO ORGANISATION REPORT';
-        if (metaEl && _activeOrgRun) metaEl.textContent = (_activeOrgRun.directive || '').slice(0, 80);
-        const pre = document.createElement('div');
-        pre.className = 'pr-section-content';
-        pre.innerHTML = _renderMarkdown(mdText);
-        body.appendChild(pre);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const md = await resp.text();
+        body.innerHTML = `<div class="pr-section-content">${_renderMarkdown(md)}</div>`;
     } catch (e) {
-        body.innerHTML = `<div style="color:#ff4081;padding:40px;text-align:center;">Error loading report: ${_escHtml(e.message)}</div>`;
+        body.innerHTML = `<div style="color:var(--red);padding:20px">Failed to load report: ${_escHtml(e.message)}</div>`;
     }
 }
+
+function _orgViewAgentOutput(runId, agentId) {
+    const run = _activeOrgRun && _activeOrgRun.id === runId ? _activeOrgRun : null;
+    if (!run) {
+        _orgViewRunReport(runId);
+        return;
+    }
+    const node = (run.nodes || []).find(n => n.agent_id === agentId);
+    if (!node || !node.output) return;
+
+    const overlay = document.getElementById('pipeline-report-overlay');
+    const body = document.getElementById('pipeline-report-body');
+    const titleEl = document.getElementById('pipeline-report-title');
+    const metaEl = document.getElementById('pipeline-report-meta');
+    if (!overlay || !body) return;
+
+    const agentMap = {};
+    if (_ceoAgents) for (const a of _ceoAgents) agentMap[a.id] = a;
+    const agent = agentMap[agentId] || {};
+    const name = agent.name || agentId;
+
+    if (titleEl) titleEl.textContent = `AGENT REPORT — ${name.toUpperCase()}`;
+    if (metaEl) metaEl.textContent = agent.role || '';
+    body.innerHTML = `<div class="pr-section-content">${_renderMarkdown(node.output)}</div>`;
+    overlay.style.display = 'flex';
+}
+
 
 // Set up drag-and-drop on level slots
 document.addEventListener('DOMContentLoaded', () => {

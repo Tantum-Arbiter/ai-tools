@@ -4400,6 +4400,46 @@ async def org_runs_list():
     ]
 
 
+@app.get("/api/org/run/{run_id}/report/download")
+async def org_run_report_download(run_id: str, fmt: str = "md"):
+    """Synthesise a markdown report from an org run's node outputs."""
+    from starlette.responses import Response
+    run = _ORG_RUNS.get(run_id)
+    if not run:
+        return JSONResponse(status_code=404, content={"error": "Run not found"})
+
+    all_agents = _get_all_agents()
+    nodes = sorted(run.get("nodes", []), key=lambda n: n.get("level", 0))
+    lines = [f"# CEO Team Report — {run.get('org_name', 'Team')}", ""]
+    lines.append(f"**Directive:** {run.get('directive', 'N/A')}")
+    lines.append(f"**Status:** {run.get('status', 'unknown')}")
+    lines.append(f"**Cost:** ${run.get('total_cost_usd', 0):.4f}")
+    lines.append(f"**Started:** {run.get('started_at', 'N/A')}")
+    if run.get("completed_at"):
+        lines.append(f"**Completed:** {run['completed_at']}")
+    lines.append("")
+
+    for node in nodes:
+        agent = all_agents.get(node["agent_id"], {})
+        name = agent.get("name", node["agent_id"])
+        role = agent.get("role", "")
+        lines.append(f"## Level {node.get('level', 0)} — {name}")
+        if role:
+            lines.append(f"*{role}*")
+        lines.append("")
+        if node.get("output"):
+            lines.append(node["output"])
+        else:
+            lines.append("*(no output)*")
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+
+    md_text = "\n".join(lines)
+    return Response(content=md_text, media_type="text/markdown",
+                    headers={"Content-Disposition": f'attachment; filename="org_report_{run_id[:8]}.md"'})
+
+
 @app.get("/api/active-jobs")
 async def active_jobs():
     """Return all active/recent pipelines, org runs, and agent dispatches for the dashboard HUD."""
