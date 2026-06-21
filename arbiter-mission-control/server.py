@@ -36,6 +36,11 @@ from gcp_monitor import GCPMonitor
 from revenuecat_monitor import RevenueCatMonitor
 from service_health import ServiceHealthMonitor
 from persistence import ArbiterDB
+from client_gate import (
+    filter_response_for_client,
+    normalise_client,
+    should_intercept_desktop_command,
+)
 
 from typing import Any
 
@@ -8770,6 +8775,7 @@ async def jarvis_chat(request: Request):
     user_msg = body.get("message", "").strip()
     history = body.get("history", [])
     business_id = _get_business_id(request)
+    client_tag = normalise_client(body.get("client"))
 
     if not user_msg:
         return {"reply": "I didn't catch that. Could you repeat?", "error": False}
@@ -8946,9 +8952,14 @@ async def jarvis_chat(request: Request):
             pass  # Fall through to normal LLM handling
 
     # ── Desktop automation: intercept and handle ────────────────
-    desktop_cmd = _detect_desktop_command(user_msg)
-    if desktop_cmd:
-        return await _execute_desktop_action(desktop_cmd)
+    # Mobile clients can't action AppleScript/`open` results, so we let the
+    # LLM answer conversationally instead of firing host-side automations.
+    if should_intercept_desktop_command(client_tag):
+        desktop_cmd = _detect_desktop_command(user_msg)
+        if desktop_cmd:
+            return filter_response_for_client(
+                await _execute_desktop_action(desktop_cmd), client_tag,
+            )
 
     # ── Web scraping: fetch a URL for research ─────────────────
     import re as _re_web
