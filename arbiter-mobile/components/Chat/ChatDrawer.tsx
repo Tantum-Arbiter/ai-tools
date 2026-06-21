@@ -16,10 +16,13 @@ import {
   type ListRenderItem,
 } from 'react-native';
 import Animated, {
+  runOnJS,
   useAnimatedStyle,
   useSharedValue,
   withTiming,
 } from 'react-native-reanimated';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import { ChevronDown, ChevronUp, Send } from 'lucide-react-native';
 import {
   chatReducer,
   INITIAL_STATE,
@@ -60,6 +63,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
   stateRef.current = state;
 
   const height = useSharedValue(collapsedHeight);
+  const startHeight = useSharedValue(collapsedHeight);
 
   useEffect(() => {
     height.value = withTiming(state.expanded ? expandedHeight : collapsedHeight, {
@@ -69,6 +73,46 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
   }, [state.expanded, expandedHeight, collapsedHeight, height, onExpansionChange]);
 
   const animatedStyle = useAnimatedStyle(() => ({ height: height.value }));
+
+  const setExpansion = useCallback((expanded: boolean) => {
+    if (stateRef.current.expanded !== expanded) {
+      dispatch({ type: 'SET_EXPANDED', expanded });
+    }
+  }, []);
+
+  const toggleExpansion = useCallback(() => {
+    dispatch({ type: 'TOGGLE_EXPANDED' });
+  }, []);
+
+  // Drag-to-resize. The pan gesture owns drawer height while active; on
+  // release we snap to the nearest end (or fling threshold) and sync
+  // state.expanded so the host (orb fade) follows.
+  const panGesture = Gesture.Pan()
+    .activeOffsetY([-8, 8])
+    .onStart(() => {
+      startHeight.value = height.value;
+    })
+    .onUpdate((e) => {
+      const next = startHeight.value - e.translationY;
+      height.value = Math.max(collapsedHeight, Math.min(expandedHeight, next));
+    })
+    .onEnd((e) => {
+      const mid = (collapsedHeight + expandedHeight) / 2;
+      const flingUp = e.velocityY < -500;
+      const flingDown = e.velocityY > 500;
+      const expanded = flingUp || (!flingDown && height.value > mid);
+      const target = expanded ? expandedHeight : collapsedHeight;
+      height.value = withTiming(target, { duration: 220 });
+      runOnJS(setExpansion)(expanded);
+    });
+
+  const tapGesture = Gesture.Tap()
+    .maxDistance(8)
+    .onEnd((_e, success) => {
+      if (success) runOnJS(toggleExpansion)();
+    });
+
+  const handleGesture = Gesture.Race(panGesture, tapGesture);
 
   const send = useCallback(async () => {
     const current = stateRef.current;
@@ -101,15 +145,21 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
       pointerEvents="box-none"
     >
       <Animated.View style={[styles.sheet, animatedStyle]}>
-        <Pressable
-          style={styles.grabber}
-          onPress={() => dispatch({ type: 'TOGGLE_EXPANDED' })}
-          accessibilityRole="button"
-          accessibilityLabel={state.expanded ? 'Collapse chat' : 'Expand chat'}
-          testID="chat-drawer-toggle"
-        >
-          <View style={styles.grabberHandle} />
-        </Pressable>
+        <GestureDetector gesture={handleGesture}>
+          <View
+            style={styles.grabber}
+            accessibilityRole="button"
+            accessibilityLabel={state.expanded ? 'Collapse chat' : 'Expand chat'}
+            testID="chat-drawer-toggle"
+          >
+            <View style={styles.grabberHandle} />
+            {state.expanded ? (
+              <ChevronDown size={14} color="#78a8bc" strokeWidth={2} />
+            ) : (
+              <ChevronUp size={14} color="#78a8bc" strokeWidth={2} />
+            )}
+          </View>
+        </GestureDetector>
 
         {state.expanded && (
           <MessageList messages={state.messages} />
@@ -120,7 +170,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
             style={styles.input}
             value={state.input}
             onChangeText={(value) => dispatch({ type: 'INPUT_CHANGED', value })}
-            placeholder="Ask anything…"
+            placeholder="Type a message…"
             placeholderTextColor="#5a7a8a"
             multiline
             blurOnSubmit={false}
@@ -138,7 +188,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
             accessibilityLabel="Send message"
             testID="chat-drawer-send"
           >
-            <Text style={styles.sendBtnText}>{state.sending ? '…' : 'Send'}</Text>
+            <Send size={16} color="#20f4ff" strokeWidth={2} />
           </Pressable>
         </View>
 

@@ -1,5 +1,7 @@
-// Main screen: orb hero + chat drawer. The orb fades down as the
-// drawer expands so the keyboard + history have visual focus.
+// Main screen: orb hero + chat drawer. The orb is absolutely centred on
+// the full viewport so the chat drawer floats over it without nudging
+// its position. The Tron grid + radial illumination matches the desktop
+// dashboard (static/style.css body::before / body::after).
 
 import React, { useState } from 'react';
 import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
@@ -10,12 +12,14 @@ import Animated, {
   useSharedValue,
   withTiming,
 } from 'react-native-reanimated';
+import { Settings as SettingsIcon } from 'lucide-react-native';
 import { Orb } from '../components/Orb/Orb';
 import { ChatDrawer } from '../components/Chat/ChatDrawer';
+import { TronBackground } from '../components/Background/TronBackground';
 import { useApi, useCredentials } from '../lib/credentials';
 
 const DRAWER_COLLAPSED = 84;
-const DRAWER_EXPANDED = 0.55; // fraction of screen height
+const DRAWER_EXPANDED = 0.55;
 
 export default function Home() {
   const { width, height } = useWindowDimensions();
@@ -35,8 +39,17 @@ export default function Home() {
   };
 
   return (
-    <View style={[styles.root, { paddingTop: insets.top }]}>
-      <View style={styles.topBar}>
+    <View style={styles.root}>
+      <TronBackground width={width} height={height} />
+
+      <Animated.View
+        style={[styles.orbWrap, orbStyle, { width, height }]}
+        pointerEvents="none"
+      >
+        <Orb size={orbSize} state="idle" />
+      </Animated.View>
+
+      <View style={[styles.topBar, { paddingTop: insets.top + 8 }]} pointerEvents="box-none">
         <Link href="/settings" asChild>
           <Pressable
             accessibilityRole="button"
@@ -44,19 +57,18 @@ export default function Home() {
             hitSlop={12}
             style={styles.settingsBtn}
           >
-            <Text style={styles.settingsBtnText}>⚙</Text>
+            <SettingsIcon size={18} color="#bfe6ff" strokeWidth={2} />
           </Pressable>
         </Link>
       </View>
 
-      <Animated.View style={[styles.orbWrap, orbStyle]} pointerEvents="none">
-        <Orb size={orbSize} state="idle" />
-      </Animated.View>
-
       {status === 'unconfigured' && !drawerExpanded && (
-        <View style={styles.unconfiguredBanner} pointerEvents="none">
+        <View
+          style={[styles.unconfiguredBanner, { bottom: DRAWER_COLLAPSED + insets.bottom + 20 }]}
+          pointerEvents="none"
+        >
           <Text style={styles.unconfiguredText}>
-            Tap ⚙ to configure host + API key
+            Tap the settings icon to configure host + API key
           </Text>
         </View>
       )}
@@ -74,25 +86,31 @@ export default function Home() {
 const styles = StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: '#000814',
+    backgroundColor: '#080f1e',
   },
   topBar: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
     flexDirection: 'row',
     justifyContent: 'flex-end',
     paddingHorizontal: 16,
-    paddingVertical: 8,
   },
   settingsBtn: {
     width: 36,
     height: 36,
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 18,
-    backgroundColor: 'rgba(120, 200, 255, 0.10)',
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: 'rgba(0, 240, 255, 0.12)',
+    backgroundColor: 'rgba(0, 240, 255, 0.04)',
   },
-  settingsBtnText: { color: '#bfe6ff', fontSize: 18, lineHeight: 22 },
   orbWrap: {
-    flex: 1,
+    position: 'absolute',
+    top: 0,
+    left: 0,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -100,7 +118,6 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: 0,
     right: 0,
-    bottom: 110,
     alignItems: 'center',
   },
   unconfiguredText: {
@@ -108,7 +125,9 @@ const styles = StyleSheet.create({
     fontSize: 13,
     paddingHorizontal: 14,
     paddingVertical: 6,
-    borderRadius: 10,
-    backgroundColor: 'rgba(0, 8, 20, 0.6)',
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: 'rgba(0, 240, 255, 0.18)',
+    backgroundColor: 'rgba(2, 6, 18, 0.7)',
   },
 });

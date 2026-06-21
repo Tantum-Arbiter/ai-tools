@@ -11,14 +11,14 @@ import { CredentialsProvider } from '../lib/credentials';
 
 export default function RootLayout() {
   return (
-    <GestureHandlerRootView style={{ flex: 1, backgroundColor: '#000814' }}>
+    <GestureHandlerRootView style={{ flex: 1, backgroundColor: '#080f1e' }}>
       <SafeAreaProvider>
         <CredentialsProvider>
           <StatusBar style="light" />
           <Stack
             screenOptions={{
               headerShown: false,
-              contentStyle: { backgroundColor: '#000814' },
+              contentStyle: { backgroundColor: '#080f1e' },
               animation: 'fade',
             }}
           />

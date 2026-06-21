@@ -73,7 +73,7 @@ export default function Settings() {
         options={{
           headerShown: true,
           title: 'Settings',
-          headerStyle: { backgroundColor: '#000814' },
+          headerStyle: { backgroundColor: '#080f1e' },
           headerTintColor: '#e8f4ff',
         }}
       />
