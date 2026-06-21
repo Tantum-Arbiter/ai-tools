@@ -3726,8 +3726,13 @@ async def _org_execute_agent(agent_id: str, brief: str, directive: str) -> dict:
         f"## DIRECTIVE\n{directive}\n\n"
         f"## YOUR BRIEF\n{brief}\n\n"
         "## INSTRUCTIONS\n"
-        "Respond concisely. Focus only on your area of expertise. "
-        "Keep your response under 600 words."
+        "Produce investor-grade, CEO-ready analysis. Follow your role prompt precisely.\n"
+        "- Every claim must be backed by evidence (data, source, benchmark). No unsupported assertions.\n"
+        "- Mark every number as VALIDATED (real data), BENCHMARKED (industry comparable), or ASSUMED (hypothesis).\n"
+        "- If you don't have evidence for a critical claim, say 'UNKNOWN — must validate' rather than guessing.\n"
+        "- Use the full output format specified in your role prompt — do not skip sections.\n"
+        "- Prefer specific numbers over qualitative statements. Quantify everything possible.\n"
+        "- Be thorough. Quality and completeness matter more than brevity."
     )
     # Snapshot costs before dispatch to compute real delta
     _pre_claude = _claude_usage["daily_cost_usd"]

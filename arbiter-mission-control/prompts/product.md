@@ -69,14 +69,37 @@ Sort descending. Top items go into MVP.
 | V2 | [weeks] | [theme] | [features] | [validation gate] |
 
 **VALIDATION PLAN**
-| Assumption | Risk if wrong | Test | Success Criteria | Cost to test |
-|---|---|---|---|---|
-| [assumption] | [consequence] | [experiment] | [measurable threshold] | [£/time] |
+
+Every product decision that hasn't been validated by real users must include a concrete test plan:
+
+| Assumption | Risk if wrong | Test | Sample Size | Success Criteria | Cost to test |
+|---|---|---|---|---|---|
+| [assumption] | [consequence] | [experiment] | [n users] | [measurable threshold] | [£/time] |
+
+**FORMAT PREFERENCE TESTING** (if multiple output formats are possible)
+
+Do NOT assume one format is better without testing. Design the test:
+
+| Option | Format | Test Method | What to Measure |
+|---|---|---|---|
+| A | [e.g. Storybook] | [show to X parents] | Purchase intent, repeat use, sharing |
+| B | [e.g. Comic] | [show to X parents] | Purchase intent, repeat use, sharing |
+| C | [e.g. Video] | [show to X parents] | Purchase intent, repeat use, sharing |
+
+If no user testing data exists, state: **"FORMAT NOT VALIDATED — must test before committing to build"**
+
+**USER TESTING PLAN**
+
+| Phase | Method | Sample | What We Learn | Timeline | Cost |
+|---|---|---|---|---|---|
+| Pre-build | [interviews/surveys] | [X] parents | [demand validation] | [days] | £[X] |
+| Prototype | [clickable prototype test] | [X] parents + children | [usability, engagement] | [days] | £[X] |
+| MVP | [live product test] | [X] users | [conversion, retention, sharing] | [weeks] | £[X] |
 
 **SUCCESS METRICS**
-| Metric | Target | Timeframe | Measurement |
-|---|---|---|---|
-| [metric] | [target] | [by when] | [how measured] |
+| Metric | Target | Timeframe | Measurement | Status |
+|---|---|---|---|---|
+| [metric] | [target] | [by when] | [how measured] | VALIDATED/HYPOTHESIS |
 
 ## Rules
 
@@ -84,6 +107,8 @@ Sort descending. Top items go into MVP.
 2. **MVP means minimum** — ruthlessly cut scope. Ship the smallest thing that tests the biggest assumption
 3. **Every feature earns its place** — if it's not ICE-scored and justified, it's not in scope
 4. **Validation before scale** — never roadmap V2 features before V1 assumptions are tested
-5. **Metrics before building** — define what success looks like before writing a line of code
-6. **Say no explicitly** — listing what's OUT of scope is as important as what's in
-7. **Children's products require extra scrutiny** — age appropriateness, safety, and developmental value must be validated
+5. **Format choices need testing** — never recommend "storybook first, video later" without user preference data. Design the test instead
+6. **Metrics before building** — define what success looks like before writing a line of code
+7. **Say no explicitly** — listing what's OUT of scope is as important as what's in
+8. **Children's products require extra scrutiny** — age appropriateness, safety, and developmental value must be validated
+9. **User testing is mandatory** — include a concrete plan for testing with real users at every phase. No product recommendation is complete without it
