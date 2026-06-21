@@ -8154,7 +8154,7 @@ function _orgRenderRun() {
                             <span class="org-run-status-badge org-run-status-${statusClass}">${statusIcon}</span>
                         </div>
                         ${costStr ? `<div style="font-size:7px;font-family:var(--font-mono);color:var(--text-dim);margin-top:4px">${costStr}</div>` : ''}
-                        ${node.output ? `<div class="org-run-node-output">${_escHtml(node.output.substring(0, 300))}${node.output.length > 300 ? '…' : ''}</div>` : ''}
+                        ${node.output ? `<div class="org-run-node-output">${_renderMarkdown(node.output)}</div>` : ''}
                         ${node.brief_in && node.status !== 'pending' ? `<div class="org-run-node-brief"><b>BRIEF:</b> ${_escHtml(node.brief_in.substring(0, 150))}…</div>` : ''}
                     </div>`;
             }
@@ -8175,10 +8175,14 @@ function _orgRenderRun() {
         }
     } else if (_activeOrgRun.status === 'complete') {
         if (controlsEl) controlsEl.style.display = 'block';
-        if (levelInfoEl) levelInfoEl.textContent = '✓ CEO run complete';
+        if (levelInfoEl) levelInfoEl.innerHTML = '✓ CEO run complete';
         const approveBtn = document.getElementById('org-run-approve');
         const rejectBtn = document.getElementById('org-run-reject');
-        if (approveBtn) approveBtn.style.display = 'none';
+        if (approveBtn) {
+            approveBtn.textContent = '⊞ VIEW REPORT';
+            approveBtn.style.display = '';
+            approveBtn.onclick = () => _orgPreviewReport(_activeOrgRun.id);
+        }
         if (rejectBtn) { rejectBtn.textContent = '← BACK'; rejectBtn.onclick = _orgCloseRun; }
     } else if (_activeOrgRun.status === 'rejected') {
         if (controlsEl) controlsEl.style.display = 'block';
@@ -8234,7 +8238,7 @@ function _orgCloseRun() {
     // Reset buttons
     const approveBtn = document.getElementById('org-run-approve');
     const rejectBtn = document.getElementById('org-run-reject');
-    if (approveBtn) { approveBtn.style.display = ''; approveBtn.textContent = '✓ APPROVE & CONTINUE'; }
+    if (approveBtn) { approveBtn.style.display = ''; approveBtn.textContent = '✓ APPROVE & CONTINUE'; approveBtn.onclick = _orgRunApprove; }
     if (rejectBtn) { rejectBtn.style.display = ''; rejectBtn.textContent = '✕ STOP'; rejectBtn.onclick = _orgRunReject; }
 }
 
@@ -8255,6 +8259,38 @@ function _orgStartRunPolling() {
 
 function _orgStopRunPolling() {
     if (_orgRunPollTimer) { clearInterval(_orgRunPollTimer); _orgRunPollTimer = null; }
+}
+
+async function _orgPreviewReport(runId) {
+    const overlay = document.getElementById('pipeline-report-overlay');
+    const body = document.getElementById('pipeline-report-body');
+    const titleEl = document.getElementById('pipeline-report-title');
+    const metaEl = document.getElementById('pipeline-report-meta');
+    if (!overlay || !body) return;
+
+    body.innerHTML = '<div style="color:var(--text-dim);padding:40px;text-align:center;">Loading report…</div>';
+    if (titleEl) titleEl.textContent = 'CEO ORGANISATION REPORT';
+    if (metaEl) metaEl.textContent = '';
+    overlay.classList.add('active');
+    document.body.classList.add('report-active');
+
+    try {
+        const resp = await fetch(`/api/org/run/${runId}/report/download?fmt=md`);
+        if (!resp.ok) {
+            body.innerHTML = '<div style="color:var(--text-dim);padding:40px;text-align:center;">No report data available.</div>';
+            return;
+        }
+        const mdText = await resp.text();
+        body.innerHTML = '';
+        if (titleEl) titleEl.textContent = 'CEO ORGANISATION REPORT';
+        if (metaEl && _activeOrgRun) metaEl.textContent = (_activeOrgRun.directive || '').slice(0, 80);
+        const pre = document.createElement('div');
+        pre.className = 'pr-section-content';
+        pre.innerHTML = _renderMarkdown(mdText);
+        body.appendChild(pre);
+    } catch (e) {
+        body.innerHTML = `<div style="color:#ff4081;padding:40px;text-align:center;">Error loading report: ${_escHtml(e.message)}</div>`;
+    }
 }
 
 // Set up drag-and-drop on level slots

@@ -4322,8 +4322,8 @@ async def org_run_create(request: Request):
     }
     _ORG_RUNS[run_id] = run
 
-    # Execute level 0 (root agents) immediately
-    await _org_run_level(run_id, 0)
+    # Execute level 0 in background so the response returns immediately
+    asyncio.create_task(_org_run_level(run_id, 0))
 
     return _ORG_RUNS[run_id]
 
@@ -4347,7 +4347,8 @@ async def org_run_approve(run_id: str):
         return {"error": f"Run is not awaiting approval (status={run['status']})"}
 
     next_level = run.get("approval_level", run["current_level"] + 1)
-    await _org_run_level(run_id, next_level)
+    run["status"] = "running"
+    asyncio.create_task(_org_run_level(run_id, next_level))
     return _ORG_RUNS[run_id]
 
 
@@ -4360,6 +4361,31 @@ async def org_run_reject(run_id: str):
     run["status"] = "rejected"
     run["completed_at"] = datetime.now().isoformat()
     return run
+
+
+@app.get("/api/org/run/{run_id}/report/download")
+async def org_run_report_download(run_id: str, fmt: str = "md"):
+    """Download the org run report as synthesised markdown from all node outputs."""
+    from starlette.responses import Response
+    run = _ORG_RUNS.get(run_id)
+    if not run:
+        return JSONResponse(status_code=404, content={"error": "Run not found"})
+    nodes = run.get("nodes", [])
+    outputs = [n for n in nodes if n.get("output")]
+    if not outputs:
+        return JSONResponse(status_code=404, content={"error": "No agent outputs available"})
+    if fmt != "md":
+        return JSONResponse(content={"directive": run.get("directive", ""), "nodes": nodes})
+    all_agents = _get_all_agents()
+    md_lines = [f"# CEO ORGANISATION REPORT\n", f"**Directive:** {run.get('directive', '')}\n",
+                f"**Team:** {run.get('org_name', '')}\n"]
+    sorted_nodes = sorted(outputs, key=lambda n: n.get("level", 0))
+    for n in sorted_nodes:
+        agent = all_agents.get(n["agent_id"], {})
+        name = agent.get("name", n["agent_id"])
+        md_lines.append(f"## {name} (Level {n.get('level', 0)})\n")
+        md_lines.append(f"{n['output']}\n")
+    return Response(content="\n".join(md_lines), media_type="text/markdown")
 
 
 @app.get("/api/org/runs")
