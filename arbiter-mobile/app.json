@@ -1,0 +1,28 @@
+{
+  "expo": {
+    "name": "Arbiter",
+    "slug": "arbiter-mobile",
+    "version": "0.0.1",
+    "orientation": "default",
+    "scheme": "arbiter",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.arbiter.mobile"
+    },
+    "android": {
+      "package": "com.arbiter.mobile",
+      "adaptiveIcon": {
+        "backgroundColor": "#000814"
+      }
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}
