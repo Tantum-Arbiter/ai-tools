@@ -140,6 +140,434 @@ function _toggleMicMute() {
 }
 document.addEventListener('DOMContentLoaded', _micMuteSetIcon);
 
+// ── Settings Panel ──────────────────────────────────────────────
+let _settingsOpen = false;
+
+function _settingsToggle() {
+    const overlay = document.getElementById('settings-overlay');
+    const btn = document.getElementById('mc-settings-btn');
+    if (!overlay) return;
+    _settingsOpen = !_settingsOpen;
+    overlay.classList.toggle('open', _settingsOpen);
+    if (btn) btn.classList.toggle('active', _settingsOpen);
+    if (_settingsOpen) _settingsLoad();
+}
+
+function _settingsSwitchTab(tab) {
+    document.querySelectorAll('.settings-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+    document.querySelectorAll('.settings-tab-content').forEach(c => c.classList.toggle('active', c.id === `settings-tab-${tab}`));
+    if (tab === 'llm') _settingsLoadLLM();
+    if (tab === 'business') _settingsLoadBizTab();
+}
+
+async function _settingsLoad() {
+    const data = await api('/api/settings');
+    if (!data) return;
+
+    // General tab
+    const ww = document.getElementById('set-wake-word');
+    const lt = document.getElementById('set-lock-timeout');
+    const ltv = document.getElementById('set-lock-timeout-val');
+    if (ww) ww.checked = data.wake_word !== '0';
+    if (lt) {
+        lt.value = data.lock_timeout || '15';
+        if (ltv) ltv.textContent = (data.lock_timeout || '15') + ' min';
+    }
+    const tz = document.getElementById('set-timezone');
+    if (tz && data.timezone) tz.value = data.timezone;
+
+    // Populate TTS voices
+    _settingsLoadVoices(data.tts_voice || 'default');
+
+    // Email tab
+    const ea = document.getElementById('set-email-address');
+    const ih = document.getElementById('set-imap-host');
+    const ip = document.getElementById('set-imap-port');
+    const sh = document.getElementById('set-smtp-host');
+    const sp = document.getElementById('set-smtp-port');
+    if (ea) ea.value = data.email_address || '';
+    if (ih) ih.value = data.imap_host || 'imap.gmail.com';
+    if (ip) ip.value = data.imap_port || '993';
+    if (sh) sh.value = data.smtp_host || 'smtp.gmail.com';
+    if (sp) sp.value = data.smtp_port || '587';
+
+    // Password field — show placeholder if configured
+    const ep = document.getElementById('set-email-password');
+    if (ep) {
+        ep.value = '';
+        ep.placeholder = data.email_configured ? 'Configured (leave blank to keep)' : 'Enter app password';
+    }
+
+    // LLM tab (auto-loads if active)
+    if (document.getElementById('settings-tab-llm')?.classList.contains('active')) {
+        _settingsLoadLLM();
+    }
+}
+
+function _settingsLoadVoices(current) {
+    const sel = document.getElementById('set-tts-voice');
+    if (!sel) return;
+    sel.innerHTML = '<option value="default">Default</option>';
+    try {
+        const voices = speechSynthesis.getVoices();
+        voices.forEach(v => {
+            const opt = document.createElement('option');
+            opt.value = v.name;
+            opt.textContent = `${v.name} (${v.lang})`;
+            if (v.name === current) opt.selected = true;
+            sel.appendChild(opt);
+        });
+    } catch {}
+}
+// Voices load asynchronously in some browsers
+if (typeof speechSynthesis !== 'undefined') {
+    speechSynthesis.addEventListener('voiceschanged', () => {
+        const cur = document.getElementById('set-tts-voice')?.value || 'default';
+        _settingsLoadVoices(cur);
+    });
+}
+
+async function _settingsLoadLLM() {
+    const data = await api('/api/settings');
+    const grid = document.getElementById('settings-llm-grid');
+    if (!data || !grid) return;
+
+    const providers = [
+        { name: 'Claude (Anthropic)', on: data.llm_claude_configured, model: data.llm_provider === 'claude' ? 'Primary' : 'Available' },
+        { name: 'OpenRouter', on: data.llm_openrouter_configured, model: 'Agent dispatch & panels' },
+        { name: 'Gemini (Google)', on: data.llm_gemini_configured, model: 'Researcher & Analyst' },
+        { name: 'Ollama (Local)', on: true, model: `${data.llm_ollama_model || 'phi4'} @ ${data.llm_ollama_url || 'localhost:11434'}` },
+    ];
+
+    grid.innerHTML = providers.map(p => `
+        <div class="settings-llm-card">
+            <span class="llm-indicator ${p.on ? 'on' : 'off'}"></span>
+            <span class="llm-name">${p.name}</span>
+            <span class="llm-model">${p.on ? p.model : 'Not configured'}</span>
+        </div>
+    `).join('');
+}
+
+async function _settingsSave() {
+    const payload = {};
+
+    // General
+    const ww = document.getElementById('set-wake-word');
+    const lt = document.getElementById('set-lock-timeout');
+    const tz = document.getElementById('set-timezone');
+    const tv = document.getElementById('set-tts-voice');
+    if (ww) payload.wake_word = ww.checked ? '1' : '0';
+    if (lt) payload.lock_timeout = lt.value;
+    if (tz) payload.timezone = tz.value;
+    if (tv) payload.tts_voice = tv.value;
+
+    // Email
+    const ea = document.getElementById('set-email-address');
+    const ep = document.getElementById('set-email-password');
+    const ih = document.getElementById('set-imap-host');
+    const ip = document.getElementById('set-imap-port');
+    const sh = document.getElementById('set-smtp-host');
+    const sp = document.getElementById('set-smtp-port');
+    if (ea) payload.email_address = ea.value.trim();
+    if (ep && ep.value.trim()) payload.email_password = ep.value.trim();
+    if (ih) payload.imap_host = ih.value.trim();
+    if (ip) payload.imap_port = ip.value.trim();
+    if (sh) payload.smtp_host = sh.value.trim();
+    if (sp) payload.smtp_port = sp.value.trim();
+
+    const result = await api('/api/settings', 'PUT', payload);
+    if (result?.ok) {
+        // Apply local settings immediately
+        if (payload.tts_voice && payload.tts_voice !== 'default') {
+            localStorage.setItem('arbiter_tts_voice', payload.tts_voice);
+        }
+        if (payload.lock_timeout) {
+            localStorage.setItem('arbiter_lock_timeout', payload.lock_timeout);
+        }
+        _settingsToggle();
+        if (typeof logConvo === 'function') logConvo('Settings saved', 'system');
+    } else {
+        const tr = document.getElementById('set-email-test-result');
+        if (tr) { tr.textContent = 'Save failed'; tr.className = 'settings-test-result fail'; }
+    }
+}
+
+async function _settingsTestEmail() {
+    const tr = document.getElementById('set-email-test-result');
+    if (tr) { tr.textContent = 'Testing...'; tr.className = 'settings-test-result busy'; }
+
+    const ea = document.getElementById('set-email-address');
+    const ep = document.getElementById('set-email-password');
+    const ih = document.getElementById('set-imap-host');
+    const ip = document.getElementById('set-imap-port');
+
+    const payload = {
+        email_address: ea?.value.trim() || '',
+        email_password: ep?.value.trim() || '',
+        imap_host: ih?.value.trim() || 'imap.gmail.com',
+        imap_port: ip?.value.trim() || '993',
+    };
+
+    try {
+        const r = await fetch('/api/settings/test-email', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const d = await r.json();
+        if (tr) {
+            if (d.ok) {
+                tr.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg> ' + d.message;
+                tr.className = 'settings-test-result ok';
+            } else {
+                tr.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg> ' + (d.error || 'Connection failed');
+                tr.className = 'settings-test-result fail';
+            }
+        }
+    } catch (e) {
+        if (tr) { tr.textContent = 'Network error'; tr.className = 'settings-test-result fail'; }
+    }
+}
+
+// Lock timeout slider live update
+document.addEventListener('DOMContentLoaded', () => {
+    const lt = document.getElementById('set-lock-timeout');
+    const ltv = document.getElementById('set-lock-timeout-val');
+    if (lt && ltv) {
+        lt.addEventListener('input', () => { ltv.textContent = lt.value + ' min'; });
+    }
+});
+
+// ── Business Profiles Tab (inside Settings) ────────────────
+function _settingsLoadBizTab() {
+    // Populate active-business selector
+    const sel = document.getElementById('set-active-business');
+    if (sel) {
+        sel.innerHTML = '<option value="">All Businesses (global view)</option>' +
+            _businesses.map(b => `<option value="${b.id}"${b.id === _activeBusinessId ? ' selected' : ''}>${b.icon || ''} ${_escHtml(b.name)}</option>`).join('');
+    }
+    // Render profile cards
+    _settingsRenderBizCards();
+    // Load prompt versions for active business
+    _promptLoadVersions();
+}
+
+function _settingsRenderBizCards() {
+    const container = document.getElementById('settings-biz-list');
+    if (!container) return;
+    if (_businesses.length === 0) {
+        container.innerHTML = '<div class="settings-biz-empty"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="opacity:0.3;margin-bottom:6px"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg><br>No business profiles yet. Add one below.</div>';
+        return;
+    }
+    container.innerHTML = _businesses.map(b => {
+        const isActive = b.id === _activeBusinessId;
+        const ghRepo = b.github_repo || '';
+        const hasContext = !!(b.business_context && b.business_context.trim());
+        return `<div class="settings-biz-card${isActive ? ' active-biz' : ''}">
+            <div class="settings-biz-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg></div>
+            <div class="settings-biz-info">
+                <div class="settings-biz-name">${_escHtml(b.name)}</div>
+                ${b.description ? `<div class="settings-biz-desc">${_escHtml(b.description)}</div>` : ''}
+                <div class="settings-biz-meta">
+                    ${isActive ? '<span class="settings-biz-badge active-tag">Active</span>' : ''}
+                    ${hasContext ? '<span class="settings-biz-badge context-tag">AI Context</span>' : ''}
+                    ${b.active_prompt_mode && b.active_prompt_mode !== 'default' ? `<span class="settings-biz-badge mode-tag">${_escHtml(b.active_prompt_mode)}</span>` : ''}
+                    ${ghRepo ? `<span class="settings-biz-badge cicd">${_escHtml(ghRepo)}</span>` : ''}
+                </div>
+            </div>
+            <div class="settings-biz-actions">
+                ${!isActive ? `<button title="Set as active" onclick="_settingsSelectBusiness('${b.id}')"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg></button>` : ''}
+                <button class="biz-del-btn" title="Delete profile" onclick="_settingsDeleteBusiness('${b.id}','${_escHtml(b.name)}')"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+function _settingsSelectBusiness(id) {
+    _setActiveBusinessId(id);
+    _settingsLoadBizTab();
+    if (typeof refreshAll === 'function') refreshAll();
+    appendLog(`Business context: ${id ? (_businesses.find(b=>b.id===id)?.name || id) : 'ALL'}`, '');
+}
+
+async function _settingsAddBusiness() {
+    const name = document.getElementById('set-biz-name')?.value?.trim();
+    if (!name) { _bizFormStatus('Name is required', false); return; }
+    const desc = document.getElementById('set-biz-desc')?.value?.trim() || '';
+    const bizContext = document.getElementById('set-biz-context')?.value?.trim() || '';
+    const ghRepo = document.getElementById('set-biz-gh-repo')?.value?.trim() || '';
+    const ghToken = document.getElementById('set-biz-gh-token')?.value?.trim() || '';
+    // Validate repo format if provided
+    if (ghRepo && !/^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/.test(ghRepo)) {
+        _bizFormStatus('Repo format: owner/repo', false); return;
+    }
+    _bizFormStatus('Saving...', null);
+    try {
+        const r = await fetch('/api/businesses', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, description: desc, business_context: bizContext, github_repo: ghRepo, github_token: ghToken }),
+        });
+        const data = await r.json();
+        if (data.error) { _bizFormStatus(data.error, false); return; }
+        // Clear form
+        document.getElementById('set-biz-name').value = '';
+        document.getElementById('set-biz-desc').value = '';
+        document.getElementById('set-biz-context').value = '';
+        document.getElementById('set-biz-gh-repo').value = '';
+        document.getElementById('set-biz-gh-token').value = '';
+        _bizFormStatus('Profile created', true);
+        await _loadBusinesses();
+        _settingsLoadBizTab();
+        setTimeout(() => _bizFormStatus('', null), 2000);
+    } catch (e) { _bizFormStatus('Failed: ' + e.message, false); }
+}
+
+async function _settingsDeleteBusiness(id, name) {
+    if (!confirm(`Delete "${name}"? Data tagged with this business will remain but won't be filtered.`)) return;
+    try {
+        await fetch(`/api/businesses/${id}/delete`, { method: 'POST' });
+        if (_activeBusinessId === id) {
+            _setActiveBusinessId('');
+        }
+        await _loadBusinesses();
+        _settingsLoadBizTab();
+    } catch (e) { _bizFormStatus('Delete failed: ' + e.message, false); }
+}
+
+function _bizFormStatus(msg, success) {
+    const el = document.getElementById('set-biz-status');
+    if (!el) return;
+    el.textContent = msg;
+    el.className = 'settings-biz-form-status' + (success === true ? ' ok' : success === false ? ' fail' : '');
+}
+
+// ── Prompt Versioning UI ─────────────────────────────────────────
+let _promptData = null;
+
+async function _promptLoadVersions() {
+    const panel = document.getElementById('prompt-version-panel');
+    if (!panel) return;
+    if (!_activeBusinessId) { panel.style.display = 'none'; return; }
+    panel.style.display = '';
+    try {
+        const r = await fetch(`/api/businesses/${_activeBusinessId}/prompts`);
+        _promptData = await r.json();
+        _promptRenderModes();
+        _promptRenderVersions();
+    } catch (e) { console.warn('[PROMPT] Failed to load versions:', e); }
+}
+
+function _promptRenderModes() {
+    const container = document.getElementById('prompt-mode-pills');
+    if (!container || !_promptData) return;
+    const modes = _promptData.modes || [];
+    const active = _promptData.active_mode || 'default';
+    if (modes.length === 0) {
+        container.innerHTML = '<span class="prompt-mode-pill active">default</span>';
+        return;
+    }
+    container.innerHTML = modes.map(m => {
+        const isActive = m.mode === active;
+        return `<button class="prompt-mode-pill${isActive ? ' active' : ''}"
+            onclick="_promptSwitchMode('${_escHtml(m.mode)}')"
+            title="${m.total_versions} version${m.total_versions !== 1 ? 's' : ''}">${_escHtml(m.mode)}${isActive ? ' \u2713' : ''}</button>`;
+    }).join('');
+}
+
+function _promptRenderVersions() {
+    const container = document.getElementById('prompt-version-list');
+    if (!container || !_promptData) return;
+    const versions = _promptData.versions || [];
+    if (versions.length === 0) {
+        container.innerHTML = '<div class="prompt-empty">No prompt versions yet. Set business context above or create one via the API.</div>';
+        return;
+    }
+    container.innerHTML = versions.slice(0, 10).map(v => {
+        const isLatest = v.version_num === (versions[0]?.version_num);
+        const sourceIcon = v.source === 'agent' ? '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#e040fb" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>'
+            : v.source === 'pipeline' ? '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#00e5ff" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>'
+            : '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#00c853" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>';
+        const ago = _timeAgo(v.created_at);
+        const preview = (v.content || '').substring(0, 120).replace(/\n/g, ' ');
+        return `<div class="prompt-version-item${isLatest ? ' latest' : ''}">
+            <div class="prompt-version-header">
+                <span class="prompt-version-num">v${v.version_num}</span>
+                <span class="prompt-version-source">${sourceIcon} ${_escHtml(v.source)}</span>
+                <span class="prompt-version-time">${ago}</span>
+                ${!isLatest ? `<button class="prompt-restore-btn" onclick="_promptRestore('${v.id}')" title="Restore this version">
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+                </button>` : '<span class="prompt-version-badge">current</span>'}
+            </div>
+            ${v.summary ? `<div class="prompt-version-summary">${_escHtml(v.summary)}</div>` : ''}
+            <div class="prompt-version-preview">${_escHtml(preview)}${preview.length >= 120 ? '...' : ''}</div>
+        </div>`;
+    }).join('');
+}
+
+function _timeAgo(dateStr) {
+    if (!dateStr) return '';
+    const d = new Date(dateStr + (dateStr.endsWith('Z') ? '' : 'Z'));
+    const diff = Math.floor((Date.now() - d.getTime()) / 1000);
+    if (diff < 60) return 'just now';
+    if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+    if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+    return Math.floor(diff / 86400) + 'd ago';
+}
+
+async function _promptSwitchMode(mode) {
+    if (!_activeBusinessId) return;
+    try {
+        const r = await fetch(`/api/businesses/${_activeBusinessId}/prompts/mode`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode }),
+        });
+        const data = await r.json();
+        if (data.error) { alert(data.error); return; }
+        await _loadBusinesses();
+        await _promptLoadVersions();
+        appendLog(`Prompt mode switched to: ${mode}`, '');
+    } catch (e) { alert('Failed: ' + e.message); }
+}
+
+async function _promptRestore(versionId) {
+    if (!_activeBusinessId || !confirm('Restore this version? A new version will be created with the old content.')) return;
+    try {
+        const r = await fetch(`/api/businesses/${_activeBusinessId}/prompts/${versionId}/restore`, { method: 'POST' });
+        const data = await r.json();
+        if (data.error) { alert(data.error); return; }
+        await _loadBusinesses();
+        await _promptLoadVersions();
+        appendLog(`Prompt restored to v${data.version_num}`, '');
+    } catch (e) { alert('Failed: ' + e.message); }
+}
+
+async function _promptAddMode() {
+    const mode = prompt('Enter new mode name (e.g. growth, support, launch):');
+    if (!mode) return;
+    const clean = mode.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-').substring(0, 30);
+    if (!clean) { alert('Invalid mode name'); return; }
+    const content = prompt('Enter the prompt content for this mode:');
+    if (!content || !content.trim()) { alert('Content is required'); return; }
+    try {
+        const r = await fetch(`/api/businesses/${_activeBusinessId}/prompts`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content: content.trim(), mode: clean, source: 'user', summary: `Created ${clean} mode` }),
+        });
+        const data = await r.json();
+        if (data.error) { alert(data.error); return; }
+        await _promptLoadVersions();
+        appendLog(`Created prompt mode: ${clean}`, '');
+    } catch (e) { alert('Failed: ' + e.message); }
+}
+
+// Close settings on Escape
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && _settingsOpen) _settingsToggle();
+});
+
 // ── SVG Icon Library (replaces emojis) ──────────────────────────
 const _SVG = (name, size = 16) => {
     const icons = {
@@ -2103,18 +2531,22 @@ class VoiceEngine {
                     d = await r.json();
                     _camScanStop();
                 } else {
+                    const _chatHeaders = { 'Content-Type': 'application/json' };
+                    if (_activeBusinessId) _chatHeaders['X-Business-Id'] = _activeBusinessId;
                     r = await fetch('/api/jarvis/chat', {
                         method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
+                        headers: _chatHeaders,
                         body: JSON.stringify({ message: text, history: this.history }),
                         signal: abort.signal,
                     });
                     d = await r.json();
                 }
             } else {
+                const _chatHeaders2 = { 'Content-Type': 'application/json' };
+                if (_activeBusinessId) _chatHeaders2['X-Business-Id'] = _activeBusinessId;
                 r = await fetch('/api/jarvis/chat', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: _chatHeaders2,
                     body: JSON.stringify({ message: text, history: this.history }),
                     signal: abort.signal,
                 });
@@ -2437,18 +2869,22 @@ class VoiceEngine {
                     d = await r.json();
                     _camScanStop();
                 } else {
+                    const _vHeaders = { 'Content-Type': 'application/json' };
+                    if (_activeBusinessId) _vHeaders['X-Business-Id'] = _activeBusinessId;
                     r = await fetch('/api/jarvis/chat', {
                         method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
+                        headers: _vHeaders,
                         body: JSON.stringify({ message: text, history: this.history }),
                         signal: abort.signal,
                     });
                     d = await r.json();
                 }
             } else {
+                const _vHeaders2 = { 'Content-Type': 'application/json' };
+                if (_activeBusinessId) _vHeaders2['X-Business-Id'] = _activeBusinessId;
                 r = await fetch('/api/jarvis/chat', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: _vHeaders2,
                     body: JSON.stringify({ message: text, history: this.history }),
                     signal: abort.signal,
                 });
@@ -4386,10 +4822,42 @@ function updateClock() {
     if (orbDate) orbDate.textContent = now.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' }).toUpperCase();
 }
 
-// ── API helper ───────────────────────────────────────────────────
-async function api(path) {
+// ── Business Profile State ────────────────────────────────────────
+let _activeBusinessId = localStorage.getItem('arbiter_active_business') || '';
+let _businesses = [];
+
+function _getActiveBusinessId() { return _activeBusinessId; }
+
+function _setActiveBusinessId(id) {
+    _activeBusinessId = id || '';
+    if (id) localStorage.setItem('arbiter_active_business', id);
+    else localStorage.removeItem('arbiter_active_business');
+}
+
+async function _loadBusinesses() {
     try {
-        const r = await fetch(path);
+        const r = await fetch('/api/businesses');
+        if (!r.ok) return;
+        const data = await r.json();
+        _businesses = data.businesses || [];
+        // If active business no longer exists, reset to all
+        if (_activeBusinessId && !_businesses.find(b => b.id === _activeBusinessId)) {
+            _setActiveBusinessId('');
+        }
+    } catch (e) { console.warn('[BIZ] Failed to load businesses:', e); }
+}
+
+// ── API helper ───────────────────────────────────────────────────
+async function api(path, method, body) {
+    try {
+        const opts = { method: method || 'GET', headers: {} };
+        // Inject active business context
+        if (_activeBusinessId) opts.headers['X-Business-Id'] = _activeBusinessId;
+        if (body) {
+            opts.headers['Content-Type'] = 'application/json';
+            opts.body = typeof body === 'string' ? body : JSON.stringify(body);
+        }
+        const r = await fetch(path, opts);
         if (!r.ok) return null;
         return await r.json();
     } catch { return null; }
@@ -4606,43 +5074,47 @@ function showStartupGuide(systems) {
     });
 }
 
-// ── CI/CD — Grow with Freya ─────────────────────────────────────
-const CICD_JOBS = [
-    { name: 'CMS Upload', key: 'cms_upload', url: '#' },
-    { name: 'App Build & Release', key: 'app_build', url: '#' },
-    { name: 'Backend API', key: 'backend_api', url: '#' },
-    { name: 'EAS Build', key: 'eas_build', url: '#' },
-];
-
+// ── CI/CD — Dynamic per-business ────────────────────────────────
 async function refreshCICD() {
-    // Try fetching from backend; fall back to mock
-    let data = null;
-    try {
-        const resp = await fetch('/api/cicd');
-        if (resp.ok) data = await resp.json();
-    } catch (e) { /* no endpoint yet */ }
-
+    const data = await api('/api/cicd');
     const grid = document.getElementById('cicd-grid');
     if (!grid) return;
 
+    if (!data || Object.keys(data).length === 0) {
+        grid.innerHTML = '<div class="feed-empty">NO CI/CD JOBS CONFIGURED</div>';
+        const dockPass = document.getElementById('dock-cicd-pass');
+        const dockFail = document.getElementById('dock-cicd-fail');
+        if (dockPass) dockPass.textContent = '0';
+        if (dockFail) dockFail.textContent = '0';
+        return;
+    }
+
     let passCount = 0, failCount = 0;
     let html = '';
-    CICD_JOBS.forEach(job => {
-        const status = data && data[job.key] ? data[job.key].status : 'unknown';
-        const time = data && data[job.key] ? data[job.key].time || '' : '';
-        const url = data && data[job.key] && data[job.key].url ? data[job.key].url : job.url;
+    // Group by business if showing all
+    let lastBiz = null;
+    for (const [key, job] of Object.entries(data)) {
+        const status = job.status || 'unknown';
+        const time = job.time || '';
+        const url = job.url || '#';
+        const name = job.name || key;
+        const bizName = job.business_name || '';
         if (status === 'success') passCount++;
         if (status === 'failure') failCount++;
+        // Show business label when showing all
+        if (!_activeBusinessId && bizName && bizName !== lastBiz) {
+            html += `<div class="cicd-biz-label">${_escHtml(bizName)}</div>`;
+            lastBiz = bizName;
+        }
         html += `<div class="cicd-job">
             <span class="cicd-status ${status}"></span>
-            <span class="cicd-name">${job.name}</span>
+            <span class="cicd-name">${_escHtml(name)}</span>
             ${time ? `<span class="cicd-time">${time}</span>` : ''}
             ${url !== '#' ? `<a class="cicd-link" href="${url}" target="_blank">VIEW</a>` : `<span class="cicd-time">NO BUILD</span>`}
         </div>`;
-    });
+    }
     grid.innerHTML = html;
 
-    // Update dock badge
     const dockPass = document.getElementById('dock-cicd-pass');
     const dockFail = document.getElementById('dock-cicd-fail');
     if (dockPass) dockPass.textContent = passCount;
@@ -6128,7 +6600,7 @@ const DOCK_EXPAND = {
     deadlines: { title: 'DEADLINES & ROADMAP',       panel: 'dock-panel-deadlines' },
     bulletins: { title: 'BULLETINS',                 panel: 'dock-panel-bulletins' },
     todo:      { title: 'TODO LIST',                 panel: 'dock-panel-todo' },
-    cicd:      { title: 'CI/CD — GROW WITH FREYA',   panel: 'dock-panel-cicd' },
+    cicd:      { title: 'CI/CD',                      panel: 'dock-panel-cicd' },
     claude:    { title: 'CLAUDE API USAGE',           panel: 'dock-panel-claude' },
     ceo:       { title: 'AGENT ORCHESTRATOR',           panel: 'dock-panel-ceo' },
     org:       { title: 'CEO',                        panel: 'dock-panel-org' },
@@ -9670,6 +10142,10 @@ async function _runBootSequence() {
     })));
 
     try {
+        // ── Stage 0: Load business profiles ──
+        _setProgress(5, 'LOADING BUSINESS PROFILES');
+        await _loadBusinesses();
+
         // ── Stage 1: Core status ──
         _setProgress(10, 'CONNECTING TO CORE');
         await _batch([refreshStatus, refreshLLMStatus]);

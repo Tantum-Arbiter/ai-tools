@@ -3,8 +3,12 @@ ARBITER — Mission Control
 A Jarvis-style HUD dashboard for the Grow with Freya automation platform.
 Serves a single-page holographic UI and real-time status API endpoints.
 
-Run: uvicorn server:app --reload --port 3000
-Open: http://localhost:3000
+Run:  uvicorn server:app --reload --host 127.0.0.1 --port 8888
+Open: http://localhost:8888
+
+Security: Bind to 127.0.0.1 (localhost only) to avoid browser "Not Secure"
+warnings on 0.0.0.0. For remote access, use a reverse proxy (Caddy/nginx)
+with TLS termination — never expose this server directly to the internet.
 """
 import os
 import re
@@ -21,7 +25,7 @@ import secrets
 import httpx
 from openai import OpenAI
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse, JSONResponse
+from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from dotenv import load_dotenv
@@ -88,6 +92,24 @@ _MAX_DIRECTIVE_LEN = int(os.getenv("MAX_DIRECTIVE_LEN", "4000"))      # ~1000 to
 _MAX_SYSTEM_PROMPT_LEN = int(os.getenv("MAX_SYSTEM_PROMPT_LEN", "8000"))  # ~2000 tokens
 _MAX_NAME_LEN = 200
 _MAX_DESCRIPTION_LEN = 2000
+
+# ── Startup Security Checks ──────────────────────────────────────────
+_env_file = Path(__file__).parent / ".env"
+if _env_file.exists():
+    try:
+        _env_perms = _env_file.stat().st_mode & 0o777
+        if _env_perms & 0o077:  # group or world readable
+            log.warning(
+                f".env file permissions too open ({oct(_env_perms)}). "
+                f"Run: chmod 600 {_env_file}  — secrets may be readable by other users."
+            )
+            try:
+                _env_file.chmod(0o600)
+                log.info(".env permissions auto-fixed to 600 (owner-only)")
+            except OSError:
+                pass
+    except OSError:
+        pass
 
 # ── Startup Diagnostics ───────────────────────────────────────────────
 _has_claude_key = bool(ANTHROPIC_API_KEY)
@@ -274,7 +296,15 @@ _CLAUDE_TOOLS_SYSTEM = (
     "- Past briefings (morning, market close, evening digests)\n"
     "- Trends, patterns, or comparisons over time\n"
     "- 'What did you find about X?' or 'Summarise this week's work'\n"
-    "When building reports, pull historical data first — don't re-research what's already been done."
+    "When building reports, pull historical data first — don't re-research what's already been done.\n\n"
+    "## CRITICAL: Destructive Action Confirmation Protocol\n"
+    "For ANY tool that deletes, updates, or modifies data (delete_business, update_business_context, "
+    "switch_prompt_mode), you MUST follow this exact protocol:\n"
+    "1. FIRST call the tool with confirmed=false — this returns a preview of what will happen.\n"
+    "2. Present the preview to the user and ask: 'Shall I proceed, Sir?' or equivalent.\n"
+    "3. ONLY call the tool with confirmed=true AFTER the user explicitly says yes/confirm/proceed/go ahead.\n"
+    "4. If the user says no/cancel/stop, acknowledge and do NOT call the tool again.\n"
+    "NEVER skip the preview step. NEVER auto-confirm. This is a safety requirement."
 )
 
 # ── Claude Tool Definitions (Anthropic tool_use format) ───────────────
@@ -401,6 +431,45 @@ _CLAUDE_TOOLS: list[dict] = [
                              "description": "Product category to help refine search results"},
             },
             "required": ["query"],
+        },
+    },
+    # ── Destructive tools (require confirmation) ──────────────────────
+    {
+        "name": "delete_business",
+        "description": "Delete a business profile. REQUIRES CONFIRMATION. First call with confirmed=false to preview what will be deleted. Only call with confirmed=true AFTER the user explicitly confirms.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "business_name": {"type": "string", "description": "Name of the business to delete (case-insensitive match)"},
+                "confirmed": {"type": "boolean", "description": "false = preview only (show what will be deleted). true = actually delete. MUST be false on first call."},
+            },
+            "required": ["business_name", "confirmed"],
+        },
+    },
+    {
+        "name": "update_business_context",
+        "description": "Update the AI prompt context for a business profile. REQUIRES CONFIRMATION. First call with confirmed=false to preview the change. Only call with confirmed=true AFTER the user explicitly confirms.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "business_name": {"type": "string", "description": "Name of the business to update (case-insensitive match)"},
+                "new_context": {"type": "string", "description": "The new business context/prompt directive text"},
+                "confirmed": {"type": "boolean", "description": "false = preview only (show old vs new). true = actually update. MUST be false on first call."},
+            },
+            "required": ["business_name", "new_context", "confirmed"],
+        },
+    },
+    {
+        "name": "switch_prompt_mode",
+        "description": "Switch the active prompt mode for a business. REQUIRES CONFIRMATION. First call with confirmed=false to preview the mode switch. Only call with confirmed=true AFTER the user explicitly confirms.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "business_name": {"type": "string", "description": "Name of the business (case-insensitive match)"},
+                "mode": {"type": "string", "description": "The prompt mode to switch to (e.g. 'default', 'growth', 'support')"},
+                "confirmed": {"type": "boolean", "description": "false = preview only. true = actually switch. MUST be false on first call."},
+            },
+            "required": ["business_name", "mode", "confirmed"],
         },
     },
 ]
@@ -1369,6 +1438,22 @@ def _query(db_path: Path, sql: str, params: tuple = ()) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+# ── Favicon ────────────────────────────────────────────────────────────
+_FAVICON_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+    '<rect width="32" height="32" rx="6" fill="#001020"/>'
+    '<circle cx="16" cy="16" r="8" fill="none" stroke="#00f0ff" stroke-width="2"/>'
+    '<circle cx="16" cy="16" r="3" fill="#00f0ff"/>'
+    '</svg>'
+)
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    return Response(content=_FAVICON_SVG, media_type="image/svg+xml",
+                    headers={"Cache-Control": "public, max-age=604800"})
+
+
 # ── Dashboard ─────────────────────────────────────────────────────────
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
@@ -1588,16 +1673,377 @@ async def gcp_pods():
     }
 
 
-# ── CI/CD — Grow with Freya ──────────────────────────────────────────
-@app.get("/api/cicd")
-async def cicd_status():
-    """Placeholder CI/CD status. Replace with real EAS/GitHub Actions integration."""
+# ── Business Profiles ────────────────────────────────────────────────
+
+def _get_business_id(request) -> str | None:
+    """Extract active business_id from request header or query param."""
+    return request.headers.get("x-business-id") or request.query_params.get("business_id") or None
+
+
+def _safe_business_response(biz: dict | None) -> dict:
+    """Strip any fields that must never appear in API responses."""
+    if not biz:
+        return {"error": "Business not found"}
+    # Defensive: ensure no secret fields leak even if DB schema changes
+    safe = dict(biz)
+    for forbidden in ("github_token", "pat", "api_key", "password", "secret"):
+        safe.pop(forbidden, None)
+    # Add masked PAT status so UI knows if configured
+    slug = safe.get("slug", "")
+    env_key = f"GITHUB_PAT_{slug.upper().replace('-', '_')}"
+    raw_pat = os.getenv(env_key, "") or _read_env_value(env_key)
+    safe["github_pat_configured"] = bool(raw_pat)
+    return safe
+
+
+def _validate_github_token(token: str) -> str | None:
+    """Validate PAT format. Returns error message or None if valid."""
+    if not token:
+        return None
+    # GitHub PATs: ghp_ (classic), github_pat_ (fine-grained), gho_/ghu_/ghs_ (OAuth/app)
+    if not re.match(r"^(ghp_|github_pat_|gho_|ghu_|ghs_)[a-zA-Z0-9_]+$", token):
+        return "Invalid GitHub token format. Must start with ghp_, github_pat_, gho_, ghu_, or ghs_"
+    if len(token) < 20:
+        return "Token too short — check you copied the full token"
+    return None
+
+
+def _check_duplicate_pat(token: str, exclude_slug: str = "") -> str | None:
+    """Check if the same PAT is already registered under a different business.
+    Returns the conflicting slug name or None."""
+    if not token:
+        return None
+    for biz in arbiter_db.get_businesses():
+        slug = biz.get("slug", "")
+        if slug == exclude_slug:
+            continue
+        env_key = f"GITHUB_PAT_{slug.upper().replace('-', '_')}"
+        existing = os.getenv(env_key, "") or _read_env_value(env_key)
+        if existing and existing == token:
+            return slug
+    return None
+
+
+@app.post("/api/businesses")
+async def businesses_create(request: Request):
+    """Create a new business profile."""
+    body = await request.json()
+    name = body.get("name", "").strip()
+    if not name:
+        return {"error": "name is required"}
+    if len(name) > 60:
+        return {"error": "name too long (max 60 characters)"}
+    slug = body.get("slug", "").strip() or re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    if not slug or len(slug) > 80:
+        return {"error": "invalid slug"}
+    # Validate slug uniqueness
+    existing = arbiter_db.get_businesses()
+    if any(b["slug"] == slug for b in existing):
+        return {"error": f"slug '{slug}' already exists"}
+    description = body.get("description", "").strip()[:200]
+    business_context = body.get("business_context", "").strip()[:2000]
+    icon = body.get("icon", "🏢").strip()[:4]
+    github_repo = body.get("github_repo", "").strip()
+    # Validate repo format
+    if github_repo and not re.match(r"^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+$", github_repo):
+        return {"error": "github_repo must be owner/repo format"}
+    # Validate and store GitHub PAT in .env if provided (never in DB)
+    github_token = body.get("github_token", "").strip()
+    token_err = _validate_github_token(github_token)
+    if token_err:
+        return {"error": token_err}
+    dup_slug = _check_duplicate_pat(github_token)
+    if dup_slug:
+        return {"error": f"This token is already registered under business '{dup_slug}'. Each business must use a unique token."}
+    if github_token:
+        env_key = f"GITHUB_PAT_{slug.upper().replace('-', '_')}"
+        _write_env_values({env_key: github_token})
+        os.environ[env_key] = github_token
+        log.info(f"GitHub PAT configured for business '{slug}' (token not logged)")
+    bid = arbiter_db.save_business(
+        name=name, slug=slug, description=description,
+        icon=icon, github_repo=github_repo,
+        business_context=business_context,
+    )
+    # Seed initial prompt version if context provided
+    if business_context:
+        arbiter_db.save_prompt_version(
+            bid, business_context, mode="default",
+            source="user", summary="Initial business context",
+        )
+    return _safe_business_response(arbiter_db.get_business(bid))
+
+
+@app.put("/api/businesses/{business_id}")
+async def businesses_update(business_id: str, request: Request):
+    """Update a business profile."""
+    biz = arbiter_db.get_business(business_id)
+    if not biz:
+        return {"error": "Business not found"}
+    body = await request.json()
+    github_repo = body.get("github_repo")
+    if github_repo is not None:
+        github_repo = github_repo.strip()
+        if github_repo and not re.match(r"^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+$", github_repo):
+            return {"error": "github_repo must be owner/repo format"}
+    # Validate and store GitHub PAT in .env if provided
+    github_token = body.get("github_token", "").strip()
+    token_err = _validate_github_token(github_token)
+    if token_err:
+        return {"error": token_err}
+    dup_slug = _check_duplicate_pat(github_token, exclude_slug=biz["slug"])
+    if dup_slug:
+        return {"error": f"This token is already registered under business '{dup_slug}'. Each business must use a unique token."}
+    if github_token:
+        env_key = f"GITHUB_PAT_{biz['slug'].upper().replace('-', '_')}"
+        _write_env_values({env_key: github_token})
+        os.environ[env_key] = github_token
+        log.info(f"GitHub PAT updated for business '{biz['slug']}' (token not logged)")
+    # Business context (prompt directive) — truncate to 2000 chars
+    business_context = body.get("business_context")
+    if business_context is not None:
+        business_context = business_context.strip()[:2000]
+        # Auto-create a prompt version when context changes
+        old_ctx = (biz.get("business_context") or "").strip()
+        if business_context and business_context != old_ctx:
+            active_mode = biz.get("active_prompt_mode") or "default"
+            arbiter_db.save_prompt_version(
+                business_id, business_context, mode=active_mode,
+                source="user", summary="Updated via settings",
+            )
+    arbiter_db.update_business(
+        business_id,
+        name=body.get("name"),
+        description=body.get("description"),
+        icon=body.get("icon"),
+        github_repo=github_repo,
+        business_context=business_context,
+    )
+    return _safe_business_response(arbiter_db.get_business(business_id))
+
+
+@app.post("/api/businesses/{business_id}/delete")
+async def businesses_delete(business_id: str):
+    """Delete a business profile. Also cleans up the associated .env PAT key."""
+    biz = arbiter_db.get_business(business_id)
+    if not biz:
+        return {"error": "Business not found"}
+    # Clean up the PAT from .env and os.environ
+    slug = biz.get("slug", "")
+    env_key = f"GITHUB_PAT_{slug.upper().replace('-', '_')}"
+    if os.getenv(env_key):
+        os.environ.pop(env_key, None)
+        # Remove from .env file by writing empty (will be cleaned up)
+        _write_env_values({env_key: ""})
+        log.info(f"Cleaned up GitHub PAT for deleted business '{slug}'")
+    if not arbiter_db.delete_business(business_id):
+        return {"error": "Business not found"}
+    return {"ok": True}
+
+
+@app.get("/api/businesses/{business_id}")
+async def businesses_get(business_id: str):
+    """Get a single business profile. Secrets are never included."""
+    return _safe_business_response(arbiter_db.get_business(business_id))
+
+
+@app.get("/api/businesses")
+async def businesses_list():
+    """List all business profiles. Secrets are never included."""
+    businesses = arbiter_db.get_businesses()
+    return {"businesses": [_safe_business_response(b) for b in businesses]}
+
+
+# ── Prompt Versioning ────────────────────────────────────────────────
+
+@app.get("/api/businesses/{business_id}/prompts")
+async def prompts_list(business_id: str, mode: str | None = None, limit: int = 20):
+    """List prompt versions for a business. Includes modes summary."""
+    biz = arbiter_db.get_business(business_id)
+    if not biz:
+        return {"error": "Business not found"}
+    versions = arbiter_db.get_prompt_versions(business_id, mode=mode, limit=limit)
+    modes = arbiter_db.get_prompt_modes(business_id)
+    active = arbiter_db.get_active_prompt(business_id)
     return {
-        "cms_upload": {"status": "success", "time": "2h ago", "url": "#"},
-        "app_build": {"status": "success", "time": "5h ago", "url": "#"},
-        "backend_api": {"status": "success", "time": "1d ago", "url": "#"},
-        "eas_build": {"status": "unknown", "time": "", "url": "#"},
+        "business_id": business_id,
+        "active_mode": biz.get("active_prompt_mode") or "default",
+        "modes": modes,
+        "active_prompt": active,
+        "versions": versions,
     }
+
+
+@app.post("/api/businesses/{business_id}/prompts")
+async def prompts_create(business_id: str, request: Request):
+    """Create a new prompt version. Used by users, agents, or pipelines.
+
+    Body: { "content": "...", "mode": "default", "source": "user|agent|pipeline", "summary": "..." }
+
+    Hands-free: agents/pipelines call this with source='agent' or source='pipeline'
+    to overwrite the prompt without user intervention.
+    """
+    biz = arbiter_db.get_business(business_id)
+    if not biz:
+        return {"error": "Business not found"}
+    body = await request.json()
+    content = body.get("content", "").strip()
+    if not content:
+        return {"error": "content is required"}
+    if len(content) > 4000:
+        return {"error": "content too long (max 4000 chars)"}
+    mode = body.get("mode", "").strip() or (biz.get("active_prompt_mode") or "default")
+    # Validate mode name — alphanumeric + hyphens, max 30 chars
+    if not re.match(r"^[a-zA-Z0-9_-]{1,30}$", mode):
+        return {"error": "mode must be alphanumeric/hyphens, max 30 chars"}
+    source = body.get("source", "user").strip()
+    if source not in ("user", "agent", "pipeline"):
+        source = "user"
+    summary = body.get("summary", "").strip()[:200]
+
+    version = arbiter_db.save_prompt_version(
+        business_id, content, mode=mode, source=source, summary=summary,
+    )
+    log.info(f"Prompt v{version['version_num']} ({mode}) created for biz {business_id} by {source}")
+    return version
+
+
+@app.put("/api/businesses/{business_id}/prompts/mode")
+async def prompts_set_mode(business_id: str, request: Request):
+    """Switch the active prompt mode for a business.
+
+    Body: { "mode": "growth" }
+    This instantly changes which prompt version is injected into all agent dispatches.
+    """
+    biz = arbiter_db.get_business(business_id)
+    if not biz:
+        return {"error": "Business not found"}
+    body = await request.json()
+    mode = body.get("mode", "").strip()
+    if not mode:
+        return {"error": "mode is required"}
+    # Check this mode exists
+    modes = arbiter_db.get_prompt_modes(business_id)
+    if not any(m["mode"] == mode for m in modes):
+        return {"error": f"Mode '{mode}' has no prompt versions. Create a prompt for this mode first."}
+    arbiter_db.set_active_mode(business_id, mode)
+    log.info(f"Business {business_id} switched to prompt mode: {mode}")
+    active = arbiter_db.get_active_prompt(business_id)
+    return {"ok": True, "active_mode": mode, "active_prompt": active}
+
+
+@app.post("/api/businesses/{business_id}/prompts/{version_id}/restore")
+async def prompts_restore(business_id: str, version_id: str):
+    """Restore a previous prompt version (creates a new version with the old content)."""
+    biz = arbiter_db.get_business(business_id)
+    if not biz:
+        return {"error": "Business not found"}
+    result = arbiter_db.restore_prompt_version(version_id)
+    if not result:
+        return {"error": "Version not found"}
+    if result["business_id"] != business_id:
+        return {"error": "Version does not belong to this business"}
+    log.info(f"Prompt version {version_id} restored as v{result['version_num']} for biz {business_id}")
+    return result
+
+
+# ── CI/CD — GitHub Actions per-business ──────────────────────────────
+
+
+def _gh_pat_for_business(biz: dict) -> str:
+    """Get the GitHub PAT for a business from .env (keyed by slug)."""
+    slug = biz.get("slug", "")
+    env_key = f"GITHUB_PAT_{slug.upper().replace('-', '_')}"
+    return os.getenv(env_key, "") or os.getenv("GITHUB_PAT", "")
+
+
+async def _fetch_github_actions(repo: str, token: str) -> list[dict]:
+    """Fetch recent workflow runs from GitHub Actions API."""
+    if not repo or not token:
+        return []
+    url = f"https://api.github.com/repos/{repo}/actions/runs"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url, params={"per_page": 10}, headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            })
+            if resp.status_code != 200:
+                log.warning(f"GitHub Actions API {resp.status_code} for {repo}")
+                return []
+            runs = resp.json().get("workflow_runs", [])
+            # Deduplicate by workflow name (keep latest per workflow)
+            seen = {}
+            for run in runs:
+                wf_name = run.get("name", "unknown")
+                if wf_name not in seen:
+                    status = run.get("conclusion") or run.get("status", "unknown")
+                    # Map GitHub status to our status
+                    status_map = {
+                        "success": "success", "failure": "failed",
+                        "cancelled": "failed", "in_progress": "running",
+                        "queued": "running", "pending": "running",
+                    }
+                    created = run.get("updated_at", "")
+                    # Compute relative time
+                    time_str = ""
+                    if created:
+                        try:
+                            from datetime import timezone
+                            dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                            delta = datetime.now(timezone.utc) - dt
+                            if delta.days > 0:
+                                time_str = f"{delta.days}d ago"
+                            elif delta.seconds >= 3600:
+                                time_str = f"{delta.seconds // 3600}h ago"
+                            else:
+                                time_str = f"{delta.seconds // 60}m ago"
+                        except Exception:
+                            time_str = created[:10]
+                    seen[wf_name] = {
+                        "name": wf_name,
+                        "status": status_map.get(status, "unknown"),
+                        "time": time_str,
+                        "url": run.get("html_url", "#"),
+                        "branch": run.get("head_branch", ""),
+                    }
+            return list(seen.values())
+    except Exception as e:
+        # Sanitize: never log the token; only log the exception type and repo
+        err_msg = _sanitize_error(str(e), token)
+        log.warning(f"GitHub Actions fetch failed for {repo}: {type(e).__name__}: {err_msg}")
+        return []
+
+
+@app.get("/api/cicd")
+async def cicd_status(request: Request):
+    """Return CI/CD status from GitHub Actions for configured businesses."""
+    business_id = _get_business_id(request)
+    businesses = arbiter_db.get_businesses()
+
+    if not businesses:
+        return {"_no_businesses": {"status": "unknown", "name": "No businesses configured",
+                                    "time": "", "url": "#"}}
+
+    result = {}
+    target = [b for b in businesses if b["id"] == business_id] if business_id else businesses
+    for biz in target:
+        repo = biz.get("github_repo", "")
+        if not repo:
+            continue
+        token = _gh_pat_for_business(biz)
+        if not token:
+            result[f"{biz['slug']}_no_token"] = {
+                "status": "unknown", "name": f"{biz['name']}: No GitHub PAT configured",
+                "time": "", "url": "#", "business_id": biz["id"], "business_name": biz["name"],
+            }
+            continue
+        runs = await _fetch_github_actions(repo, token)
+        for run in runs:
+            key = f"{biz['slug']}_{run['name'].lower().replace(' ', '_')}"
+            result[key] = {**run, "business_id": biz["id"], "business_name": biz["name"]}
+    return result
 
 
 
@@ -1777,6 +2223,237 @@ async def email_send(request: Request):
     return result
 
 
+# ── Settings ──────────────────────────────────────────────────────────
+# Non-secret prefs stored in SQLite.  Secrets (email password, PATs) live in .env.
+# GET always masks secrets.  PUT writes secrets to .env, prefs to DB.
+
+import threading
+
+_ENV_PATH = Path(__file__).parent / ".env"
+_ENV_LOCK = threading.Lock()  # Prevent concurrent .env file corruption
+
+# Keys considered secret — never returned in full via API
+_SECRET_KEYS = {"email_password", "github_token"}
+
+# Keys that map to .env variable names (written to .env file, not DB)
+_ENV_KEY_MAP = {
+    "email_address":  "EMAIL_ADDRESS",
+    "email_password": "EMAIL_APP_PASSWORD",
+    "imap_host":      "IMAP_HOST",
+    "imap_port":      "IMAP_PORT",
+    "smtp_host":      "SMTP_HOST",
+    "smtp_port":      "SMTP_PORT",
+}
+
+# Allowlisted DB settings keys — reject anything not on this list
+_ALLOWED_DB_KEYS = {
+    "wake_word_enabled", "idle_lock_timeout", "tts_voice", "timezone",
+    "theme", "language", "notification_sound",
+}
+
+
+def _mask_secret(val: str) -> str:
+    """Return masked version of a secret value."""
+    if not val or len(val) <= 4:
+        return "****" if val else ""
+    return "*" * (len(val) - 4) + val[-4:]
+
+
+def _read_env_value(env_key: str) -> str:
+    """Read a value from .env file (not os.environ, to get persisted value)."""
+    if not _ENV_PATH.exists():
+        return ""
+    for line in _ENV_PATH.read_text().splitlines():
+        line = line.strip()
+        if line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        if k.strip() == env_key:
+            return v.strip().strip('"').strip("'")
+    return ""
+
+
+def _write_env_values(updates: dict[str, str]) -> None:
+    """Update specific keys in the .env file, preserving comments and order.
+    Thread-safe via _ENV_LOCK. Deduplicates keys to prevent .env corruption."""
+    with _ENV_LOCK:
+        if not _ENV_PATH.exists():
+            lines = ["# ARBITER Mission Control\n"]
+        else:
+            lines = _ENV_PATH.read_text().splitlines(keepends=True)
+
+        remaining = dict(updates)
+        new_lines = []
+        seen_keys: set[str] = set()
+
+        for line in lines:
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#") and "=" in stripped:
+                key = stripped.split("=", 1)[0].strip()
+                # Skip duplicate keys already written
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                if key in remaining:
+                    new_lines.append(f"{key}={remaining.pop(key)}\n")
+                    continue
+            new_lines.append(line if line.endswith("\n") else line + "\n")
+
+        # Append any keys not already in the file
+        for k, v in remaining.items():
+            if k not in seen_keys:
+                new_lines.append(f"{k}={v}\n")
+                seen_keys.add(k)
+
+        _ENV_PATH.write_text("".join(new_lines))
+
+        # Enforce file permissions (owner-only read/write)
+        try:
+            _ENV_PATH.chmod(0o600)
+        except OSError:
+            pass  # Windows or permission denied — non-fatal
+
+
+def _sanitize_error(err: str, *secrets: str) -> str:
+    """Strip any secret values from an error message before returning to client."""
+    for s in secrets:
+        if s and s in err:
+            err = err.replace(s, "***")
+    return err
+
+
+def _is_secret_env_key(env_key: str) -> bool:
+    """Check if an .env key holds a secret value (PAT, password, API key)."""
+    key_upper = env_key.upper()
+    return any(tag in key_upper for tag in ("PAT", "PASSWORD", "SECRET", "TOKEN", "API_KEY"))
+
+
+@app.get("/api/settings")
+async def settings_get():
+    """Return all settings. Secrets are masked — never returned in full."""
+    # Gather prefs from DB
+    prefs = arbiter_db.get_settings()
+
+    # Only return allowlisted DB keys to prevent data leakage
+    result = {k: v for k, v in prefs.items() if k in _ALLOWED_DB_KEYS}
+
+    # Gather email config from .env (source of truth for secrets)
+    for settings_key, env_key in _ENV_KEY_MAP.items():
+        raw = _read_env_value(env_key) or os.getenv(env_key, "")
+        if settings_key in _SECRET_KEYS:
+            result[settings_key] = _mask_secret(raw)
+        else:
+            result[settings_key] = raw
+
+    # Add email configured status
+    result["email_configured"] = bool(
+        (result.get("email_address") or "").strip()
+        and (_read_env_value("EMAIL_APP_PASSWORD") or os.getenv("EMAIL_APP_PASSWORD", "")).strip()
+    )
+
+    # Add GitHub PAT status per business (masked, never raw)
+    github_pats = {}
+    for biz in arbiter_db.get_businesses():
+        env_key = f"GITHUB_PAT_{biz['slug'].upper().replace('-', '_')}"
+        raw = os.getenv(env_key, "") or _read_env_value(env_key)
+        github_pats[biz["slug"]] = _mask_secret(raw)
+    result["github_pat_status"] = github_pats
+
+    # Add LLM provider info (read-only — no keys exposed)
+    result["llm_provider"] = LLM_PROVIDER
+    result["llm_claude_configured"] = bool(ANTHROPIC_API_KEY)
+    result["llm_openrouter_configured"] = bool(OPENROUTER_API_KEY)
+    result["llm_gemini_configured"] = bool(GOOGLE_API_KEY)
+    result["llm_ollama_url"] = OLLAMA_BASE_URL
+    result["llm_ollama_model"] = OLLAMA_MODEL
+
+    return result
+
+
+@app.put("/api/settings")
+async def settings_put(request: Request):
+    """Save settings. Secrets go to .env, prefs to DB.
+    Only allowlisted keys are accepted for DB storage."""
+    body = await request.json()
+    if not isinstance(body, dict):
+        return JSONResponse(status_code=400, content={"error": "Expected JSON object"})
+
+    env_updates: dict[str, str] = {}
+    db_updates: dict[str, str] = {}
+
+    for key, value in body.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            continue
+        # Length guard
+        if len(value) > 500:
+            continue
+
+        if key in _ENV_KEY_MAP:
+            # Secret / email key — skip blank passwords (means "keep existing")
+            if key in _SECRET_KEYS and not value.strip():
+                continue
+            env_updates[_ENV_KEY_MAP[key]] = value.strip()
+        elif key in _ALLOWED_DB_KEYS:
+            db_updates[key] = value.strip()
+        # Silently ignore unknown keys — don't allow arbitrary DB writes
+
+    # Write .env secrets
+    if env_updates:
+        _write_env_values(env_updates)
+        # Hot-reload into current process env
+        for env_key, val in env_updates.items():
+            os.environ[env_key] = val
+        # Hot-reload EmailMonitor
+        email_mon.host = os.getenv("IMAP_HOST", "imap.gmail.com")
+        email_mon.port = int(os.getenv("IMAP_PORT", "993"))
+        email_mon.smtp_host = os.getenv("SMTP_HOST", "smtp.gmail.com")
+        email_mon.smtp_port = int(os.getenv("SMTP_PORT", "587"))
+        email_mon.user = os.getenv("EMAIL_ADDRESS", "")
+        email_mon.password = os.getenv("EMAIL_APP_PASSWORD", "")
+        # Clear cache so next fetch uses new credentials
+        email_mon._last_fetch = None
+        email_mon._cache = []
+        log.info("Email settings updated and reloaded")
+
+    # Write DB prefs
+    if db_updates:
+        arbiter_db.set_settings(db_updates)
+
+    return {"ok": True, "env_keys_updated": len(env_updates), "prefs_updated": len(db_updates)}
+
+
+@app.post("/api/settings/test-email")
+async def settings_test_email(request: Request):
+    """Test IMAP connection with provided credentials. Nothing is persisted."""
+    body = await request.json()
+    host = body.get("imap_host", "imap.gmail.com").strip()
+    port = int(body.get("imap_port", 993))
+    user = body.get("email_address", "").strip()
+    password = body.get("email_password", "").strip()
+
+    # If password is blank or masked, use the existing one
+    if not password or password.startswith("****"):
+        password = _read_env_value("EMAIL_APP_PASSWORD") or os.getenv("EMAIL_APP_PASSWORD", "")
+
+    if not user or not password:
+        return JSONResponse(status_code=400, content={"error": "Email address and password required"})
+
+    import imaplib
+    try:
+        conn = await asyncio.to_thread(imaplib.IMAP4_SSL, host, port)
+        await asyncio.to_thread(conn.login, user, password)
+        # Count inbox messages as a sanity check
+        await asyncio.to_thread(conn.select, "INBOX", True)
+        _, data = await asyncio.to_thread(conn.search, None, "ALL")
+        count = len(data[0].split()) if data[0] else 0
+        await asyncio.to_thread(conn.logout)
+        return {"ok": True, "message": f"Connected successfully. Inbox has {count} messages."}
+    except Exception as e:
+        # Sanitize error — strip credentials, host, and any auth data
+        err = _sanitize_error(str(e), user, password, host)
+        return {"ok": False, "error": err}
+
+
 # ── Agent Registry ────────────────────────────────────────────────────
 @app.get("/api/agents")
 async def agents_list():
@@ -1807,10 +2484,10 @@ _PROMPTS_DIR = Path(__file__).parent / "prompts"
 
 # ── 3-Layer Prompt Architecture ──────────────────────────────────────
 # Layer 1: Global Operating System (shared by all agents)
-# Layer 2: Business Directive (changes per business)
+# Layer 2: Business Directive (dynamic — from active business profile, or fallback file)
 # Layer 3: Agent Role Prompt (small, focused per agent)
 _GLOBAL_OS_PROMPT = ""
-_BUSINESS_DIRECTIVE_PROMPT = ""
+_BUSINESS_DIRECTIVE_PROMPT = ""   # fallback if no business profile is active
 _global_os_file = _PROMPTS_DIR / "global_os.md"
 _business_dir_file = _PROMPTS_DIR / "business_directive.md"
 if _global_os_file.exists():
@@ -1818,12 +2495,17 @@ if _global_os_file.exists():
     log.info(f"Loaded global OS prompt ({len(_GLOBAL_OS_PROMPT)} chars)")
 if _business_dir_file.exists():
     _BUSINESS_DIRECTIVE_PROMPT = _business_dir_file.read_text(encoding="utf-8").strip()
-    log.info(f"Loaded business directive ({len(_BUSINESS_DIRECTIVE_PROMPT)} chars)")
+    log.info(f"Loaded fallback business directive ({len(_BUSINESS_DIRECTIVE_PROMPT)} chars)")
 
 
-def _load_agent_prompt(agent_id: str) -> str:
+def _load_agent_prompt(agent_id: str, business_context: str | None = None) -> str:
     """Compose a 3-layer system prompt: Global OS + Business Directive + Agent Role.
-    Each layer is loaded from prompts/ directory. Falls back gracefully if missing."""
+
+    Layer 2 (Business Directive) is resolved dynamically:
+      - If business_context is provided (from the active business profile), use it.
+      - Otherwise fall back to the static prompts/business_directive.md file.
+    This means agents automatically adapt to the active business context.
+    """
     # Layer 3: Agent-specific role prompt
     prompt_file = _PROMPTS_DIR / f"{agent_id}.md"
     if prompt_file.exists():
@@ -1836,10 +2518,56 @@ def _load_agent_prompt(agent_id: str) -> str:
     layers = []
     if _GLOBAL_OS_PROMPT:
         layers.append(_GLOBAL_OS_PROMPT)
-    if _BUSINESS_DIRECTIVE_PROMPT:
-        layers.append(_BUSINESS_DIRECTIVE_PROMPT)
+
+    # Layer 2: dynamic business context or static fallback
+    directive = business_context or _BUSINESS_DIRECTIVE_PROMPT
+    if directive:
+        layers.append(directive)
+
     layers.append(agent_role)
     return "\n\n---\n\n".join(layers)
+
+
+def _resolve_business_context(business_id: str | None = None) -> str | None:
+    """Resolve the business context directive for the active business.
+
+    Resolution order:
+    1. Versioned prompt system (active mode → latest version)
+    2. Legacy business_context column (backwards compat)
+    3. Business description as minimal context
+    4. None → triggers fallback to static business_directive.md
+    """
+    if not business_id:
+        return None
+    try:
+        biz = arbiter_db.get_business(business_id)
+        if not biz:
+            return None
+
+        header = f"# Business Directive — {biz['name']}"
+        if biz.get("description"):
+            header += f"\n\n{biz['description']}"
+
+        # 1. Try versioned prompt system first
+        active_prompt = arbiter_db.get_active_prompt(business_id)
+        if active_prompt and active_prompt.get("content", "").strip():
+            mode = active_prompt.get("mode", "default")
+            ver = active_prompt.get("version_num", "?")
+            mode_tag = f"\n_[Mode: {mode} | v{ver}]_"
+            return f"{header}\n\n{active_prompt['content'].strip()}{mode_tag}"
+
+        # 2. Fall back to legacy business_context column
+        ctx = biz.get("business_context", "")
+        if ctx and ctx.strip():
+            return f"{header}\n\n{ctx.strip()}"
+
+        # 3. Minimal context from description
+        if biz.get("description"):
+            return header
+        return None
+    except Exception as e:
+        log.warning(f"Failed to resolve business context: {e}")
+        return None
 
 
 CEO_AGENTS = {
@@ -3135,14 +3863,27 @@ async def _org_run_level(run_id: str, level: int):
 
 
 async def _ceo_dispatch(agent_id: str, task: str, source: str = "dispatch",
-                        broadcast_id: str | None = None) -> dict:
-    """Dispatch a task to a CEO sub-agent and return the result."""
+                        broadcast_id: str | None = None,
+                        business_id: str | None = None) -> dict:
+    """Dispatch a task to a CEO sub-agent and return the result.
+    When business_id is provided, the business context is dynamically
+    injected into the system prompt so agents operate with full awareness
+    of the business's mission, products, audience, and tone."""
     agent = _get_all_agents().get(agent_id)
     if not agent:
         return {"error": f"Unknown agent: {agent_id}"}
 
+    # ── Dynamic business context injection ────────────────────────────
+    # Re-compose the prompt with the active business's directive instead
+    # of the static fallback from business_directive.md
+    biz_ctx = _resolve_business_context(business_id)
+    if biz_ctx:
+        system_prompt = _load_agent_prompt(agent_id, business_context=biz_ctx)
+        log.info(f"CEO dispatch [{agent_id}]: using business context ({len(biz_ctx)} chars)")
+    else:
+        system_prompt = agent["system_prompt"]
+
     # ── Context injection: pull relevant past work from DB ─────────────
-    system_prompt = agent["system_prompt"]
     try:
         # Pull last 3 results from THIS agent + search for task-relevant results
         prior_own = arbiter_db.get_agent_results(agent_id=agent_id, limit=3)
@@ -3295,7 +4036,7 @@ async def _ceo_dispatch(agent_id: str, task: str, source: str = "dispatch",
         arbiter_db.save_agent_result(
             agent_id=agent_id, agent_name=agent["name"], task=task,
             error=str(e), model=model, source=source,
-            broadcast_id=broadcast_id,
+            broadcast_id=broadcast_id, business_id=business_id,
         )
         return {"error": str(e), "agent_id": agent_id}
 
@@ -3304,14 +4045,14 @@ async def _ceo_dispatch(agent_id: str, task: str, source: str = "dispatch",
         arbiter_db.save_agent_result(
             agent_id=agent_id, agent_name=agent["name"], task=task,
             error=error_msg, model=model, source=source,
-            broadcast_id=broadcast_id,
+            broadcast_id=broadcast_id, business_id=business_id,
         )
         return {"error": error_msg, "agent_id": agent_id}
 
     rid = arbiter_db.save_agent_result(
         agent_id=agent_id, agent_name=agent["name"], task=task,
         response=reply, model=model, source=source,
-        broadcast_id=broadcast_id,
+        broadcast_id=broadcast_id, business_id=business_id,
     )
     return {
         "agent_id": agent_id,
@@ -3698,7 +4439,8 @@ async def ceo_dispatch(request: Request):
     task = body.get("task", "")
     if not agent_id or not task:
         return {"error": "agent_id and task required"}
-    result = await _ceo_dispatch(agent_id, task)
+    business_id = _get_business_id(request)
+    result = await _ceo_dispatch(agent_id, task, business_id=business_id)
     return result
 
 
@@ -5052,6 +5794,7 @@ async def _pipeline_run_next(pipeline_id: str) -> dict:
         result = await _ceo_dispatch(
             stage["agent_id"], task,
             source="pipeline", broadcast_id=pipeline_id,
+            business_id=pipe.get("business_id"),
         )
 
         if result.get("error"):
@@ -5142,8 +5885,9 @@ async def ceo_pipeline_create(request: Request):
         stages = _create_pipeline_stages(template_name, directive)
     else:
         return {"error": f"Unknown template: {template_name}. Options: {list(_PIPELINE_TEMPLATES.keys())}"}
-    pipeline_id = arbiter_db.save_pipeline(directive, stages)
-    log.info(f"Pipeline [{pipeline_id}] created: '{directive[:60]}' with {len(stages)} stages ({template_name})")
+    business_id = _get_business_id(request)
+    pipeline_id = arbiter_db.save_pipeline(directive, stages, business_id=business_id)
+    log.info(f"Pipeline [{pipeline_id}] created: '{directive[:60]}' with {len(stages)} stages ({template_name}) biz={business_id}")
 
     # Start execution (runs until first gate or completion)
     result = await _pipeline_run_next(pipeline_id)
@@ -5358,6 +6102,7 @@ async def ceo_pipeline_trigger(pipeline_id: str, stage_idx: int):
     result = await _ceo_dispatch(
         stage["agent_id"], task,
         source="pipeline", broadcast_id=pipeline_id,
+        business_id=pipe.get("business_id"),
     )
 
     if result.get("error"):
@@ -6017,14 +6762,18 @@ async def revenue_transactions():
 # Pre-build context in background so chat requests don't wait for feeds.
 _ctx_cache = {"text": "", "ts": 0}
 
-async def _get_context_fast(topic: str | None = None, query: str = "") -> str:
+async def _get_context_fast(topic: str | None = None, query: str = "",
+                            business_id: str | None = None) -> str:
     """Return context for the LLM.  When a topic is known, builds a slim
     topic-focused context (fast).  For general queries, uses the cached
     full context (rebuilt every 60 s)."""
     import time as _t
     if topic:
         # Topic-specific = fast, small context.  No caching needed.
-        return await _build_context(topic=topic, query=query)
+        return await _build_context(topic=topic, query=query, business_id=business_id)
+    # Business-specific queries bypass the generic cache
+    if business_id:
+        return await _build_context(business_id=business_id)
     now = _t.time()
     if _ctx_cache["text"] and (now - _ctx_cache["ts"]) < 60:
         return _ctx_cache["text"]
@@ -7994,6 +8743,7 @@ async def jarvis_chat(request: Request):
     body = await request.json()
     user_msg = body.get("message", "").strip()
     history = body.get("history", [])
+    business_id = _get_business_id(request)
 
     if not user_msg:
         return {"reply": "I didn't catch that. Could you repeat?", "error": False}
@@ -8027,14 +8777,14 @@ async def jarvis_chat(request: Request):
     # Claude receives tools and pulls only the data it needs — no pre-fetching,
     # no bloated context. Falls back to the Ollama path below on failure.
     if ANTHROPIC_API_KEY and not _claude_check_budget():
-        _claude_result = await _jarvis_chat_claude(user_msg, history, topic)
+        _claude_result = await _jarvis_chat_claude(user_msg, history, topic, business_id=business_id)
         if _claude_result is not None:
             return _claude_result
         log.warning("Claude tool path returned None — falling back to Ollama path")
 
     # ── OLLAMA / LEGACY PATH ─────────────────────────────────────────────
     # Build context — topic-aware (fast & small) when topic is known
-    ctx = await _get_context_fast(topic=topic, query=user_msg)
+    ctx = await _get_context_fast(topic=topic, query=user_msg, business_id=business_id)
 
     # ── On-demand location weather: detect "weather in <place>" queries ──
     loc_match = re.search(
@@ -9688,12 +10438,118 @@ async def _execute_tool(name: str, inputs: dict) -> str:
                 })
             return "\n\n".join(parts)
 
+        # ── Destructive tools (require confirmation) ─────────────────
+        elif name == "delete_business":
+            biz_name = inputs.get("business_name", "").strip()
+            confirmed = inputs.get("confirmed", False)
+            biz = _find_business_by_name(biz_name)
+            if not biz:
+                return json.dumps({"error": f"No business found matching '{biz_name}'", "available": [b["name"] for b in arbiter_db.get_businesses()]})
+            if not confirmed:
+                versions = arbiter_db.get_prompt_versions(biz["id"])
+                return json.dumps({
+                    "action": "DELETE_BUSINESS",
+                    "status": "AWAITING_CONFIRMATION",
+                    "business": {"id": biz["id"], "name": biz["name"], "description": biz.get("description", "")},
+                    "warning": f"This will permanently delete '{biz['name']}' and {len(versions)} prompt version(s). Data tagged with this business will remain but won't be filtered.",
+                    "instruction": "Ask the user to explicitly confirm before calling this tool again with confirmed=true.",
+                })
+            # Confirmed — execute deletion
+            slug = biz.get("slug", "")
+            env_key = f"GITHUB_PAT_{slug.upper().replace('-', '_')}"
+            if os.getenv(env_key):
+                os.environ.pop(env_key, None)
+                _write_env_values({env_key: ""})
+            arbiter_db.delete_business(biz["id"])
+            log.info(f"Business '{biz['name']}' deleted via chat (confirmed)")
+            return json.dumps({"action": "DELETE_BUSINESS", "status": "COMPLETED", "deleted": biz["name"]})
+
+        elif name == "update_business_context":
+            biz_name = inputs.get("business_name", "").strip()
+            new_context = inputs.get("new_context", "").strip()
+            confirmed = inputs.get("confirmed", False)
+            if not new_context:
+                return '{"error": "new_context is required"}'
+            if len(new_context) > 4000:
+                return '{"error": "context too long (max 4000 chars)"}'
+            biz = _find_business_by_name(biz_name)
+            if not biz:
+                return json.dumps({"error": f"No business found matching '{biz_name}'", "available": [b["name"] for b in arbiter_db.get_businesses()]})
+            old_ctx = (biz.get("business_context") or "").strip()
+            if not confirmed:
+                return json.dumps({
+                    "action": "UPDATE_BUSINESS_CONTEXT",
+                    "status": "AWAITING_CONFIRMATION",
+                    "business": biz["name"],
+                    "current_context_preview": old_ctx[:300] + ("..." if len(old_ctx) > 300 else "") if old_ctx else "(empty)",
+                    "new_context_preview": new_context[:300] + ("..." if len(new_context) > 300 else ""),
+                    "instruction": "Show the user what will change and ask them to explicitly confirm before calling with confirmed=true.",
+                })
+            # Confirmed — execute update
+            active_mode = biz.get("active_prompt_mode") or "default"
+            arbiter_db.save_prompt_version(
+                biz["id"], new_context, mode=active_mode,
+                source="agent", summary="Updated via chat/voice",
+            )
+            arbiter_db.update_business(biz["id"], business_context=new_context)
+            log.info(f"Business context updated for '{biz['name']}' via chat (confirmed)")
+            return json.dumps({"action": "UPDATE_BUSINESS_CONTEXT", "status": "COMPLETED", "business": biz["name"], "new_version": True})
+
+        elif name == "switch_prompt_mode":
+            biz_name = inputs.get("business_name", "").strip()
+            mode = inputs.get("mode", "").strip()
+            confirmed = inputs.get("confirmed", False)
+            if not mode:
+                return '{"error": "mode is required"}'
+            biz = _find_business_by_name(biz_name)
+            if not biz:
+                return json.dumps({"error": f"No business found matching '{biz_name}'", "available": [b["name"] for b in arbiter_db.get_businesses()]})
+            modes = arbiter_db.get_prompt_modes(biz["id"])
+            mode_names = [m["mode"] for m in modes]
+            if mode not in mode_names:
+                return json.dumps({"error": f"Mode '{mode}' does not exist", "available_modes": mode_names})
+            current_mode = biz.get("active_prompt_mode") or "default"
+            if mode == current_mode:
+                return json.dumps({"status": "NO_CHANGE", "message": f"'{biz['name']}' is already in '{mode}' mode"})
+            if not confirmed:
+                target_mode = next((m for m in modes if m["mode"] == mode), {})
+                return json.dumps({
+                    "action": "SWITCH_PROMPT_MODE",
+                    "status": "AWAITING_CONFIRMATION",
+                    "business": biz["name"],
+                    "current_mode": current_mode,
+                    "target_mode": mode,
+                    "target_versions": target_mode.get("total_versions", 0),
+                    "instruction": "Ask the user to confirm the mode switch before calling with confirmed=true.",
+                })
+            # Confirmed — execute switch
+            arbiter_db.set_active_mode(biz["id"], mode)
+            log.info(f"Prompt mode switched to '{mode}' for '{biz['name']}' via chat (confirmed)")
+            return json.dumps({"action": "SWITCH_PROMPT_MODE", "status": "COMPLETED", "business": biz["name"], "new_mode": mode})
+
         else:
             return f'{{"error": "unknown tool: {name}"}}'
 
     except Exception as e:
         log.warning(f"Tool {name} error: {type(e).__name__}: {e}")
         return f'{{"error": "{type(e).__name__}: {str(e)[:120]}"}}'
+
+
+def _find_business_by_name(name: str) -> dict | None:
+    """Find a business profile by case-insensitive name match."""
+    if not name:
+        return None
+    businesses = arbiter_db.get_businesses()
+    name_lower = name.lower()
+    # Exact match first
+    for b in businesses:
+        if b["name"].lower() == name_lower:
+            return b
+    # Partial match fallback
+    for b in businesses:
+        if name_lower in b["name"].lower():
+            return b
+    return None
 
 
 # ── Selective Tool Loading ─────────────────────────────────────────────
@@ -9730,6 +10586,9 @@ def _select_tools(topic: str | None, user_msg: str) -> list[dict]:
         ({"get_roadmap"},                    ["roadmap", "milestone", "deadline", "sprint"]),
         ({"search_collectables"},            ["pokemon", "card", "collectable", "psa", "grading", "charizard", "trading card", "tcg"]),
         ({"search_products"},                ["buy", "price", "shop", "product", "nike", "adidas", "headphone", "compare price"]),
+        ({"delete_business", "update_business_context", "switch_prompt_mode"},
+         ["delete", "remove", "update context", "change context", "switch mode", "prompt mode", "business profile",
+          "edit business", "modify business", "update business", "delete business"]),
     ]
 
     needed = set(_ALWAYS_TOOLS)
@@ -9866,12 +10725,17 @@ async def _jarvis_chat_claude(
     user_msg: str,
     history: list,
     topic: str | None,
+    business_id: str | None = None,
 ) -> dict | None:
     """Handle a full Jarvis chat turn using Claude with tool calling.
 
     Claude receives the user message and _CLAUDE_TOOLS. It decides what to
     fetch (weather, stocks, web search, etc.) and pulls only what it needs —
     no pre-fetching, no bloated context.
+
+    When business_id is provided, the active business's context (mission,
+    products, audience, tone) is injected into the system prompt so
+    responses are grounded in the business domain.
 
     Returns the API result dict on success, or None to trigger Ollama fallback.
     """
@@ -9884,6 +10748,16 @@ async def _jarvis_chat_claude(
         date=_now.strftime("%B %d, %Y"),
         year=_now.year,
     )
+
+    # ── Inject active business context into system prompt ─────────────
+    biz_ctx = _resolve_business_context(business_id)
+    if biz_ctx:
+        system += (
+            f"\n\n## Active Business Context\n"
+            f"The user is operating in the context of this business. "
+            f"Ground your responses in this domain when relevant.\n\n"
+            f"{biz_ctx}"
+        )
 
     # ── Select only relevant tools to reduce input tokens ──────────────
     selected_tools = _select_tools(topic, user_msg)
@@ -9956,7 +10830,8 @@ async def _jarvis_chat_claude(
     return result
 
 
-async def _build_context(topic: str | None = None, query: str = "") -> str:
+async def _build_context(topic: str | None = None, query: str = "",
+                         business_id: str | None = None) -> str:
     """Build structured telemetry snapshot for the LLM context window.
     Uses compact formatting to maximise signal-per-token.
     When topic is specified, only includes relevant sections to reduce token count.
@@ -9974,6 +10849,24 @@ async def _build_context(topic: str | None = None, query: str = "") -> str:
 
     # ── SYSTEM (always, one line) ──
     sections.append(f"[SYSTEM] {now_str}")
+
+    # ── BUSINESS CONTEXT ──
+    businesses = arbiter_db.get_businesses()
+    if businesses:
+        if business_id:
+            biz = next((b for b in businesses if b["id"] == business_id), None)
+            if biz:
+                biz_header = f"[ACTIVE BUSINESS] {biz['name']}"
+                if biz.get("description"):
+                    biz_header += f" — {biz['description']}"
+                sections.append(biz_header)
+                # Include rich business context for prompt grounding
+                biz_ctx = (biz.get("business_context") or "").strip()
+                if biz_ctx:
+                    sections.append(f"[BUSINESS DIRECTIVE]\n{biz_ctx}")
+        else:
+            biz_names = ", ".join(b["name"] for b in businesses)
+            sections.append(f"[BUSINESSES] {biz_names} (showing all)")
 
     # ── SERVICE HEALTH ──
     if _need("services", "gcp"):

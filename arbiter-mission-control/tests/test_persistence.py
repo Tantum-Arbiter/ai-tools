@@ -257,6 +257,148 @@ class TestUniversalSearch:
 
 
 # ══════════════════════════════════════════════════════════════════════
+# Business Profiles
+# ══════════════════════════════════════════════════════════════════════
+
+class TestBusinessProfiles:
+    def test_create_and_retrieve(self, db):
+        bid = db.save_business(
+            name="Grow with Freya", slug="grow-with-freya",
+            description="Parenting app", icon="🌱",
+        )
+        assert bid
+        biz = db.get_business(bid)
+        assert biz["name"] == "Grow with Freya"
+        assert biz["slug"] == "grow-with-freya"
+        assert biz["icon"] == "🌱"
+
+    def test_list_businesses(self, db):
+        db.save_business("Biz A", "biz-a")
+        db.save_business("Biz B", "biz-b")
+        businesses = db.get_businesses()
+        assert len(businesses) == 2
+        assert businesses[0]["name"] == "Biz A"
+
+    def test_update_business(self, db):
+        bid = db.save_business("Old Name", "old-name")
+        db.update_business(bid, name="New Name", icon="🚀")
+        biz = db.get_business(bid)
+        assert biz["name"] == "New Name"
+        assert biz["icon"] == "🚀"
+
+    def test_delete_business(self, db):
+        bid = db.save_business("To Delete", "to-delete")
+        assert db.delete_business(bid)
+        assert db.get_business(bid) is None
+        assert len(db.get_businesses()) == 0
+
+    def test_cicd_config(self, db):
+        cicd = [
+            {"name": "App Build", "key": "app_build", "url": "#", "status": "success"},
+            {"name": "Deploy", "key": "deploy", "url": "#", "status": "unknown"},
+        ]
+        bid = db.save_business("With CI/CD", "with-cicd", cicd_config=cicd)
+        biz = db.get_business(bid)
+        assert biz["cicd_config"] is not None
+        assert len(biz["cicd_config"]) == 2
+        assert biz["cicd_config"][0]["name"] == "App Build"
+
+    def test_nonexistent_business(self, db):
+        assert db.get_business("nonexistent") is None
+        assert not db.delete_business("nonexistent")
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Business-scoped data (business_id filtering)
+# ══════════════════════════════════════════════════════════════════════
+
+class TestBusinessScoping:
+    def test_agent_results_by_business(self, db):
+        db.save_agent_result("r1", "Researcher", "Task A", response="R1", business_id="biz1")
+        db.save_agent_result("r1", "Researcher", "Task B", response="R2", business_id="biz2")
+        db.save_agent_result("r1", "Researcher", "Task C", response="R3")
+        all_results = db.get_agent_results()
+        assert len(all_results) == 3
+        biz1 = db.get_agent_results(business_id="biz1")
+        assert len(biz1) == 1
+        assert biz1[0]["task"] == "Task A"
+
+    def test_briefings_by_business(self, db):
+        db.save_briefing("Morning", "morning", "msg1", business_id="biz1")
+        db.save_briefing("Evening", "evening", "msg2", business_id="biz2")
+        all_b = db.get_briefings()
+        assert len(all_b) == 2
+        biz1 = db.get_briefings(business_id="biz1")
+        assert len(biz1) == 1
+
+    def test_conversations_by_business(self, db):
+        db.save_conversation_turn("s1", "user", "Hello", business_id="biz1")
+        db.save_conversation_turn("s2", "user", "Bye", business_id="biz2")
+        sessions = db.get_sessions(business_id="biz1")
+        assert len(sessions) == 1
+        assert sessions[0]["session_id"] == "s1"
+
+    def test_insights_by_business(self, db):
+        db.save_insight("alert", "Alert 1", "msg", business_id="biz1")
+        db.save_insight("alert", "Alert 2", "msg", business_id="biz2")
+        biz1 = db.get_insights(business_id="biz1")
+        assert len(biz1) == 1
+
+    def test_pipelines_by_business(self, db):
+        db.save_pipeline("Do X", [{"agent_id": "r"}], business_id="biz1")
+        db.save_pipeline("Do Y", [{"agent_id": "r"}], business_id="biz2")
+        biz1 = db.get_pipelines(business_id="biz1")
+        assert len(biz1) == 1
+        assert biz1[0]["directive"] == "Do X"
+
+    def test_search_all_by_business(self, db):
+        db.save_agent_result("r1", "Researcher", "marketing plan", response="R", business_id="biz1")
+        db.save_agent_result("r1", "Researcher", "marketing strategy", response="R", business_id="biz2")
+        results = db.search_all("marketing", business_id="biz1")
+        assert len(results["agent_results"]) == 1
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Settings (key-value store)
+# ══════════════════════════════════════════════════════════════════════
+
+class TestSettings:
+    def test_set_and_get(self, db):
+        db.set_setting("theme", "dark")
+        assert db.get_setting("theme") == "dark"
+
+    def test_get_missing(self, db):
+        assert db.get_setting("nonexistent") is None
+
+    def test_upsert(self, db):
+        db.set_setting("key", "v1")
+        db.set_setting("key", "v2")
+        assert db.get_setting("key") == "v2"
+
+    def test_bulk_set(self, db):
+        db.set_settings({"a": "1", "b": "2", "c": "3"})
+        assert db.get_setting("a") == "1"
+        assert db.get_setting("c") == "3"
+
+    def test_get_by_prefix(self, db):
+        db.set_settings({"email_host": "imap.gmail.com", "email_port": "993", "theme": "dark"})
+        email_settings = db.get_settings("email_")
+        assert len(email_settings) == 2
+        assert "email_host" in email_settings
+
+    def test_get_all(self, db):
+        db.set_settings({"x": "1", "y": "2"})
+        all_s = db.get_settings()
+        assert len(all_s) == 2
+
+    def test_delete(self, db):
+        db.set_setting("tmp", "val")
+        assert db.delete_setting("tmp")
+        assert db.get_setting("tmp") is None
+        assert not db.delete_setting("tmp")
+
+
+# ══════════════════════════════════════════════════════════════════════
 # File Persistence (survives restart)
 # ══════════════════════════════════════════════════════════════════════
 
