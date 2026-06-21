@@ -512,8 +512,8 @@ body.locked .orb-clock { opacity: 1; pointer-events: auto; transform: translateY
 }
 .dialogue-options:empty { display: none; }
 @keyframes dialogueFadeIn {
-    from { opacity: 0; transform: translateY(10px); }
-    to   { opacity: 1; transform: translateY(0); }
+    from { opacity: 0; transform: translateX(-50%) translateY(10px); }
+    to   { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
 .dialogue-opt {
     display: flex; align-items: flex-start; gap: 10px;
@@ -821,10 +821,15 @@ body.locked .orb-clock { opacity: 1; pointer-events: auto; transform: translateY
     text-shadow: 0 0 20px var(--cyan-glow), 0 0 40px rgba(0,240,255,0.15);
 }
 .float-globe {
-    flex: 0 0 auto; display: flex; flex-direction: column; align-items: flex-start;
+    flex: 0 0 auto; display: flex; flex-direction: column; align-items: center;
     overflow: hidden;
 }
-.float-globe canvas { width: 100%; height: auto; display: block; max-height: clamp(120px, 13vw, 240px); }
+.float-globe canvas {
+    display: block;
+    width: clamp(140px, 14vw, 240px);
+    height: clamp(112px, 11.2vw, 192px);
+    object-fit: contain;
+}
 
 .hero-legend {
     display: flex; flex-wrap: wrap; gap: 3px; padding: 3px 0 0;

@@ -681,6 +681,9 @@ class VoiceEngine {
         this._lockCode = '9086';
         this._lockVoiceDigits = [];        // collected spoken digits
 
+        // Mic permission denied — stops retry loops on http://
+        this._micDenied = false;
+
         // Audio analyser for real-time mic level → orb waveform
         this._audioCtx = null;
         this._analyser = null;
@@ -969,6 +972,8 @@ class VoiceEngine {
         if (!this.recognition) return;
         // Mic mute guard — block all recognition starts
         if (_micMuted) { this._pendingStart = null; return; }
+        // Mic denied guard — browser refused permission, stop retrying
+        if (this._micDenied) { this._pendingStart = null; return; }
         if (this._running) {
             // Recognition is still running — stop it and queue the desired mode
             this._pendingStart = mode;
@@ -1182,9 +1187,13 @@ class VoiceEngine {
             console.warn('[ARBITER] Recognition error:', e.error, 'mode:', this._mode);
 
             if (e.error === 'not-allowed') {
-                logConvo('Microphone access denied. Check browser permissions.', 'system');
+                if (!this._micDenied) {
+                    logConvo('Microphone access denied. Check browser permissions.', 'system');
+                }
+                this._micDenied = true;
                 this._mode = 'off';
                 this._running = false;
+                this._pendingStart = null;
                 this.orb.setState('idle');
                 return;
             }
@@ -1907,6 +1916,9 @@ class VoiceEngine {
     }
 
     _enterChatMode() {
+        // Block chat mode while locked
+        if (this._locked) return;
+
         // If speaking, stop first
         if (this.speaking) this.stopSpeaking();
 
@@ -2026,6 +2038,12 @@ class VoiceEngine {
     }
 
     async _chatSend(text) {
+        // Block chat while locked — only passcode input should work
+        if (this._locked) {
+            this._chatAddMessage('System is locked. Enter passcode to unlock.', 'system');
+            return;
+        }
+
         // Cancel any in-flight request + stop speech when user sends a new message
         if (this._processingQuery || this._activeAbort) {
             this.cancelProcessing();
