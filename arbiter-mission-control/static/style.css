@@ -4478,20 +4478,34 @@ body.locked .lock-overlay { display: flex; }
         display: flex !important;
         background: #fff !important;
         z-index: 99999;
+        overflow: visible !important;
+    }
+    .pipeline-report-container {
+        max-height: none !important;
+        height: auto !important;
+        overflow: visible !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        border: none !important;
+        border-radius: 0 !important;
+        box-shadow: none !important;
+        background: #fff !important;
     }
 
     /* Print-friendly colours */
-    .report-header {
+    .report-header, .pipeline-report-header {
         background: #f8f9fa !important;
         border-bottom: 2px solid #0066cc !important;
         padding: 12px 24px !important;
     }
-    .report-title, .report-title span { color: #0066cc !important; }
-    .report-meta { color: #666 !important; }
-    .report-body {
+    .report-title, .report-title span,
+    .pipeline-report-title { color: #0066cc !important; }
+    .report-meta, .pipeline-report-meta { color: #666 !important; }
+    .report-body, .pipeline-report-body {
         background: #fff !important;
         padding: 16px 24px !important;
         overflow: visible !important;
+        max-height: none !important;
     }
 
     /* Report sections */
@@ -4548,7 +4562,23 @@ body.locked .lock-overlay { display: flex; }
     canvas { max-width: 100% !important; }
 
     /* Hide buttons in print */
-    .report-close, .report-download-btn { display: none !important; }
+    .report-close, .report-download-btn,
+    .pipeline-report-close, .pipeline-report-actions,
+    .pr-action-btn { display: none !important; }
+
+    /* Content sections — print colours */
+    .pr-section-content { color: #222 !important; white-space: pre-wrap; }
+    .pr-section-content h2 { color: #0066cc !important; }
+    .pr-section-content h3, .pr-section-content h4 { color: #333 !important; }
+    .pr-section-content strong { color: #111 !important; }
+    .pr-section-header { background: #f0f4f8 !important; border-left-color: #0066cc !important; }
+    .pr-section-num { color: #0066cc !important; }
+    .pr-section-agent { color: #333 !important; }
+
+    /* Markdown tables in print */
+    .md-table { border-collapse: collapse; width: 100%; }
+    .md-table th { background: #f0f4f8 !important; color: #333 !important; border: 1px solid #ccc !important; }
+    .md-table td { color: #222 !important; border: 1px solid #ddd !important; }
 
     /* Page settings */
     @page {
@@ -5052,6 +5082,29 @@ body.locked .job-tracker { display: none; }
     font-size: 9px; color: rgba(0,240,255,0.5); margin-top: 4px;
     line-height: 1.4; font-style: italic;
 }
+
+.org-run-history { margin-top: 12px; }
+.org-history-header {
+    font-family: var(--font-mono); font-size: 10px; font-weight: 700;
+    letter-spacing: 2px; color: var(--text-dim); padding: 8px 0 6px;
+    border-bottom: 1px solid rgba(0,200,255,0.08);
+}
+.org-history-card {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 10px; border-bottom: 1px solid rgba(0,200,255,0.06);
+    cursor: pointer; transition: background 0.15s;
+    font-family: var(--font-mono); font-size: 10px;
+}
+.org-history-card:hover { background: rgba(0,200,255,0.06); }
+.org-history-card.complete .org-history-status { color: var(--green); }
+.org-history-card.running .org-history-status { color: var(--amber); }
+.org-history-card.error .org-history-status { color: var(--red); }
+.org-history-status { min-width: 14px; text-align: center; font-size: 12px; }
+.org-history-name { color: var(--cyan); font-weight: 600; min-width: 80px; max-width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.org-history-directive { color: var(--text-dim); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.org-history-progress { color: var(--text-dim); min-width: 30px; text-align: center; }
+.org-history-cost { color: var(--amber); min-width: 50px; text-align: right; }
+.org-history-time { color: rgba(255,255,255,0.3); min-width: 40px; text-align: right; }
 
 .org-run-controls {
     margin-top: 16px; padding: 14px 0; border-top: 1px solid rgba(0,240,255,0.12);
