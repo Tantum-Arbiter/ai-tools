@@ -3923,6 +3923,7 @@ async def _ceo_dispatch(agent_id: str, task: str, source: str = "dispatch",
     reply = None
     provider = agent["provider"]
     model = agent["model"]
+    actual_provider = provider  # Track which provider actually handled the request
 
     try:
         if provider == "claude" and ANTHROPIC_API_KEY:
@@ -3935,8 +3936,10 @@ async def _ceo_dispatch(agent_id: str, task: str, source: str = "dispatch",
                         messages, max_tokens=2400, temperature=0.6,
                         model=_OPENROUTER_AGENT_MODEL,
                     )
+                    actual_provider = "openrouter"
                 else:
                     reply = await _chat_llm(messages, max_tokens=2400, purpose=f"ceo-{agent_id}")
+                    actual_provider = "ollama"
             else:
                 # Use _chat_claude which handles Anthropic format conversion + usage tracking
                 # But override the model to use Sonnet for agent work
@@ -3976,6 +3979,7 @@ async def _ceo_dispatch(agent_id: str, task: str, source: str = "dispatch",
                     log.info(f"Claude agent [{agent_id}]: {input_tok}in/{output_tok}out tokens via {model}")
                 else:
                     reply = await _chat_llm(messages, max_tokens=2400, purpose=f"ceo-{agent_id}")
+                    actual_provider = "ollama"
         elif provider == "gemini" and GOOGLE_API_KEY:
             # Check free-tier cap before calling
             gemini_block = _gemini_check_budget()
@@ -3986,8 +3990,10 @@ async def _ceo_dispatch(agent_id: str, task: str, source: str = "dispatch",
                         messages, max_tokens=2400, temperature=0.6,
                         model=_OPENROUTER_AGENT_MODEL,
                     )
+                    actual_provider = "openrouter"
                 else:
                     reply = await _chat_llm(messages, max_tokens=2400, purpose=f"ceo-{agent_id}")
+                    actual_provider = "ollama"
             else:
                 # Use Google Gemini via OpenAI-compatible endpoint (free tier)
                 from openai import OpenAI as _OAI
@@ -4014,8 +4020,10 @@ async def _ceo_dispatch(agent_id: str, task: str, source: str = "dispatch",
                             messages, max_tokens=2400, temperature=0.6,
                             model=_OPENROUTER_AGENT_MODEL,
                         )
+                        actual_provider = "openrouter"
                     else:
                         reply = await _chat_llm(messages, max_tokens=2400, purpose=f"ceo-{agent_id}")
+                        actual_provider = "ollama"
         elif provider == "openrouter" and OPENROUTER_API_KEY:
             # Route through OpenRouter with full cost safeguards
             reply = await _chat_openrouter(
@@ -4031,6 +4039,7 @@ async def _ceo_dispatch(agent_id: str, task: str, source: str = "dispatch",
         else:
             # Fallback to ARBITER's standard LLM chain (Ollama)
             reply = await _chat_llm(messages, max_tokens=2400, purpose=f"ceo-{agent_id}")
+            actual_provider = "ollama"
     except Exception as e:
         log.error(f"CEO dispatch [{agent_id}] error: {e}")
         arbiter_db.save_agent_result(
@@ -4054,10 +4063,12 @@ async def _ceo_dispatch(agent_id: str, task: str, source: str = "dispatch",
         response=reply, model=model, source=source,
         broadcast_id=broadcast_id, business_id=business_id,
     )
+    log.info(f"CEO dispatch [{agent_id}]: completed via {actual_provider}/{model}")
     return {
         "agent_id": agent_id,
         "agent_name": agent["name"],
         "model": model,
+        "provider": actual_provider,
         "response": reply,
         "result_id": rid,
     }

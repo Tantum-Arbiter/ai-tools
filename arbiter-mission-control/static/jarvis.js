@@ -6823,7 +6823,11 @@ function openExpandPanels(panelKey, pushHistory = true) {
 
 function _panelPostOpen(panelKey) {
     // Panel-specific init hooks
-    if (panelKey === 'ceo') _ceoInitPanel().catch(e => console.error('[CEO] Init panel error:', e));
+    if (panelKey === 'ceo') {
+        _ceoInitPanel().catch(e => console.error('[CEO] Init panel error:', e));
+        // Restore active pipeline after panel is ready
+        setTimeout(() => _ceoRestorePipelineState(), 500);
+    }
     if (panelKey === 'org') _orgInitPanel().catch(e => console.error('[ORG] Init panel error:', e));
     if (panelKey === 'todo') {
         _renderTodoList();
@@ -8794,6 +8798,9 @@ async function _ceoDispatch(agentId, inputEl, nodeEl) {
     const masterStatus = document.querySelector('#ceo-master-card .ceo-master-status');
     if (masterStatus) { masterStatus.className = 'ceo-master-status working'; masterStatus.innerHTML = '<span class="ceo-dot"></span> ROUTING'; }
 
+    // Show progress bar for individual dispatch
+    _ceoProgressShow(`${agentName.toUpperCase()} — PROCESSING...`, 0, true);
+
     try {
         const resp = await fetch('/api/ceo/dispatch', {
             method: 'POST',
@@ -8804,22 +8811,32 @@ async function _ceoDispatch(agentId, inputEl, nodeEl) {
         _ceoReadCount++;
         _ceoUpdateStats();
 
+        // Build provider badge
+        const providerBadge = data.provider
+            ? `<span class="ceo-provider-badge ${data.provider}">${data.provider.toUpperCase()}</span>`
+            : '';
+
         if (data.error) {
             _nodeSetStatus(agentId, 'error');
             if (output) output.textContent = `Error: ${data.error}`;
             _wfUpdateLive(wfId, agentId, 'error', data.error);
             _jobComplete(_jtId, true);
+            _ceoProgressComplete(true);
         } else {
             _nodeSetStatus(agentId, 'complete');
-            if (output) output.textContent = data.response || 'No response';
+            if (output) {
+                output.innerHTML = (data.response || 'No response') + providerBadge;
+            }
             _wfUpdateLive(wfId, agentId, 'complete', data.response, data.model);
             _jobComplete(_jtId);
+            _ceoProgressComplete(false);
         }
     } catch (e) {
         _nodeSetStatus(agentId, 'error');
         if (output) output.textContent = `Network error: ${e.message}`;
         _wfUpdateLive(wfId, agentId, 'error', e.message);
         _jobComplete(_jtId, true);
+        _ceoProgressComplete(true);
     }
 
     // Reset master card
@@ -8833,6 +8850,81 @@ let _pipelineReportData = null;
 let _pipelineReportDirective = '';
 let _pipelineReportPollTimer = null;
 // _lastPipeData declared above in CEO Orchestration Module
+
+// ── Pipeline Persistence Helpers ────────────────────────────────
+function _ceoSavePipelineState() {
+    if (_activePipelineId) {
+        localStorage.setItem('ceo_active_pipeline', _activePipelineId);
+    } else {
+        localStorage.removeItem('ceo_active_pipeline');
+    }
+}
+function _ceoRestorePipelineState() {
+    const savedId = localStorage.getItem('ceo_active_pipeline');
+    if (!savedId) return;
+    console.log(`[CEO] Restoring pipeline: ${savedId}`);
+    _activePipelineId = savedId;
+    // Show status bar immediately
+    const statusBar = document.getElementById('ceo-pipeline-status');
+    const pipeLabel = document.getElementById('ceo-pipe-label');
+    const pipeStage = document.getElementById('ceo-pipe-stage');
+    if (statusBar) statusBar.style.display = 'inline-flex';
+    if (pipeLabel) { pipeLabel.textContent = 'RECONNECTING...'; pipeLabel.className = 'ceo-pipe-label'; }
+    if (pipeStage) pipeStage.textContent = 'Restoring after refresh';
+    _ceoProgressShow('RECONNECTING...', 0, true);
+    // Fetch current state and resume
+    fetch(`/api/ceo/pipeline/${savedId}`).then(r => r.json()).then(data => {
+        if (data.error) {
+            console.warn('[CEO] Pipeline restore failed:', data.error);
+            _activePipelineId = null;
+            localStorage.removeItem('ceo_active_pipeline');
+            _ceoProgressHide();
+            return;
+        }
+        _ceoPipelineUpdateUI(data);
+        // Resume polling if still active
+        if (!['complete', 'error', 'cancelled'].includes(data.status)) {
+            _ceoPipelineStartPolling();
+        }
+    }).catch(e => {
+        console.error('[CEO] Pipeline restore error:', e);
+        _activePipelineId = null;
+        localStorage.removeItem('ceo_active_pipeline');
+        _ceoProgressHide();
+    });
+}
+
+// ── Progress Bar Helpers ─────────────────────────────────────────
+function _ceoProgressShow(text, pct, indeterminate) {
+    const bar = document.getElementById('ceo-progress-bar');
+    const fill = document.getElementById('ceo-progress-fill');
+    const txt = document.getElementById('ceo-progress-text');
+    if (!bar) return;
+    bar.classList.add('active');
+    bar.classList.remove('complete', 'error');
+    if (fill) fill.style.width = indeterminate ? '100%' : `${Math.max(4, pct)}%`;
+    if (txt) txt.textContent = text || 'PROCESSING...';
+}
+function _ceoProgressUpdate(text, pct) {
+    const fill = document.getElementById('ceo-progress-fill');
+    const txt = document.getElementById('ceo-progress-text');
+    if (fill) fill.style.width = `${Math.max(4, pct)}%`;
+    if (txt) txt.textContent = text || '';
+}
+function _ceoProgressComplete(isError) {
+    const bar = document.getElementById('ceo-progress-bar');
+    const fill = document.getElementById('ceo-progress-fill');
+    const txt = document.getElementById('ceo-progress-text');
+    if (!bar) return;
+    bar.classList.add(isError ? 'error' : 'complete');
+    if (fill) fill.style.width = '100%';
+    if (txt) txt.textContent = isError ? 'ERROR' : 'COMPLETE';
+    setTimeout(() => _ceoProgressHide(), isError ? 5000 : 3000);
+}
+function _ceoProgressHide() {
+    const bar = document.getElementById('ceo-progress-bar');
+    if (bar) bar.classList.remove('active', 'complete', 'error');
+}
 
 async function _ceoPipelineLaunch(inputEl, selectEl) {
     const directive = inputEl.value.trim();
@@ -8894,11 +8986,15 @@ async function _ceoPipelineLaunch(inputEl, selectEl) {
         _jobUpdate(_jtPipeId, { total: data.stages ? data.stages.length : 0 });
 
         _activePipelineId = data.id || data.pipeline_id;
+        _ceoSavePipelineState();
         // Rebuild chain nodes to match this pipeline's agents
         if (data.stages) _rebuildChainNodes(data.stages);
         // Update source node with directive text
         const srcTaskEl = document.getElementById('wf-src-task');
         if (srcTaskEl) srcTaskEl.textContent = directive.substring(0, 80) + (directive.length > 80 ? '…' : '');
+        // Show progress bar
+        const totalStages = data.stages ? data.stages.length : 0;
+        _ceoProgressShow(`PIPELINE LAUNCHED — 0/${totalStages} stages`, 0);
         // Process initial response then start polling
         _ceoPipelineUpdateUI(data);
         _ceoPipelineStartPolling();
@@ -8909,6 +9005,7 @@ async function _ceoPipelineLaunch(inputEl, selectEl) {
         if (launchBtn) launchBtn.disabled = false;
         _jobComplete(_jtPipeId, true);
         window._activeJtPipeId = null;
+        _ceoProgressComplete(true);
     }
 }
 
@@ -8975,6 +9072,18 @@ function _ceoPipelineUpdateUI(pipe) {
         else if (pipe.status === 'error' || pipe.status === 'cancelled') { _jobComplete(window._activeJtPipeId, true); window._activeJtPipeId = null; }
     }
 
+    // Update progress bar
+    const pctDone = totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0;
+    if (runningStage) {
+        _ceoProgressShow(`${runningStage.agent_name.toUpperCase()} — ${completedCount}/${totalCount} stages`, pctDone);
+    } else if (waitingStage) {
+        _ceoProgressShow(`AWAITING APPROVAL — ${completedCount}/${totalCount} stages`, pctDone);
+    } else if (pipe.status === 'complete') {
+        _ceoProgressComplete(false);
+    } else if (pipe.status === 'error' || pipe.status === 'cancelled') {
+        _ceoProgressComplete(true);
+    }
+
     const reportGroup = document.getElementById('ceo-pipe-report-group');
     const reportBtn = document.getElementById('ceo-pipe-report');
     const previewBtn = document.getElementById('ceo-pipe-preview');
@@ -8991,6 +9100,7 @@ function _ceoPipelineUpdateUI(pipe) {
         if (launchBtn) launchBtn.disabled = false;
         _ceoPipelineStopPolling();
         _activePipelineId = null; // Allow dropdown preview again
+        _ceoSavePipelineState();  // Clear persisted pipeline
         const masterStatus = document.querySelector('#ceo-master-card .ceo-master-status');
         if (masterStatus) { masterStatus.className = 'ceo-master-status ready'; masterStatus.innerHTML = '<span class="ceo-dot"></span> ONLINE'; }
 
@@ -9015,6 +9125,7 @@ function _ceoPipelineUpdateUI(pipe) {
         if (launchBtn) launchBtn.disabled = false;
         _ceoPipelineStopPolling();
         _activePipelineId = null;
+        _ceoSavePipelineState();
     } else if (pipe.status === 'error') {
         if (pipeLabel) { pipeLabel.textContent = 'PIPELINE ERROR'; pipeLabel.className = 'ceo-pipe-label error'; }
         const errStage = pipe.stages.find(s => s.status === 'error');
@@ -9025,6 +9136,7 @@ function _ceoPipelineUpdateUI(pipe) {
         if (launchBtn) launchBtn.disabled = false;
         _ceoPipelineStopPolling();
         _activePipelineId = null;
+        _ceoSavePipelineState();
     } else if (waitingStage) {
         if (pipeLabel) { pipeLabel.textContent = 'AWAITING APPROVAL'; pipeLabel.className = 'ceo-pipe-label'; }
         if (pipeStage) pipeStage.textContent = `${waitingStage.agent_name} — review output before continuing`;
@@ -9121,6 +9233,8 @@ async function _ceoPipelineReject() {
     if (launchBtn) launchBtn.disabled = false;
     _ceoPipelineStopPolling();
     _activePipelineId = null;
+    _ceoSavePipelineState();
+    _ceoProgressComplete(true);
     const masterStatus = document.querySelector('#ceo-master-card .ceo-master-status');
     if (masterStatus) { masterStatus.className = 'ceo-master-status ready'; masterStatus.innerHTML = '<span class="ceo-dot"></span> ONLINE'; }
 }

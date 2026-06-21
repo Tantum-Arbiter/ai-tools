@@ -139,4 +139,24 @@ if ! command -v uvicorn >/dev/null 2>&1; then
   die "uvicorn not found in venv. Try: rm -rf venv && ./start.sh"
 fi
 
-exec uvicorn server:app --reload --host "$HOST" --port "$PORT"
+# Trap SIGINT/SIGTERM and forward to uvicorn, then exit immediately.
+# Without this, the reloader's child process cleanup can hang for 30s+
+# on some systems (especially M-series Macs).
+cleanup() {
+  # Kill entire process group so reloader + worker both stop
+  kill -TERM -$UVICORN_PID 2>/dev/null || kill -TERM $UVICORN_PID 2>/dev/null
+  # Brief grace period then force-kill stragglers
+  sleep 1
+  kill -9 -$UVICORN_PID 2>/dev/null || true
+  exit 0
+}
+
+uvicorn server:app --reload --host "$HOST" --port "$PORT" \
+  --timeout-graceful-shutdown 3 &
+UVICORN_PID=$!
+
+trap cleanup SIGINT SIGTERM
+
+# Wait for uvicorn to exit (or be interrupted)
+wait $UVICORN_PID 2>/dev/null
+exit $?
