@@ -120,6 +120,18 @@ export class OrbSimulation {
     const k = target > this._blend ? BLEND_ATTACK : BLEND_DECAY;
     this._blend += (target - this._blend) * k;
     this._updateWaveData();
+    this._stepParticles(dt);
+  }
+
+  private _stepParticles(dt: number): void {
+    // Match web behaviour: angle drift scales with state speed multiplier.
+    // Original was 60-fps frame-stepped; we normalise to dt * 60.
+    const mult = SPEED_MULTIPLIER[this._state] * dt * 60;
+    const TAU = Math.PI * 2;
+    for (const p of this._particles) {
+      p.angle = (p.angle + p.speed * mult) % TAU;
+      if (p.angle < 0) p.angle += TAU;
+    }
   }
 
   /** Immutable frame data for the renderer. */
