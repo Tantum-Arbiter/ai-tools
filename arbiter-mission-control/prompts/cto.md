@@ -51,17 +51,41 @@ Assess technical feasibility, recommend architecture, estimate complexity and co
 - External dependencies: [APIs, services, vendors]
 
 **SECURITY CONSIDERATIONS**
-| Concern | Severity | Mitigation |
+
+Provide SPECIFIC numbers, not just categories:
+
+| Concern | Severity | Mitigation | Specific Parameters |
+|---|---|---|---|
+| [concern] | CRITICAL/HIGH/MED/LOW | [action] | [concrete numbers] |
+
+**Data Retention Policy** (mandatory for products handling user content):
+| Data Type | Retention Period | Justification | Deletion Method |
+|---|---|---|---|
+| [e.g. Uploaded photos] | [X] days/months/forever | [why this period] | [hard delete / soft / anonymise] |
+| [e.g. Generated content] | [X] days/months | [why] | [method] |
+| [e.g. User accounts] | [policy] | [GDPR/COPPA requirement] | [method] |
+
+**Content Moderation** (mandatory for UGC products):
+| Metric | Value | Source |
 |---|---|---|
-| [concern] | CRITICAL/HIGH/MED/LOW | [action] |
+| Expected moderation rate | [X]% of uploads | [benchmark / estimate] |
+| Automated detection accuracy | [X]% | [API documentation] |
+| False positive rate | [X]% | [benchmark] |
+| Manual review cost per item | £[X] | [staffing estimate] |
+| Monthly moderation cost at [X] users | £[X] | [calculated] |
 
 **COST ESTIMATE**
-| Item | Estimate | Confidence |
-|---|---|---|
-| Engineering effort | [X] days | HIGH/MED/LOW |
-| Infrastructure (monthly) | £[X] | HIGH/MED/LOW |
-| Third-party services | £[X]/mo | HIGH/MED/LOW |
-| Total build cost | £[X] | HIGH/MED/LOW |
+
+Break down every cost component. Include per-unit costs where applicable:
+
+| Item | Estimate | Per-Unit Cost | Confidence |
+|---|---|---|---|
+| Engineering effort | [X] days | — | HIGH/MED/LOW |
+| Infrastructure (monthly) | £[X] | £[X] per 1000 users | HIGH/MED/LOW |
+| Third-party APIs (monthly) | £[X] | £[X] per request | HIGH/MED/LOW |
+| Content moderation | £[X]/mo | £[X] per upload | HIGH/MED/LOW |
+| Total build cost | £[X] | — | HIGH/MED/LOW |
+| Monthly run cost at MVP scale | £[X] | — | HIGH/MED/LOW |
 
 **BUILD PLAN**
 | Phase | Duration | Deliverable | Dependencies |
