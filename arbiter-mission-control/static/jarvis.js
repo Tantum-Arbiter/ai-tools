@@ -7619,6 +7619,9 @@ async function _orgInitPanel() {
 
     // Load templates
     await _orgLoadTemplates();
+
+    // Restore active run from session if present
+    await _orgRestoreRun();
 }
 
 // Lightweight fetch of team count for the dock badge (no panel DOM needed)
@@ -8077,6 +8080,7 @@ async function _orgDeleteTeam(templateId) {
 async function _orgStartRun(orgId, directive) {
     const runView = document.getElementById('org-run-view');
     const teamsList = document.getElementById('org-teams-list');
+    const histEl = document.getElementById('org-run-history');
 
     try {
         const resp = await fetch('/api/org/run', {
@@ -8088,14 +8092,36 @@ async function _orgStartRun(orgId, directive) {
         if (data.error) { alert('Error: ' + data.error); return; }
 
         _activeOrgRun = data;
+        sessionStorage.setItem('_orgActiveRunId', data.id);
         if (teamsList) teamsList.style.display = 'none';
+        if (histEl) histEl.style.display = 'none';
         if (runView) runView.style.display = 'block';
         _orgRenderRun();
 
-        // Start polling if still running
         if (data.status === 'running') _orgStartRunPolling();
     } catch (e) {
         alert('Failed to start run: ' + e.message);
+    }
+}
+
+async function _orgRestoreRun() {
+    const savedId = sessionStorage.getItem('_orgActiveRunId');
+    if (!savedId) return;
+    try {
+        const resp = await fetch(`/api/org/run/${savedId}`);
+        const data = await resp.json();
+        if (data.error) { sessionStorage.removeItem('_orgActiveRunId'); return; }
+        _activeOrgRun = data;
+        const runView = document.getElementById('org-run-view');
+        const teamsList = document.getElementById('org-teams-list');
+        const histEl = document.getElementById('org-run-history');
+        if (teamsList) teamsList.style.display = 'none';
+        if (histEl) histEl.style.display = 'none';
+        if (runView) runView.style.display = 'block';
+        _orgRenderRun();
+        if (data.status === 'running') _orgStartRunPolling();
+    } catch (e) {
+        sessionStorage.removeItem('_orgActiveRunId');
     }
 }
 
@@ -8228,11 +8254,14 @@ async function _orgRunReject() {
 
 function _orgCloseRun() {
     _activeOrgRun = null;
+    sessionStorage.removeItem('_orgActiveRunId');
     _orgStopRunPolling();
     const runView = document.getElementById('org-run-view');
     const teamsList = document.getElementById('org-teams-list');
+    const histEl = document.getElementById('org-run-history');
     if (runView) runView.style.display = 'none';
     if (teamsList) teamsList.style.display = '';
+    if (histEl) histEl.style.display = '';
     const approveBtn = document.getElementById('org-run-approve');
     const rejectBtn = document.getElementById('org-run-reject');
     if (approveBtn) { approveBtn.style.display = ''; approveBtn.textContent = '✓ APPROVE & CONTINUE'; approveBtn.onclick = _orgRunApprove; }
@@ -8296,7 +8325,7 @@ async function _orgViewRunReport(runId) {
     body.innerHTML = '<div style="color:var(--text-dim);padding:20px;font-family:var(--font-mono);font-size:11px">Loading report...</div>';
     if (titleEl) titleEl.textContent = 'CEO TEAM REPORT';
     if (metaEl) metaEl.textContent = '';
-    overlay.style.display = 'flex';
+    overlay.classList.add('active');
 
     try {
         const resp = await fetch(`/api/org/run/${runId}/report/download?fmt=md`);
@@ -8331,7 +8360,7 @@ function _orgViewAgentOutput(runId, agentId) {
     if (titleEl) titleEl.textContent = `AGENT REPORT — ${name.toUpperCase()}`;
     if (metaEl) metaEl.textContent = agent.role || '';
     body.innerHTML = `<div class="pr-section-content">${_renderMarkdown(node.output)}</div>`;
-    overlay.style.display = 'flex';
+    overlay.classList.add('active');
 }
 
 
@@ -9544,7 +9573,7 @@ async function _reportLoadFromHistory(filename) {
 
 function _ceoPipelineCloseReport() {
     const overlay = document.getElementById('pipeline-report-overlay');
-    if (overlay) overlay.classList.remove('active');
+    if (overlay) { overlay.classList.remove('active'); overlay.style.display = ''; }
     document.body.classList.remove('report-active');
 }
 

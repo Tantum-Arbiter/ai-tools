@@ -4767,6 +4767,8 @@ body.locked .job-tracker { display: none; }
 .org-btn-approve:hover { background: rgba(0,230,118,0.2); }
 .org-btn-reject { border-color: rgba(255,34,85,0.3); color: var(--red); background: rgba(255,34,85,0.06); padding: 10px 20px; font-size: 11px; }
 .org-btn-reject:hover { background: rgba(255,34,85,0.15); }
+.org-btn-back { border-color: rgba(0,200,255,0.25); color: var(--cyan); background: rgba(0,200,255,0.06); padding: 6px 14px; font-size: 10px; letter-spacing: 1px; margin-right: auto; flex-shrink: 0; }
+.org-btn-back:hover { background: rgba(0,200,255,0.15); }
 .org-btn-save { width: 100%; padding: 10px; font-size: 11px; background: rgba(0,240,255,0.12); border-color: var(--cyan); }
 .org-btn-save:hover { background: rgba(0,240,255,0.25); }
 
