@@ -351,6 +351,36 @@ class TestBusinessScoping:
         assert len(biz1) == 1
         assert biz1[0]["directive"] == "Do X"
 
+    def test_pipeline_report_save_and_retrieve(self, db):
+        stages = [{"agent_id": "r", "status": "complete", "output": "analysis"}]
+        pid = db.save_pipeline("Analyse market", stages)
+        report = {"title": "EXECUTIVE REPORT", "summary": "Good outlook"}
+
+        db.save_pipeline_report(pid, report)
+
+        under_test = db.get_pipeline(pid)
+        assert under_test is not None
+        assert under_test["report"] == report
+        assert under_test["report"]["title"] == "EXECUTIVE REPORT"
+
+    def test_pipeline_report_none_before_save(self, db):
+        pid = db.save_pipeline("Directive", [{"agent_id": "r"}])
+
+        under_test = db.get_pipeline(pid)
+
+        assert under_test is not None
+        assert under_test["report"] is None
+
+    def test_pipeline_report_in_list(self, db):
+        pid = db.save_pipeline("Directive", [{"agent_id": "r"}])
+        report = {"title": "REPORT", "stats": []}
+        db.save_pipeline_report(pid, report)
+
+        under_test = db.get_pipelines()
+
+        assert len(under_test) == 1
+        assert under_test[0]["report"] == report
+
     def test_search_all_by_business(self, db):
         db.save_agent_result("r1", "Researcher", "marketing plan", response="R", business_id="biz1")
         db.save_agent_result("r1", "Researcher", "marketing strategy", response="R", business_id="biz2")

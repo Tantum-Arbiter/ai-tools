@@ -5725,11 +5725,11 @@ async def ceo_pipeline_report_download(pipeline_id: str, fmt: str = "md"):
         # Try generating from DB
         pipe = arbiter_db.get_pipeline(pipeline_id)
         if not pipe or not pipe.get("report"):
-            return {"error": "Report not found"}
+            return JSONResponse(status_code=404, content={"error": "Report not found"})
         _save_report_files(pipeline_id, pipe.get("directive", ""), pipe.get("stages", []), pipe["report"])
         matches = sorted(reports_dir.glob(f"*_{pipeline_id[:8]}{ext}"), reverse=True)
         if not matches:
-            return {"error": "Report generation failed"}
+            return JSONResponse(status_code=404, content={"error": "Report generation failed"})
 
     content = matches[0].read_text(encoding="utf-8")
     media = "text/markdown" if fmt == "md" else "application/json"

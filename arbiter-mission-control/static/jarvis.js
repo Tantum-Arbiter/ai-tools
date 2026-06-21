@@ -9101,22 +9101,22 @@ function _ceoPipelineUpdateUI(pipe) {
         if (rejectBtn) rejectBtn.style.display = 'none';
         if (launchBtn) launchBtn.disabled = false;
         _ceoPipelineStopPolling();
-        _activePipelineId = null; // Allow dropdown preview again
-        _ceoSavePipelineState();  // Clear persisted pipeline
+        const completedPipeId = _activePipelineId || pipe.id;
+        _activePipelineId = null;
+        _ceoSavePipelineState();
         const masterStatus = document.querySelector('#ceo-master-card .ceo-master-status');
         if (masterStatus) { masterStatus.className = 'ceo-master-status ready'; masterStatus.innerHTML = '<span class="ceo-dot"></span> ONLINE'; }
 
-        // Show report buttons when report is ready or poll for it
+        if (reportBtn) { reportBtn.dataset.pipelineId = completedPipeId || ''; }
+        if (previewBtn) { previewBtn.dataset.pipelineId = completedPipeId || ''; }
         if (pipe.report) {
             _pipelineReportData = pipe.report;
             if (reportGroup) { reportGroup.style.display = 'inline-flex'; }
-            if (reportBtn) { reportBtn.disabled = false; reportBtn.dataset.pipelineId = pipe.id || ''; }
-            if (previewBtn) { previewBtn.dataset.pipelineId = pipe.id || ''; }
+            if (reportBtn) { reportBtn.disabled = false; }
         } else {
-            // Report still generating — poll for it
             if (reportGroup) { reportGroup.style.display = 'inline-flex'; }
-            if (reportBtn) { reportBtn.disabled = true; reportBtn.dataset.pipelineId = pipe.id || ''; }
-            _ceoPipelineReportPoll();
+            if (reportBtn) { reportBtn.disabled = true; }
+            _ceoPipelineReportPoll(completedPipeId);
         }
     } else if (pipe.status === 'cancelled') {
         if (pipeLabel) { pipeLabel.textContent = 'PIPELINE CANCELLED'; pipeLabel.className = 'ceo-pipe-label error'; }
@@ -9241,11 +9241,13 @@ async function _ceoPipelineReject() {
     if (masterStatus) { masterStatus.className = 'ceo-master-status ready'; masterStatus.innerHTML = '<span class="ceo-dot"></span> ONLINE'; }
 }
 
-function _ceoPipelineReportPoll() {
+function _ceoPipelineReportPoll(pipeId) {
     if (_pipelineReportPollTimer) clearInterval(_pipelineReportPollTimer);
+    const pollId = pipeId || _activePipelineId;
+    if (!pollId) return;
     let attempts = 0;
     _pipelineReportPollTimer = setInterval(async () => {
-        if (!_activePipelineId || attempts > 30) {
+        if (attempts > 30) {
             clearInterval(_pipelineReportPollTimer);
             _pipelineReportPollTimer = null;
             const btn = document.getElementById('ceo-pipe-report');
@@ -9254,7 +9256,7 @@ function _ceoPipelineReportPoll() {
         }
         attempts++;
         try {
-            const resp = await fetch(`/api/ceo/pipeline/${_activePipelineId}`);
+            const resp = await fetch(`/api/ceo/pipeline/${pollId}`);
             const data = await resp.json();
             if (data.report) {
                 _pipelineReportData = data.report;
