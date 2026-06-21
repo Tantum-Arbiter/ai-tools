@@ -59,14 +59,13 @@ fi
 ok "Virtual environment activated"
 
 # ── Resolve pip command (some systems only have python -m pip) ────
+# Use the same Python binary we detected earlier for all commands
 PIP="pip"
 if ! command -v pip >/dev/null 2>&1; then
-  PIP="python -m pip"
+  PIP="$PYTHON -m pip"
   if ! $PIP --version >/dev/null 2>&1; then
-    # Bootstrap pip into the venv
     info "pip not found — bootstrapping..."
     "$PYTHON" -m ensurepip --upgrade 2>/dev/null || die "Cannot find or install pip. Install it manually."
-    PIP="python -m pip"
   fi
 fi
 
