@@ -58,6 +58,18 @@ else
 fi
 ok "Virtual environment activated"
 
+# ── Resolve pip command (some systems only have python -m pip) ────
+PIP="pip"
+if ! command -v pip >/dev/null 2>&1; then
+  PIP="python -m pip"
+  if ! $PIP --version >/dev/null 2>&1; then
+    # Bootstrap pip into the venv
+    info "pip not found — bootstrapping..."
+    "$PYTHON" -m ensurepip --upgrade 2>/dev/null || die "Cannot find or install pip. Install it manually."
+    PIP="python -m pip"
+  fi
+fi
+
 # ── Install / upgrade dependencies ───────────────────────────────
 MARKER="venv/.deps_installed"
 REQS_HASH=""
@@ -69,8 +81,8 @@ fi
 
 if [ ! -f "$MARKER" ] || [ "$(cat "$MARKER" 2>/dev/null)" != "$REQS_HASH" ]; then
   info "Installing dependencies (this may take a minute on first run)..."
-  pip install --upgrade pip --quiet || warn "pip upgrade failed (non-fatal)"
-  if pip install -r requirements.txt; then
+  $PIP install --upgrade pip --quiet || warn "pip upgrade failed (non-fatal)"
+  if $PIP install -r requirements.txt; then
     echo "$REQS_HASH" > "$MARKER"
     ok "Dependencies installed"
   else
