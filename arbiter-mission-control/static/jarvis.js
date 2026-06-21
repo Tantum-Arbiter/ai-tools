@@ -9082,6 +9082,8 @@ function _ceoPipelineUpdateUI(pipe) {
         _ceoProgressComplete(false);
     } else if (pipe.status === 'error' || pipe.status === 'cancelled') {
         _ceoProgressComplete(true);
+    } else if (pipe.status === 'running' || pipe.status === 'ready') {
+        _ceoProgressShow(`STARTING PIPELINE — ${completedCount}/${totalCount} stages`, pctDone, true);
     }
 
     const reportGroup = document.getElementById('ceo-pipe-report-group');

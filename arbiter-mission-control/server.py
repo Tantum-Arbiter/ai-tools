@@ -5900,9 +5900,11 @@ async def ceo_pipeline_create(request: Request):
     pipeline_id = arbiter_db.save_pipeline(directive, stages, business_id=business_id)
     log.info(f"Pipeline [{pipeline_id}] created: '{directive[:60]}' with {len(stages)} stages ({template_name}) biz={business_id}")
 
-    # Start execution (runs until first gate or completion)
-    result = await _pipeline_run_next(pipeline_id)
-    return result
+    # Return immediately so the frontend can start polling for progress.
+    # Run pipeline stages in background — each stage update is persisted to DB
+    # and picked up by the frontend's 2-second poll cycle.
+    asyncio.create_task(_pipeline_run_next(pipeline_id))
+    return arbiter_db.get_pipeline(pipeline_id)
 
 
 @app.get("/api/ceo/pipeline/templates")
@@ -5967,9 +5969,9 @@ async def ceo_pipeline_approve(pipeline_id: str, request: Request):
     arbiter_db.update_pipeline(pipeline_id, stages, idx, "running")
     log.info(f"Pipeline [{pipeline_id}] stage {idx} approved by CEO")
 
-    # Continue execution
-    result = await _pipeline_run_next(pipeline_id)
-    return result
+    # Run remaining stages in background so the response returns immediately
+    asyncio.create_task(_pipeline_run_next(pipeline_id))
+    return arbiter_db.get_pipeline(pipeline_id)
 
 
 @app.post("/api/ceo/pipeline/{pipeline_id}/reject")
@@ -6061,8 +6063,8 @@ async def ceo_pipeline_regenerate(pipeline_id: str, request: Request):
     arbiter_db.update_pipeline(pipeline_id, stages, rerun_idx, "running")
     log.info(f"Pipeline [{pipeline_id}] regenerating from stage {rerun_idx} ({stage['agent_name']})")
 
-    result = await _pipeline_run_next(pipeline_id)
-    return result
+    asyncio.create_task(_pipeline_run_next(pipeline_id))
+    return arbiter_db.get_pipeline(pipeline_id)
 
 
 @app.post("/api/ceo/pipeline/{pipeline_id}/trigger/{stage_idx}")
@@ -6110,33 +6112,35 @@ async def ceo_pipeline_trigger(pipeline_id: str, stage_idx: int):
     stage["started_at"] = datetime.utcnow().isoformat()
     arbiter_db.update_pipeline(pipeline_id, stages, stage_idx, "running")
 
-    result = await _ceo_dispatch(
-        stage["agent_id"], task,
-        source="pipeline", broadcast_id=pipeline_id,
-        business_id=pipe.get("business_id"),
-    )
+    async def _run_triggered_stage() -> None:
+        result = await _ceo_dispatch(
+            stage["agent_id"], task,
+            source="pipeline", broadcast_id=pipeline_id,
+            business_id=pipe.get("business_id"),
+        )
+        fresh = arbiter_db.get_pipeline(pipeline_id)
+        if not fresh:
+            return
+        s = fresh["stages"]
+        st = s[stage_idx]
+        if result.get("error"):
+            st["status"] = "error"
+            st["error"] = result["error"]
+            st["completed_at"] = datetime.utcnow().isoformat()
+            arbiter_db.update_pipeline(pipeline_id, s, stage_idx, "error")
+            return
+        st["status"] = "complete"
+        st["output"] = result.get("response", "")
+        st["result_id"] = result.get("result_id")
+        st["completed_at"] = datetime.utcnow().isoformat()
+        all_done = all(x["status"] == "complete" for x in s)
+        final_status = "complete" if all_done else fresh["status"]
+        arbiter_db.update_pipeline(pipeline_id, s, stage_idx, final_status)
+        log.info(f"Pipeline [{pipeline_id}] manual stage {stage_idx} ({st['agent_name']}) complete")
+        if all_done:
+            asyncio.create_task(_generate_pipeline_report(pipeline_id, pipe.get("directive", ""), s))
 
-    if result.get("error"):
-        stage["status"] = "error"
-        stage["error"] = result["error"]
-        stage["completed_at"] = datetime.utcnow().isoformat()
-        arbiter_db.update_pipeline(pipeline_id, stages, stage_idx, "error")
-        return arbiter_db.get_pipeline(pipeline_id)
-
-    stage["status"] = "complete"
-    stage["output"] = result.get("response", "")
-    stage["result_id"] = result.get("result_id")
-    stage["completed_at"] = datetime.utcnow().isoformat()
-
-    # Check if all stages are now complete
-    all_done = all(s["status"] == "complete" for s in stages)
-    final_status = "complete" if all_done else pipe["status"]
-    arbiter_db.update_pipeline(pipeline_id, stages, stage_idx, final_status)
-    log.info(f"Pipeline [{pipeline_id}] manual stage {stage_idx} ({stage['agent_name']}) complete")
-
-    if all_done:
-        asyncio.create_task(_generate_pipeline_report(pipeline_id, pipe.get("directive", ""), stages))
-
+    asyncio.create_task(_run_triggered_stage())
     return arbiter_db.get_pipeline(pipeline_id)
 
 
