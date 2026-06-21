@@ -9111,13 +9111,9 @@ function _ceoPipelineUpdateUI(pipe) {
         if (previewBtn) { previewBtn.dataset.pipelineId = completedPipeId || ''; }
         if (pipe.report) {
             _pipelineReportData = pipe.report;
-            if (reportGroup) { reportGroup.style.display = 'inline-flex'; }
-            if (reportBtn) { reportBtn.disabled = false; }
-        } else {
-            if (reportGroup) { reportGroup.style.display = 'inline-flex'; }
-            if (reportBtn) { reportBtn.disabled = true; }
-            _ceoPipelineReportPoll(completedPipeId);
         }
+        if (reportGroup) { reportGroup.style.display = 'inline-flex'; }
+        if (reportBtn) { reportBtn.disabled = false; }
     } else if (pipe.status === 'cancelled') {
         if (pipeLabel) { pipeLabel.textContent = 'PIPELINE CANCELLED'; pipeLabel.className = 'ceo-pipe-label error'; }
         if (pipeStage) pipeStage.textContent = `Cancelled at stage ${pipe.current_idx + 1}/${totalCount}`;

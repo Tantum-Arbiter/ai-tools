@@ -4444,6 +4444,15 @@ body.locked .lock-overlay { display: flex; }
 }
 
 /* ── Responsive — stack on narrow screens (tablets / small) ───── */
+@media (max-width: 1440px) {
+    .mc-clock {
+        padding-right: 64px;
+        gap: clamp(4px, 0.5vw, 8px);
+    }
+    .mc-global-mute {
+        flex-direction: column; gap: 2px;
+    }
+}
 @media (max-width: 1024px) {
     body { height: auto; overflow: auto; }
     .mc-viewport { flex-direction: column; }
@@ -4456,7 +4465,17 @@ body.locked .lock-overlay { display: flex; }
     .mc-dock { flex-wrap: wrap; }
     .dock-panel { min-width: 140px; }
     h1 { font-size: 22px; letter-spacing: 6px; }
-    .clock-time { font-size: 18px; }
+    .mc-clock {
+        padding-right: 42px;
+        gap: 4px;
+    }
+    .clock-time { font-size: 16px; letter-spacing: 1px; }
+    .clock-date { font-size: 8px; letter-spacing: 1px; }
+    .mc-global-mute {
+        flex-direction: column; gap: 1px;
+    }
+    .mc-mute-btn { padding: 2px; }
+    .mc-mute-btn svg { width: 12px; height: 12px; }
     .orb-wrapper canvas { width: 320px; height: 320px; }
     .chat-panel { left: 5%; right: 5%; width: auto; top: 5%; bottom: 5%; }
     .chat-panel.active { display: flex; }
