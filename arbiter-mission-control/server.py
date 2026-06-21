@@ -5702,7 +5702,7 @@ async def get_report_content(filename: str):
     if not path.resolve().is_relative_to(reports_dir.resolve()):
         return JSONResponse(status_code=400, content={"error": "Invalid filename"})
     if not path.exists() or not path.suffix == ".md":
-        return {"error": "Report not found"}
+        return JSONResponse(status_code=404, content={"error": "Report not found"})
     content = path.read_text(encoding="utf-8")
     return Response(content=content, media_type="text/markdown")
 
@@ -5722,14 +5722,25 @@ async def ceo_pipeline_report_download(pipeline_id: str, fmt: str = "md"):
     ext = ".md" if fmt == "md" else ".json"
     matches = sorted(reports_dir.glob(f"*_{pipeline_id[:8]}{ext}"), reverse=True)
     if not matches:
-        # Try generating from DB
         pipe = arbiter_db.get_pipeline(pipeline_id)
-        if not pipe or not pipe.get("report"):
-            return JSONResponse(status_code=404, content={"error": "Report not found"})
-        _save_report_files(pipeline_id, pipe.get("directive", ""), pipe.get("stages", []), pipe["report"])
-        matches = sorted(reports_dir.glob(f"*_{pipeline_id[:8]}{ext}"), reverse=True)
+        if not pipe:
+            return JSONResponse(status_code=404, content={"error": "Pipeline not found"})
+        if pipe.get("report"):
+            _save_report_files(pipeline_id, pipe.get("directive", ""), pipe.get("stages", []), pipe["report"])
+            matches = sorted(reports_dir.glob(f"*_{pipeline_id[:8]}{ext}"), reverse=True)
         if not matches:
-            return JSONResponse(status_code=404, content={"error": "Report generation failed"})
+            stages = pipe.get("stages", [])
+            outputs = [s for s in stages if s.get("output")]
+            if not outputs:
+                return JSONResponse(status_code=404, content={"error": "No stage outputs available"})
+            if fmt != "md":
+                return JSONResponse(content={"directive": pipe.get("directive", ""), "stages": stages})
+            md_lines = [f"# PIPELINE OUTPUT\n", f"**Directive:** {pipe.get('directive', '')}\n"]
+            for i, s in enumerate(stages):
+                if s.get("output"):
+                    md_lines.append(f"## {i + 1}. {s.get('agent_name', s.get('agent_id', 'Agent'))}\n")
+                    md_lines.append(f"{s['output']}\n")
+            return Response(content="\n".join(md_lines), media_type="text/markdown")
 
     content = matches[0].read_text(encoding="utf-8")
     media = "text/markdown" if fmt == "md" else "application/json"
