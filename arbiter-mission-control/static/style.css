@@ -4559,11 +4559,11 @@ body.locked .lock-overlay { display: flex; }
    JOB TRACKER — Floating top-right HUD for active jobs/queues
    ═══════════════════════════════════════════════════════════════ */
 .job-tracker {
-    position: fixed; top: 52px; right: 0; z-index: 99;
+    position: fixed; top: 72px; right: 0; z-index: 99;
     display: flex; flex-direction: column; align-items: flex-end;
     gap: 0; pointer-events: none;
     padding: 6px clamp(8px, 1vw, 18px) 0 0;
-    max-height: calc(100vh - 60px); overflow: hidden;
+    max-height: calc(100vh - 80px); overflow: hidden;
 }
 .job-tracker.empty { display: none; }
 .job-tracker-item {
