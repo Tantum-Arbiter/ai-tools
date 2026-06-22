@@ -223,8 +223,13 @@ export default function Home() {
           )}
         </Pressable>
         <View style={styles.brand} pointerEvents="none">
-          <Text style={styles.brandTitle}>ARBITER</Text>
-          <Text style={styles.brandSub}>MISSION CONTROL</Text>
+          <View style={styles.haloOuter}>
+            <View style={styles.haloRing} />
+          </View>
+          <View style={styles.brandText}>
+            <Text style={styles.brandTitle}>ARBITER</Text>
+            <Text style={styles.brandSub}>MISSION CONTROL</Text>
+          </View>
         </View>
         <Pressable
           onPress={settings.open}
@@ -376,14 +381,41 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(32, 244, 255, 0.55)',
     backgroundColor: 'rgba(32, 244, 255, 0.12)',
   },
-  // Centered text "logo" — mirrors the website's .mc-brand strip
-  // (ARBITER / MISSION CONTROL) but stacked on a single column so it
-  // sits between the mic and settings buttons regardless of width.
+  // Centered "logo" — mirrors the website's .mc-brand strip
+  // (.arc-reactor halo + h1 ARBITER + .brand-sub MISSION CONTROL).
   brand: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  brandText: {
     flexDirection: 'column',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 2,
+  },
+  // Arc-reactor halo. Outer disc is a soft cyan wash that doubles as
+  // the iOS shadow source; inner ring is the crisp 2px cyan border.
+  haloOuter: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0, 240, 255, 0.10)',
+    shadowColor: '#20f4ff',
+    shadowOpacity: 0.7,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 0 },
+  },
+  haloRing: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    borderWidth: 2,
+    borderColor: '#20f4ff',
+    backgroundColor: 'rgba(0, 240, 255, 0.05)',
   },
   brandTitle: {
     color: '#20f4ff',
