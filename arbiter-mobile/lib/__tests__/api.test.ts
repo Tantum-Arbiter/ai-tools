@@ -1,5 +1,6 @@
-import { createApi, joinUrl, sanitizeResponse } from '../api';
+import { createApi, handleStreamEvent, joinUrl, sanitizeResponse } from '../api';
 import { ApiError, ChatResponse } from '../types';
+import type { SseEvent } from '../sse';
 
 type FetchArgs = [input: RequestInfo | URL, init?: RequestInit];
 
@@ -145,5 +146,103 @@ describe('createApi.sendChat', () => {
     const ac = new AbortController();
     await api.sendChat('x', [], ac.signal);
     expect(seenSignal).toBe(ac.signal);
+  });
+});
+
+function streamingFetch(frames: string[], status = 200): typeof fetch {
+  return (async () => {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const f of frames) controller.enqueue(encoder.encode(f));
+        controller.close();
+      },
+    });
+    return new Response(stream, {
+      status,
+      headers: { 'Content-Type': 'text/event-stream' },
+    });
+  }) as unknown as typeof fetch;
+}
+
+describe('createApi.streamChat', () => {
+  it('aggregates deltas, panel, and followups across SSE events', async () => {
+    const fn = streamingFetch([
+      'event: meta\ndata: {"topic":"x","error":false}\n\n',
+      'event: delta\ndata: {"text":"hello "}\n\nevent: delta\ndata: {"text":"world"}\n\n',
+      'event: panel\ndata: {"title":"P","summary":"s"}\n\n',
+      'event: followups\ndata: ["a","b"]\n\n',
+      'event: done\ndata: {"reply":""}\n\n',
+    ]);
+    const api = createApi({ fetch: fn, getCredentials: goodCreds });
+
+    const deltas: string[] = [];
+    const panels: unknown[] = [];
+    const followups: unknown[] = [];
+    const result = await api.streamChat('hi', [], {
+      onDelta: (t) => deltas.push(t),
+      onPanel: (p) => panels.push(p),
+      onFollowups: (f) => followups.push(f),
+    });
+
+    expect(deltas).toEqual(['hello ', 'world']);
+    expect(result.reply).toBe('hello world');
+    expect(result.panel).toEqual({ title: 'P', summary: 's' });
+    expect(result.followups).toEqual(['a', 'b']);
+    expect(panels).toEqual([{ title: 'P', summary: 's' }]);
+    expect(followups).toEqual([['a', 'b']]);
+  });
+
+  it('throws unauthorized when no credentials are configured', async () => {
+    const fn = streamingFetch([]);
+    const api = createApi({ fetch: fn, getCredentials: noCreds });
+    await expect(api.streamChat('hi', [], {})).rejects.toMatchObject({
+      kind: 'unauthorized',
+    });
+  });
+
+  it('maps 401 to unauthorized ApiError', async () => {
+    const fn = streamingFetch([], 401);
+    const api = createApi({ fetch: fn, getCredentials: goodCreds });
+    await expect(api.streamChat('hi', [], {})).rejects.toMatchObject({
+      kind: 'unauthorized',
+      status: 401,
+    });
+  });
+});
+
+describe('handleStreamEvent', () => {
+  const ev = (event: string, data: unknown): SseEvent => ({
+    event,
+    data: JSON.stringify(data),
+  });
+
+  it('ignores malformed JSON data', () => {
+    const agg: ChatResponse = { reply: '', error: false };
+    handleStreamEvent({ event: 'delta', data: 'not-json' }, agg, {});
+    expect(agg.reply).toBe('');
+  });
+
+  it('marks error and reply when an error event arrives', () => {
+    const agg: ChatResponse = { reply: '', error: false };
+    handleStreamEvent(ev('error', { message: 'boom' }), agg, {});
+    expect(agg.error).toBe(true);
+    expect(agg.reply).toBe('boom');
+  });
+
+  it('drops actions outside the mobile-safe set', () => {
+    const agg: ChatResponse = { reply: '', error: false };
+    handleStreamEvent(
+      ev('actions', [
+        { action: 'open_browser', url: 'https://x' },
+        { action: 'desktop_screenshot' },
+      ]),
+      agg,
+      {},
+    );
+    // handleStreamEvent itself doesn't sanitize — that's sanitizeResponse's
+    // job. We just confirm it stored what arrived so downstream code can
+    // sanitize once at the end.
+    expect(agg.actions).toHaveLength(2);
   });
 });

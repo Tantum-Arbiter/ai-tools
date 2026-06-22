@@ -62,6 +62,10 @@ export type ChatAction =
       actions?: ServerAction[];
       followups?: string[];
     }
+  /** Append a streaming token to the in-flight assistant bubble. */
+  | { type: 'STREAM_DELTA'; assistantId: string; text: string }
+  /** Attach a streamed-in panel without finalising the message. */
+  | { type: 'STREAM_PANEL'; assistantId: string; panel: Panel }
   | { type: 'SEND_FAILED'; assistantId: string; error: string }
   | { type: 'ERROR_DISMISSED' }
   | { type: 'HISTORY_LOADED'; messages: ChatMessage[] }
@@ -126,7 +130,9 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         if (m.id !== action.assistantId) return m;
         const updated: ChatMessage = {
           ...m,
-          text: action.reply,
+          // Prefer the accumulated streamed text when present so a final
+          // reply value of '' from `done` doesn't blank out the bubble.
+          text: action.reply || m.text,
           pending: false,
         };
         if (action.panel !== undefined) updated.panel = action.panel;
@@ -135,6 +141,23 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         return updated;
       });
       return { ...state, sending: false, lastError: null, messages };
+    }
+
+    case 'STREAM_DELTA': {
+      if (!action.text) return state;
+      const messages = state.messages.map((m) =>
+        m.id === action.assistantId
+          ? { ...m, text: m.text + action.text, pending: true }
+          : m,
+      );
+      return { ...state, messages };
+    }
+
+    case 'STREAM_PANEL': {
+      const messages = state.messages.map((m) =>
+        m.id === action.assistantId ? { ...m, panel: action.panel } : m,
+      );
+      return { ...state, messages };
     }
 
     case 'SEND_FAILED': {

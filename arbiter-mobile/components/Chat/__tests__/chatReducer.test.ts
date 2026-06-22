@@ -221,3 +221,59 @@ describe('toHistoryEntries', () => {
     ]);
   });
 });
+
+describe('chatReducer — streaming', () => {
+  const startSending = (): ChatState =>
+    chatReducer(mk({ input: 'hi' }), {
+      type: 'SEND_REQUESTED',
+      id: 'u1',
+      assistantId: 'a1',
+      timestamp: 100,
+    });
+
+  it('appends STREAM_DELTA text to the in-flight assistant bubble', () => {
+    const s1 = chatReducer(startSending(), { type: 'STREAM_DELTA', assistantId: 'a1', text: 'Hel' });
+    const s2 = chatReducer(s1, { type: 'STREAM_DELTA', assistantId: 'a1', text: 'lo ' });
+    const s3 = chatReducer(s2, { type: 'STREAM_DELTA', assistantId: 'a1', text: 'world' });
+
+    const assistant = s3.messages.find((m) => m.id === 'a1');
+    expect(assistant?.text).toBe('Hello world');
+    expect(assistant?.pending).toBe(true);
+    expect(s3.sending).toBe(true);
+  });
+
+  it('STREAM_DELTA with empty text is a no-op', () => {
+    const s = startSending();
+    expect(chatReducer(s, { type: 'STREAM_DELTA', assistantId: 'a1', text: '' })).toBe(s);
+  });
+
+  it('STREAM_PANEL attaches the panel without finalising the bubble', () => {
+    const panel = { title: 'P', summary: 's' };
+    const s = chatReducer(startSending(), {
+      type: 'STREAM_PANEL',
+      assistantId: 'a1',
+      panel,
+    });
+    const a = s.messages.find((m) => m.id === 'a1');
+    expect(a?.panel).toBe(panel);
+    expect(a?.pending).toBe(true);
+    expect(s.sending).toBe(true);
+  });
+
+  it('SEND_SUCCEEDED keeps streamed text when final reply is empty', () => {
+    const streamed = chatReducer(startSending(), {
+      type: 'STREAM_DELTA',
+      assistantId: 'a1',
+      text: 'all streamed',
+    });
+    const done = chatReducer(streamed, {
+      type: 'SEND_SUCCEEDED',
+      assistantId: 'a1',
+      reply: '',
+    });
+    const a = done.messages.find((m) => m.id === 'a1');
+    expect(a?.text).toBe('all streamed');
+    expect(a?.pending).toBe(false);
+    expect(done.sending).toBe(false);
+  });
+});

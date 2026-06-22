@@ -9611,6 +9611,57 @@ async def jarvis_chat(request: Request):
     return result
 
 
+# ── Streaming chat (SSE) ─────────────────────────────────────────────
+# Thin shim over jarvis_chat that re-emits the completed result as a
+# Server-Sent Event stream so the mobile client can render the reply
+# token-by-token. Wire format and chunking live in chat_stream.py.
+from chat_stream import iter_chat_stream_events, iter_error_stream
+
+
+@app.post("/api/jarvis/chat/stream")
+async def jarvis_chat_stream(request: Request):
+    try:
+        result = await jarvis_chat(request)
+    except Exception as exc:
+        log.exception("jarvis_chat_stream: upstream chat failed")
+        async def err_source():
+            for frame in iter_error_stream(str(exc) or "chat failed"):
+                yield frame
+        return StreamingResponse(
+            err_source(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    if not isinstance(result, dict):
+        result = {"reply": str(result), "error": False}
+
+    reply = result.get("reply") or result.get("raw") or ""
+    panel = result.get("panel")
+    actions = result.get("actions")
+    followups = result.get("followups")
+    error = bool(result.get("error", False))
+    topic = result.get("topic")
+
+    async def event_source():
+        for frame in iter_chat_stream_events(
+            reply=reply,
+            panel=panel if isinstance(panel, dict) else None,
+            actions=actions if isinstance(actions, list) else None,
+            followups=followups if isinstance(followups, list) else None,
+            error=error,
+            topic=topic if isinstance(topic, str) else None,
+        ):
+            yield frame
+            await asyncio.sleep(0.025)
+
+    return StreamingResponse(
+        event_source(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 # ── Vision (Camera) Chat ─────────────────────────────────────────────
 @app.post("/api/jarvis/vision")
 async def jarvis_vision(request: Request):

@@ -34,6 +34,9 @@ import {
   type ChatState,
 } from './chatReducer';
 import type { ArbiterApi } from '../../lib/api';
+import { PanelCard } from '../panels';
+import type { PanelFeedItem } from '../panels';
+import type { Panel } from '../../lib/types';
 
 export interface ChatDrawerProps {
   api: ArbiterApi;
@@ -68,6 +71,24 @@ export interface ChatDrawerProps {
    * the orb's `thinking` colour while a reply is being generated.
    */
   onSendingChange?: (sending: boolean) => void;
+  /**
+   * Called whenever the assistant attaches a panel to a message — once
+   * during streaming (when the panel event arrives) and once on send
+   * success. The host should de-dup by id when feeding a PanelFeed.
+   */
+  onPanel?: (item: PanelFeedItem) => void;
+  /**
+   * When false, inline panel rendering inside the chat bubble is
+   * skipped — typically because the host is rendering a PanelFeed
+   * alongside the drawer (tablet layout).
+   */
+  renderPanelInline?: boolean;
+  /**
+   * Optional explicit right-edge offset for the drawer's container.
+   * Default 16. Used by the tablet layout to clamp the chat to the
+   * left column so it doesn't overlap the PanelFeed rail.
+   */
+  rightInset?: number;
 }
 
 const defaultIdFactory = () =>
@@ -85,6 +106,9 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
   expandSignal = 0,
   onClose,
   onSendingChange,
+  onPanel,
+  renderPanelInline = true,
+  rightInset = 16,
 }) => {
   const insets = useSafeAreaInsets();
   const [state, dispatch] = useReducer(chatReducer, INITIAL_STATE);
@@ -194,8 +218,18 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
         timestamp: now(),
         ...(overrideText !== undefined ? { text: overrideText } : {}),
       });
+      const emitPanel = (panel: Panel) => {
+        onPanel?.({ id: assistantId, panel, timestamp: now() });
+      };
       try {
-        const res = await api.sendChat(messageText, historyEntries);
+        const res = await api.streamChat(messageText, historyEntries, {
+          onDelta: (text) =>
+            dispatch({ type: 'STREAM_DELTA', assistantId, text }),
+          onPanel: (panel) => {
+            dispatch({ type: 'STREAM_PANEL', assistantId, panel });
+            emitPanel(panel);
+          },
+        });
         dispatch({
           type: 'SEND_SUCCEEDED',
           assistantId,
@@ -204,12 +238,13 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
           ...(res.actions !== undefined ? { actions: res.actions } : {}),
           ...(res.followups !== undefined ? { followups: res.followups } : {}),
         });
+        if (res.panel) emitPanel(res.panel);
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Send failed';
         dispatch({ type: 'SEND_FAILED', assistantId, error: msg });
       }
     },
-    [api, idFactory, now],
+    [api, idFactory, now, onPanel],
   );
 
   const send = useCallback(() => {
@@ -237,7 +272,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
   return (
     <KeyboardAvoidingView
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      style={[styles.container, { bottom: insets.bottom + 12 }]}
+      style={[styles.container, { bottom: insets.bottom + 12, right: rightInset }]}
       pointerEvents="box-none"
     >
       <Animated.View style={[styles.sheet, animatedStyle]}>
@@ -274,6 +309,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
           <MessageList
             messages={state.messages}
             onFollowupPress={onFollowupPress}
+            renderPanelInline={renderPanelInline}
           />
         )}
 
@@ -318,14 +354,20 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
 interface MessageListProps {
   messages: ChatMessage[];
   onFollowupPress: (messageId: string, text: string) => void;
+  renderPanelInline: boolean;
 }
 
 interface MessageRowProps {
   message: ChatMessage;
   onFollowupPress: (messageId: string, text: string) => void;
+  renderPanelInline: boolean;
 }
 
-const MessageRow: React.FC<MessageRowProps> = ({ message, onFollowupPress }) => {
+const MessageRow: React.FC<MessageRowProps> = ({
+  message,
+  onFollowupPress,
+  renderPanelInline,
+}) => {
   const isUser = message.role === 'user';
   return (
     <View style={styles.messageRow}>
@@ -338,9 +380,12 @@ const MessageRow: React.FC<MessageRowProps> = ({ message, onFollowupPress }) => 
         testID={`chat-msg-${message.id}`}
       >
         <Text style={[styles.bubbleText, message.error && styles.bubbleTextError]}>
-          {message.pending ? '…' : message.text}
+          {message.pending && message.text.length === 0 ? '…' : message.text}
         </Text>
       </View>
+      {!isUser && renderPanelInline && message.panel && (
+        <PanelCard panel={message.panel} />
+      )}
       {!isUser && !message.pending && message.followups && message.followups.length > 0 && (
         <View style={styles.followupWrap} testID={`chat-followups-${message.id}`}>
           {message.followups.map((fu, i) => (
@@ -366,9 +411,17 @@ const MessageRow: React.FC<MessageRowProps> = ({ message, onFollowupPress }) => 
 
 const keyExtractor = (m: ChatMessage) => m.id;
 
-const MessageList: React.FC<MessageListProps> = ({ messages, onFollowupPress }) => {
+const MessageList: React.FC<MessageListProps> = ({
+  messages,
+  onFollowupPress,
+  renderPanelInline,
+}) => {
   const renderItem: ListRenderItem<ChatMessage> = ({ item }) => (
-    <MessageRow message={item} onFollowupPress={onFollowupPress} />
+    <MessageRow
+      message={item}
+      onFollowupPress={onFollowupPress}
+      renderPanelInline={renderPanelInline}
+    />
   );
   return (
     <FlatList

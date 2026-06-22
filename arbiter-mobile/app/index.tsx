@@ -22,6 +22,7 @@ import {
 import { Orb } from '../components/Orb/Orb';
 import { ChatDrawer } from '../components/Chat/ChatDrawer';
 import { TronBackground } from '../components/Background/TronBackground';
+import { PanelFeed, type PanelFeedItem } from '../components/panels';
 import { useApi, useCredentials } from '../lib/credentials';
 import { useSettingsOverlay } from '../lib/settingsOverlay';
 import { useVoiceSession } from '../components/Voice/useVoiceSession';
@@ -31,6 +32,12 @@ const DRAWER_COLLAPSED = 84;
 // asked for a small, focused panel — kept at 20% so the orb stays the
 // dominant element.
 const DRAWER_EXPANDED = 0.20;
+// Tablet split-layout breakpoint. iPad mini portrait = 768 — anything
+// at or above that gets the right-rail PanelFeed.
+const TABLET_BREAKPOINT = 768;
+// Cap on retained panel-feed items so the right rail can't grow
+// unbounded over a long session.
+const PANEL_FEED_CAP = 24;
 
 export default function Home() {
   const { width, height } = useWindowDimensions();
@@ -44,11 +51,16 @@ export default function Home() {
   // Uptime/Business/Orchestration — single biggest thermal win.
   const isFocused = useIsFocused();
 
-  const orbSize = Math.min(width, height) * 0.62;
+  const isTablet = width >= TABLET_BREAKPOINT;
+  // On tablets the chat lives in the left rail and the orb shrinks so
+  // both columns fit; on phones the orb stays at its 62% hero size.
+  const chatColumnWidth = isTablet ? Math.min(width * 0.42, 480) : width;
+  const orbSize = Math.min(chatColumnWidth, height) * (isTablet ? 0.55 : 0.62);
   const [drawerExpanded, setDrawerExpanded] = useState(false);
   const [chatVisible, setChatVisible] = useState(false);
   const [pendingTranscript, setPendingTranscript] = useState<string | null>(null);
   const [expandSignal, setExpandSignal] = useState(0);
+  const [panelFeed, setPanelFeed] = useState<PanelFeedItem[]>([]);
   // Local "tap-confirmed listening" flag so the orb flips green
   // instantly when the operator hits the mic, even if the native
   // voice module is still negotiating permissions. Cleared when the
@@ -57,6 +69,16 @@ export default function Home() {
   // Set by the ChatDrawer while an API round-trip is in-flight so the
   // orb flips to its `thinking` colour while a reply is generated.
   const [chatSending, setChatSending] = useState(false);
+
+  // Capture each assistant-attached panel into the feed. Replaces by id
+  // so streaming updates from /stream don't pile up duplicates.
+  const onPanel = useCallback((item: PanelFeedItem) => {
+    setPanelFeed((prev) => {
+      const filtered = prev.filter((p) => p.id !== item.id);
+      const next = [item, ...filtered];
+      return next.length > PANEL_FEED_CAP ? next.slice(0, PANEL_FEED_CAP) : next;
+    });
+  }, []);
 
   const onFinalTranscript = useCallback((transcript: string) => {
     // Open chat with the transcript pre-filled so the user can edit /
@@ -136,7 +158,7 @@ export default function Home() {
       <TronBackground width={width} height={height} />
 
       <View
-        style={[styles.orbWrap, { width, height }]}
+        style={[styles.orbWrap, { width: chatColumnWidth, height }]}
         pointerEvents="box-none"
       >
         <Pressable
@@ -149,6 +171,23 @@ export default function Home() {
           <Orb size={orbSize} state={orbState} paused={!isFocused} />
         </Pressable>
       </View>
+
+      {isTablet && (
+        <View
+          style={[
+            styles.panelRail,
+            {
+              left: chatColumnWidth,
+              width: width - chatColumnWidth,
+              paddingTop: insets.top + 56,
+              paddingBottom: insets.bottom + 24,
+            },
+          ]}
+          pointerEvents="box-none"
+        >
+          <PanelFeed items={panelFeed} />
+        </View>
+      )}
 
       <View style={[styles.topBar, { paddingTop: insets.top + 8 }]} pointerEvents="box-none">
         <Pressable
@@ -209,7 +248,13 @@ export default function Home() {
           minimal. */}
       {!(voiceActive && !chatVisible) && (
         <View
-          style={[styles.dock, { bottom: insets.bottom + 24 }]}
+          style={[
+            styles.dock,
+            {
+              bottom: insets.bottom + 24,
+              right: isTablet ? width - chatColumnWidth : 0,
+            },
+          ]}
           pointerEvents="box-none"
         >
           <DockButton
@@ -253,6 +298,9 @@ export default function Home() {
         onExpansionChange={onExpansionChange}
         onClose={onChatClose}
         onSendingChange={setChatSending}
+        onPanel={onPanel}
+        renderPanelInline={!isTablet}
+        rightInset={isTablet ? width - chatColumnWidth + 16 : 16}
       />
     </View>
   );
@@ -310,6 +358,14 @@ const styles = StyleSheet.create({
     left: 0,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  panelRail: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    borderLeftWidth: 1,
+    borderLeftColor: 'rgba(0, 240, 255, 0.16)',
+    backgroundColor: 'rgba(6, 12, 28, 0.55)',
   },
   dock: {
     position: 'absolute',
