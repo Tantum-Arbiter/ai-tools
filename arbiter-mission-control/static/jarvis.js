@@ -10805,8 +10805,25 @@ function _deliverSSEDirect(data) {
 // ── SSE: Proactive Notifications from Scheduler ─────────────────
 (function initSSE() {
     let retryDelay = 1000;
-    function connect() {
-        const es = new EventSource('/api/events');
+    async function _mintSession() {
+        if (!_arbiterApiKey) return '';
+        const r = await fetch('/api/auth/session');
+        if (!r.ok) throw new Error(`session ${r.status}`);
+        const j = await r.json();
+        return j.token || '';
+    }
+    async function connect() {
+        let url = '/api/events';
+        try {
+            const token = await _mintSession();
+            if (token) url += '?session=' + encodeURIComponent(token);
+        } catch (e) {
+            console.warn('[SSE] Session mint failed, will retry:', e.message);
+            setTimeout(connect, retryDelay);
+            retryDelay = Math.min(retryDelay * 2, 30000);
+            return;
+        }
+        const es = new EventSource(url);
         es.onopen = () => {
             console.log('[SSE] Connected to event stream');
             retryDelay = 1000;

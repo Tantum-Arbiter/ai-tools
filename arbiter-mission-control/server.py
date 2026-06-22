@@ -16,7 +16,7 @@ import json
 import sqlite3
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from contextlib import asynccontextmanager
 
@@ -39,6 +39,9 @@ from persistence import ArbiterDB
 from rate_limit import SlidingWindowRateLimiter
 from security_headers import build_security_headers
 from audit_log import AuditLogger, is_sensitive_request
+from session_token import (
+    SessionTokenSigner, SessionTokenError, derive_secret_from_bearer,
+)
 from client_gate import (
     filter_response_for_client,
     normalise_client,
@@ -121,6 +124,26 @@ def _client_ip(request: Request) -> str:
 # token usage after the fact. Token values never enter the log.
 _AUDIT_LOG_DIR = Path(os.getenv("ARBITER_AUDIT_DIR", str(Path(__file__).parent / "logs")))
 _audit = AuditLogger(log_dir=_AUDIT_LOG_DIR)
+
+
+# ── Session tokens (for SSE) ──────────────────────────────────────────
+# Browser EventSource cannot set Authorization headers, so the dashboard
+# exchanges its bearer for a short-lived signed token via
+# /api/auth/session and passes that on the query string. Tokens are IP
+# bound and expire after ARBITER_SESSION_TTL_S (default 5 minutes).
+_SESSION_TTL_S = int(os.getenv("ARBITER_SESSION_TTL_S", "300"))
+_session_secret_env = os.getenv("ARBITER_SESSION_SECRET", "")
+if _session_secret_env:
+    _session_secret = _session_secret_env.encode("utf-8")
+elif ARBITER_API_KEY:
+    _session_secret = derive_secret_from_bearer(ARBITER_API_KEY)
+else:
+    _session_secret = b"\x00" * 32  # auth disabled — secret is inert
+_session_signer = SessionTokenSigner(secret=_session_secret) if len(_session_secret) >= 32 else None
+
+# Routes that accept ?session=<token> in lieu of an Authorization header.
+# Keep this list minimal: only endpoints that browser EventSource needs.
+_SESSION_TOKEN_ROUTES = frozenset({"/api/events"})
 
 # ── Input Length Limits ───────────────────────────────────────────────
 _MAX_DIRECTIVE_LEN = int(os.getenv("MAX_DIRECTIVE_LEN", "4000"))      # ~1000 tokens
@@ -1443,15 +1466,35 @@ class _AuthMiddleware(BaseHTTPMiddleware):
         if path == "/api/auth/check":
             return await call_next(request)
 
-        # Extract key from Authorization header or query param
+        # Extract key from Authorization header (only). The legacy
+        # ?api_key=<bearer> fallback has been removed to stop the bearer
+        # from leaking into server access logs and Referer headers. SSE
+        # clients exchange the bearer for a short-lived session token
+        # via /api/auth/session and pass that on the query string.
         supplied_key = ""
         auth_header = request.headers.get("authorization", "")
         if auth_header.startswith("Bearer "):
             supplied_key = auth_header[7:]
-        if not supplied_key:
-            supplied_key = request.query_params.get("api_key", "")
 
-        if not supplied_key or not hmac.compare_digest(supplied_key, ARBITER_API_KEY):
+        bearer_ok = bool(supplied_key) and hmac.compare_digest(
+            supplied_key, ARBITER_API_KEY,
+        )
+
+        session_ok = False
+        if not bearer_ok and path in _SESSION_TOKEN_ROUTES and _session_signer is not None:
+            session_token = request.query_params.get("session", "")
+            if session_token:
+                try:
+                    _session_signer.verify(
+                        session_token,
+                        ip=_client_ip(request),
+                        now=datetime.now(timezone.utc),
+                    )
+                    session_ok = True
+                except SessionTokenError:
+                    session_ok = False
+
+        if not bearer_ok and not session_ok:
             ip = _client_ip(request)
             if not _auth_fail_limiter.check(ip):
                 retry = int(_auth_fail_limiter.retry_after(ip)) + 1
@@ -1470,7 +1513,7 @@ class _AuthMiddleware(BaseHTTPMiddleware):
                 event="auth_fail", route=path, ip=ip, status=401,
                 extra={"method": request.method,
                        "has_bearer": bool(auth_header.startswith("Bearer ")),
-                       "has_query_key": bool(request.query_params.get("api_key", ""))},
+                       "has_session": bool(request.query_params.get("session", ""))},
             )
             return JSONResponse(
                 status_code=401,
@@ -1574,10 +1617,27 @@ async def auth_check(request: Request):
     auth_header = request.headers.get("authorization", "")
     if auth_header.startswith("Bearer "):
         supplied_key = auth_header[7:]
-    if not supplied_key:
-        supplied_key = request.query_params.get("api_key", "")
     valid = bool(supplied_key) and hmac.compare_digest(supplied_key, ARBITER_API_KEY)
     return {"auth_required": True, "valid": valid}
+
+
+@app.get("/api/auth/session")
+async def auth_session(request: Request):
+    """Issue a short-lived signed session token for SSE clients.
+
+    Bearer-authenticated (handled by middleware). The token is IP-bound
+    and expires after ARBITER_SESSION_TTL_S seconds. The client passes
+    it on the query string (?session=<token>) to /api/events because
+    browser EventSource cannot set Authorization headers.
+    """
+    if not _ARBITER_AUTH_ENABLED or _session_signer is None:
+        return {"token": "", "expires_in": 0, "auth_required": False}
+    token = _session_signer.mint(
+        ip=_client_ip(request),
+        now=datetime.now(timezone.utc),
+        ttl_seconds=_SESSION_TTL_S,
+    )
+    return {"token": token, "expires_in": _SESSION_TTL_S, "auth_required": True}
 
 
 # ── System Status ─────────────────────────────────────────────────────
