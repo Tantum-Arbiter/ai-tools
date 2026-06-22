@@ -1,0 +1,50 @@
+{
+  "expo": {
+    "name": "Arbiter",
+    "slug": "arbiter-mobile",
+    "version": "0.0.1",
+    "orientation": "default",
+    "scheme": "arbiter",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "requireFullScreen": false,
+      "bundleIdentifier": "com.arbiter.mobile",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "Arbiter listens for voice commands so you can speak to the system hands-free.",
+        "NSSpeechRecognitionUsageDescription": "Arbiter transcribes your voice on-device to dispatch commands to the operator dashboard.",
+        "UISupportedInterfaceOrientations~ipad": [
+          "UIInterfaceOrientationPortrait",
+          "UIInterfaceOrientationPortraitUpsideDown",
+          "UIInterfaceOrientationLandscapeLeft",
+          "UIInterfaceOrientationLandscapeRight"
+        ]
+      }
+    },
+    "android": {
+      "package": "com.arbiter.mobile",
+      "adaptiveIcon": {
+        "backgroundColor": "#000814"
+      },
+      "permissions": [
+        "android.permission.RECORD_AUDIO"
+      ]
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "Arbiter listens for voice commands so you can speak to the system hands-free.",
+          "speechRecognitionPermission": "Arbiter transcribes your voice on-device to dispatch commands to the operator dashboard.",
+          "androidSpeechServicePackages": ["com.google.android.googlequicksearchbox"]
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}

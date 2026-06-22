@@ -36,6 +36,11 @@ from gcp_monitor import GCPMonitor
 from revenuecat_monitor import RevenueCatMonitor
 from service_health import ServiceHealthMonitor
 from persistence import ArbiterDB
+from client_gate import (
+    filter_response_for_client,
+    normalise_client,
+    should_intercept_desktop_command,
+)
 
 from typing import Any
 
@@ -8967,6 +8972,7 @@ async def jarvis_chat(request: Request):
     user_msg = body.get("message", "").strip()
     history = body.get("history", [])
     business_id = _get_business_id(request)
+    client_tag = normalise_client(body.get("client"))
 
     if not user_msg:
         return {"reply": "I didn't catch that. Could you repeat?", "error": False}
@@ -9143,9 +9149,14 @@ async def jarvis_chat(request: Request):
             pass  # Fall through to normal LLM handling
 
     # ── Desktop automation: intercept and handle ────────────────
-    desktop_cmd = _detect_desktop_command(user_msg)
-    if desktop_cmd:
-        return await _execute_desktop_action(desktop_cmd)
+    # Mobile clients can't action AppleScript/`open` results, so we let the
+    # LLM answer conversationally instead of firing host-side automations.
+    if should_intercept_desktop_command(client_tag):
+        desktop_cmd = _detect_desktop_command(user_msg)
+        if desktop_cmd:
+            return filter_response_for_client(
+                await _execute_desktop_action(desktop_cmd), client_tag,
+            )
 
     # ── Web scraping: fetch a URL for research ─────────────────
     import re as _re_web
@@ -9750,6 +9761,57 @@ async def jarvis_chat(request: Request):
         log.warning(f"No followups generated for query: {user_msg[:60]!r}")
 
     return result
+
+
+# ── Streaming chat (SSE) ─────────────────────────────────────────────
+# Thin shim over jarvis_chat that re-emits the completed result as a
+# Server-Sent Event stream so the mobile client can render the reply
+# token-by-token. Wire format and chunking live in chat_stream.py.
+from chat_stream import iter_chat_stream_events, iter_error_stream
+
+
+@app.post("/api/jarvis/chat/stream")
+async def jarvis_chat_stream(request: Request):
+    try:
+        result = await jarvis_chat(request)
+    except Exception as exc:
+        log.exception("jarvis_chat_stream: upstream chat failed")
+        async def err_source():
+            for frame in iter_error_stream(str(exc) or "chat failed"):
+                yield frame
+        return StreamingResponse(
+            err_source(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    if not isinstance(result, dict):
+        result = {"reply": str(result), "error": False}
+
+    reply = result.get("reply") or result.get("raw") or ""
+    panel = result.get("panel")
+    actions = result.get("actions")
+    followups = result.get("followups")
+    error = bool(result.get("error", False))
+    topic = result.get("topic")
+
+    async def event_source():
+        for frame in iter_chat_stream_events(
+            reply=reply,
+            panel=panel if isinstance(panel, dict) else None,
+            actions=actions if isinstance(actions, list) else None,
+            followups=followups if isinstance(followups, list) else None,
+            error=error,
+            topic=topic if isinstance(topic, str) else None,
+        ):
+            yield frame
+            await asyncio.sleep(0.025)
+
+    return StreamingResponse(
+        event_source(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ── Vision (Camera) Chat ─────────────────────────────────────────────
