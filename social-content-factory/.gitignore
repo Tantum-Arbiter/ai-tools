@@ -5,6 +5,9 @@ data/
 # Operator-private brand overrides
 brands/*.private.yaml
 
+# Auto-ingested theme candidates — must be promoted manually
+themes/*.suggested.yaml
+
 # Python
 venv/
 __pycache__/

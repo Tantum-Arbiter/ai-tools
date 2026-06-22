@@ -8,6 +8,13 @@ AspectRatio = Literal["1x1", "4x5", "9x16", "1.91x1"]
 LLMProvider = Literal["phi4", "openai"]
 
 
+class BrandIngest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    github_repos: list[str] = Field(default_factory=list)
+    min_score: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
 class Brand(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -21,6 +28,7 @@ class Brand(BaseModel):
     allow_auto_publish: bool = False
     llm_provider: LLMProvider = "phi4"
     draft: bool = False
+    ingest: BrandIngest | None = None
 
     @field_validator("key")
     @classmethod
