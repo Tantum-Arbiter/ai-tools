@@ -9,3 +9,5 @@ venv/
 custom_agents.json
 org_templates.json
 arbiter-mission-control/reports/
+*.swp
+arbiter-mission-control/ALL_PROMPTS.md
