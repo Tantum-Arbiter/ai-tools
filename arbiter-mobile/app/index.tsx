@@ -13,6 +13,7 @@ import { useIsFocused } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   Activity,
+  AlertTriangle,
   BarChart3,
   Mic,
   MicOff,
@@ -291,28 +292,37 @@ export default function Home() {
             onPress={() => router.push('/business-summary')}
           />
           <DockButton
-            label="Uptime"
-            icon={<Activity size={20} color="#20f4ff" strokeWidth={2} />}
-            onPress={() => router.push('/uptime')}
-          />
-          <DockButton
             label="Orchestration"
             icon={<Network size={20} color="#20f4ff" strokeWidth={2} />}
             onPress={() => router.push('/orchestration')}
           />
+          <DockButton
+            label="Uptime"
+            icon={<Activity size={20} color="#20f4ff" strokeWidth={2} />}
+            onPress={() => router.push('/uptime')}
+          />
         </View>
       )}
 
+      {/* Notification-shaped card pinned to the right rail, slightly
+          below the top bar (insets.top + 8 padding + 48 button + 12
+          breathing room). Mirrors the website's .notif-banner.warning
+          (style.css ~line 2372) — 3px amber left border, tinted
+          background, source label + message stack. */}
       {status === 'unconfigured' && !voiceActive && (
         <Pressable
           onPress={settings.open}
-          style={[styles.unconfiguredBanner, { top: insets.top + 56 }]}
+          style={[styles.notifBanner, { top: insets.top + 68 }]}
           accessibilityRole="button"
           accessibilityLabel="Configure host URL and API key"
         >
-          <Text style={styles.unconfiguredText}>
-            Host URL + API key not configured — tap to set up
-          </Text>
+          <AlertTriangle size={18} color="#ffb454" strokeWidth={2} />
+          <View style={styles.notifBody}>
+            <Text style={styles.notifSource}>CONFIGURATION</Text>
+            <Text style={styles.notifMessage}>
+              Host URL + API key not set — tap to configure
+            </Text>
+          </View>
         </Pressable>
       )}
 
@@ -481,23 +491,45 @@ const styles = StyleSheet.create({
     fontSize: 13,
     letterSpacing: 0.5,
   },
-  unconfiguredBanner: {
+  // Notification-shaped card. Right-pinned, max ~320 wide, sits just
+  // below the top bar. Severity styling follows the website's
+  // .notif-banner.warning (3px amber left border, tinted background).
+  notifBanner: {
     position: 'absolute',
-    left: 16,
     right: 16,
-    alignItems: 'center',
+    maxWidth: 320,
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    paddingVertical: 10,
     paddingHorizontal: 14,
-    paddingVertical: 8,
+    paddingLeft: 12,
     borderRadius: 6,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 196, 0, 0.55)',
-    backgroundColor: 'rgba(40, 24, 4, 0.82)',
+    borderLeftWidth: 3,
+    borderLeftColor: '#ffb454',
+    backgroundColor: 'rgba(40, 24, 4, 0.88)',
+    shadowColor: '#ffb454',
+    shadowOpacity: 0.18,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 2 },
   },
-  unconfiguredText: {
+  notifBody: {
+    flex: 1,
+    minWidth: 0,
+  },
+  notifSource: {
     color: '#ffd980',
-    fontSize: 14,
-    letterSpacing: 0.3,
-    textAlign: 'center',
+    fontFamily: HUD_FONTS.mono,
+    fontSize: 10,
+    letterSpacing: 1.5,
+    opacity: 0.75,
+    marginBottom: 3,
+  },
+  notifMessage: {
+    color: '#e8f4ff',
+    fontFamily: HUD_FONTS.mono,
+    fontSize: 12,
+    lineHeight: 16,
   },
   voiceBanner: {
     position: 'absolute',
