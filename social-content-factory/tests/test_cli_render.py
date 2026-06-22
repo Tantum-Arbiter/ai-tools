@@ -7,16 +7,23 @@ import pytest
 from typer.testing import CliRunner
 
 from social_content_factory import cli, pipeline
-from social_content_factory.comfyui_client import ComfyUIConfigError, ComfyUIExecutionError
-from social_content_factory.outbox_writer import OutboxWriteResult
+from social_content_factory.comfyui_client import ComfyUIExecutionError
+from social_content_factory.outbox_writer import CaptionsWriteResult, OutboxWriteResult
+from social_content_factory.pipeline import RenderResult
 
 runner = CliRunner()
 
-FAKE_RESULT = OutboxWriteResult(
+FAKE_IMAGE = OutboxWriteResult(
     image_path=Path("/tmp/fake.png"),
     metadata_path=Path("/tmp/fake.metadata.json"),
     directory=Path("/tmp"),
 )
+FAKE_CAPTIONS = CaptionsWriteResult(
+    path=Path("/tmp/fake_captions.md"),
+    directory=Path("/tmp"),
+)
+FAKE_RESULT = RenderResult(images=[FAKE_IMAGE], captions=None)
+FAKE_RESULT_WITH_CAPTIONS = RenderResult(images=[FAKE_IMAGE], captions=FAKE_CAPTIONS)
 
 
 @pytest.fixture
@@ -39,6 +46,7 @@ class TestRenderCommand:
         assert "--brand" in result.stdout
         assert "--theme" in result.stdout
         assert "--aspect-ratio" in result.stdout
+        assert "--no-captions" in result.stdout
 
     def test_missing_brand_exits_nonzero(self, configured_env: None) -> None:
         result = runner.invoke(cli.app, ["render", "--theme", "weekly-build"])
@@ -58,7 +66,7 @@ class TestRenderCommand:
     def test_calls_pipeline_with_parsed_args(
         self, configured_env: None, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        mock_render = AsyncMock(return_value=[FAKE_RESULT])
+        mock_render = AsyncMock(return_value=FAKE_RESULT)
         monkeypatch.setattr(pipeline, "render_theme", mock_render)
 
         result = runner.invoke(
@@ -76,13 +84,53 @@ class TestRenderCommand:
     def test_echoes_resulting_image_paths(
         self, configured_env: None, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(pipeline, "render_theme", AsyncMock(return_value=[FAKE_RESULT]))
+        monkeypatch.setattr(pipeline, "render_theme", AsyncMock(return_value=FAKE_RESULT))
 
         result = runner.invoke(
             cli.app, ["render", "--brand", "personal", "--theme", "weekly-build"]
         )
 
         assert "/tmp/fake.png" in result.stdout
+
+    def test_echoes_caption_path_when_present(
+        self, configured_env: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            pipeline, "render_theme", AsyncMock(return_value=FAKE_RESULT_WITH_CAPTIONS)
+        )
+
+        result = runner.invoke(
+            cli.app, ["render", "--brand", "personal", "--theme", "weekly-build"]
+        )
+
+        assert "/tmp/fake_captions.md" in result.stdout
+
+    def test_no_captions_flag_skips_caption_client(
+        self, configured_env: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mock_render = AsyncMock(return_value=FAKE_RESULT)
+        monkeypatch.setattr(pipeline, "render_theme", mock_render)
+
+        result = runner.invoke(
+            cli.app,
+            ["render", "--brand", "personal", "--theme", "weekly-build", "--no-captions"],
+        )
+
+        assert result.exit_code == 0, result.stderr
+        assert mock_render.await_args.kwargs["caption_client"] is None
+
+    def test_default_passes_caption_client_to_pipeline(
+        self, configured_env: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mock_render = AsyncMock(return_value=FAKE_RESULT)
+        monkeypatch.setattr(pipeline, "render_theme", mock_render)
+
+        result = runner.invoke(
+            cli.app, ["render", "--brand", "personal", "--theme", "weekly-build"]
+        )
+
+        assert result.exit_code == 0, result.stderr
+        assert mock_render.await_args.kwargs["caption_client"] is not None
 
     def test_comfyui_error_exits_three(
         self, configured_env: None, monkeypatch: pytest.MonkeyPatch
@@ -101,7 +149,7 @@ class TestRenderCommand:
     def test_outbox_override_passed_to_pipeline(
         self, configured_env: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        mock_render = AsyncMock(return_value=[FAKE_RESULT])
+        mock_render = AsyncMock(return_value=FAKE_RESULT)
         monkeypatch.setattr(pipeline, "render_theme", mock_render)
 
         result = runner.invoke(

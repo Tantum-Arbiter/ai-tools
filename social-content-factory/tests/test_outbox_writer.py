@@ -7,9 +7,11 @@ from pathlib import Path
 import pytest
 
 from social_content_factory.outbox_writer import (
+    CaptionsWriteResult,
     OutboxWriteResult,
     OutboxWriterError,
     current_git_sha,
+    write_captions,
     write_render,
 )
 
@@ -170,3 +172,86 @@ class TestCurrentGitSha:
 
     def test_returns_none_when_not_a_repo(self, tmp_path: Path) -> None:
         assert current_git_sha(tmp_path) is None
+
+
+def _write_caps(
+    tmp_path: Path,
+    *,
+    instagram: str = "IG caption body.\n\nAnother paragraph?",
+    x: str = "X caption ≤ 280 chars.",
+    model: str = "phi4:14b",
+    prompt_hash: str = "092667cad1f9a70a",
+) -> CaptionsWriteResult:
+    return write_captions(
+        outbox_root=tmp_path / "outbox",
+        brand_key="personal",
+        theme_slug="weekly-build",
+        instagram=instagram,
+        x=x,
+        model=model,
+        prompt_hash=prompt_hash,
+        timestamp=FIXED_TS,
+    )
+
+
+class TestWriteCaptions:
+    def test_writes_to_dated_brand_theme_directory(self, tmp_path: Path) -> None:
+        result = _write_caps(tmp_path)
+
+        assert result.path.parent == tmp_path / "outbox" / "2026-06-22" / "personal" / "weekly-build"
+        assert result.path.exists()
+
+    def test_filename_uses_slug_short_hash_suffix(self, tmp_path: Path) -> None:
+        result = _write_caps(tmp_path)
+
+        assert result.path.name == "weekly-build_092667ca_captions.md"
+
+    def test_contains_both_variants(self, tmp_path: Path) -> None:
+        result = _write_caps(
+            tmp_path,
+            instagram="unique-ig-marker-42",
+            x="unique-x-marker-99",
+        )
+        body = result.path.read_text(encoding="utf-8")
+
+        assert "unique-ig-marker-42" in body
+        assert "unique-x-marker-99" in body
+
+    def test_contains_section_headings(self, tmp_path: Path) -> None:
+        body = _write_caps(tmp_path).path.read_text(encoding="utf-8")
+
+        assert "## Instagram" in body
+        assert "## X" in body
+
+    def test_footer_records_metadata(self, tmp_path: Path) -> None:
+        body = _write_caps(tmp_path, model="phi4:14b").path.read_text(encoding="utf-8")
+
+        assert "brand: personal" in body
+        assert "theme: weekly-build" in body
+        assert "model: phi4:14b" in body
+        assert "prompt_hash: 092667cad1f9a70a" in body
+        assert "2026-06-22T14:30:00+00:00" in body
+
+    def test_no_tmp_files_left_behind(self, tmp_path: Path) -> None:
+        result = _write_caps(tmp_path)
+
+        siblings = list(result.path.parent.iterdir())
+        assert all(not p.name.endswith(".tmp") and ".tmp." not in p.name for p in siblings)
+
+    def test_idempotent_overwrite(self, tmp_path: Path) -> None:
+        _write_caps(tmp_path, instagram="first version")
+        result = _write_caps(tmp_path, instagram="second version")
+
+        body = result.path.read_text(encoding="utf-8")
+        assert "second version" in body
+        assert "first version" not in body
+
+    def test_invalid_prompt_hash_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(OutboxWriterError):
+            _write_caps(tmp_path, prompt_hash="not-hex!")
+
+    def test_empty_variants_raise(self, tmp_path: Path) -> None:
+        with pytest.raises(OutboxWriterError):
+            _write_caps(tmp_path, instagram="", x="ok")
+        with pytest.raises(OutboxWriterError):
+            _write_caps(tmp_path, instagram="ok", x="")

@@ -7,6 +7,7 @@ from pathlib import Path
 import typer
 
 from . import pipeline
+from .caption_generator import OllamaCaptionClient
 from .comfyui_client import ComfyUIClient, ComfyUIConfigError, ComfyUIError
 
 app = typer.Typer(
@@ -32,6 +33,9 @@ def render(
     outbox: Path | None = typer.Option(
         None, "--outbox", help="Override outbox root directory."
     ),
+    no_captions: bool = typer.Option(
+        False, "--no-captions", help="Skip caption generation via local Ollama/phi4."
+    ),
 ) -> None:
     """Render a theme into social-ready assets on the local ComfyUI host."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -42,12 +46,15 @@ def render(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
 
+    caption_client = None if no_captions else OllamaCaptionClient.from_env()
+
     try:
-        results = asyncio.run(
+        result = asyncio.run(
             pipeline.render_theme(
                 brand_key=brand,
                 theme_slug=theme,
                 client=client,
+                caption_client=caption_client,
                 aspect_ratio=aspect_ratio,
                 outbox_root=outbox or pipeline.DEFAULT_OUTBOX_ROOT,
                 git_sha=pipeline.resolve_git_sha(),
@@ -57,8 +64,10 @@ def render(
         typer.echo(f"comfyui error: {exc}", err=True)
         raise typer.Exit(code=3) from exc
 
-    for result in results:
-        typer.echo(str(result.image_path))
+    for image in result.images:
+        typer.echo(str(image.image_path))
+    if result.captions is not None:
+        typer.echo(str(result.captions.path))
 
 
 if __name__ == "__main__":

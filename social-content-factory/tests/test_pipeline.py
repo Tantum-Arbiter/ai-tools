@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
 import pytest
 
+from social_content_factory.caption_generator import CaptionGeneratorError, CaptionSet
 from social_content_factory.comfyui_client import RenderedImage
 from social_content_factory.pipeline import render_theme
 
@@ -31,34 +33,59 @@ class FakeComfyUIClient:
         )
 
 
+class FakeCaptionClient:
+    def __init__(self, model: str = "phi4:14b") -> None:
+        self.model = model
+        self.calls: list[tuple[str, str]] = []
+        self._raise: Exception | None = None
+        self._instagram = "IG caption body.\n\nWhat would you ship next?"
+        self._x = "X caption — short and curious. What now?"
+
+    def fail_with(self, exc: Exception) -> None:
+        self._raise = exc
+
+    def set_variants(self, *, instagram: str, x: str) -> None:
+        self._instagram = instagram
+        self._x = x
+
+    async def generate(self, brand, theme) -> CaptionSet:
+        self.calls.append((brand.key, theme.slug))
+        if self._raise is not None:
+            raise self._raise
+        return CaptionSet(instagram=self._instagram, x=self._x, model=self.model)
+
+
 async def _run(tmp_path: Path, **overrides):
     client = overrides.pop("client", FakeComfyUIClient())
-    return await render_theme(
+    caption_client = overrides.pop("caption_client", None)
+    result = await render_theme(
         brand_key=overrides.pop("brand_key", "personal"),
         theme_slug=overrides.pop("theme_slug", "weekly-build"),
         client=client,
+        caption_client=caption_client,
         brands_dir=BRANDS_DIR,
         themes_dir=THEMES_DIR,
         outbox_root=tmp_path / "outbox",
         workflow_template_path=WORKFLOW_PATH,
         **overrides,
-    ), client
+    )
+    return result, client
 
 
 class TestRenderTheme:
     async def test_writes_one_image_per_brand_format(self, tmp_path: Path) -> None:
-        (results, _) = await _run(tmp_path)
+        (result, _) = await _run(tmp_path)
 
-        aspects = {r.aspect_ratio if hasattr(r, "aspect_ratio") else r.image_path.name.split("_")[1] for r in results}
-        assert aspects == {"1x1", "9x16"}
-        for r in results:
+        aspects = {r.image_path.name.split("_")[1] for r in result.images}
+        assert aspects == {"1x1", "4x5", "9x16"}
+        for r in result.images:
             assert r.image_path.exists()
 
     async def test_filters_to_explicit_aspect_ratio(self, tmp_path: Path) -> None:
-        (results, _) = await _run(tmp_path, aspect_ratio="1x1")
+        (result, _) = await _run(tmp_path, aspect_ratio="1x1")
 
-        assert len(results) == 1
-        assert "_1x1_" in results[0].image_path.name
+        assert len(result.images) == 1
+        assert "_1x1_" in result.images[0].image_path.name
 
     async def test_passes_brief_prompt_to_workflow(self, tmp_path: Path) -> None:
         (_, client) = await _run(tmp_path, aspect_ratio="1x1")
@@ -77,27 +104,27 @@ class TestRenderTheme:
 
     async def test_metadata_records_checkpoint_from_client(self, tmp_path: Path) -> None:
         client = FakeComfyUIClient(model="custom_checkpoint.safetensors")
-        (results, _) = await _run(tmp_path, aspect_ratio="1x1", client=client)
+        (result, _) = await _run(tmp_path, aspect_ratio="1x1", client=client)
 
-        meta = json.loads(results[0].metadata_path.read_text(encoding="utf-8"))
+        meta = json.loads(result.images[0].metadata_path.read_text(encoding="utf-8"))
         assert meta["checkpoint"] == "custom_checkpoint.safetensors"
 
     async def test_metadata_extra_includes_prompt_id_and_filename(self, tmp_path: Path) -> None:
-        (results, _) = await _run(tmp_path, aspect_ratio="1x1")
+        (result, _) = await _run(tmp_path, aspect_ratio="1x1")
 
-        meta = json.loads(results[0].metadata_path.read_text(encoding="utf-8"))
+        meta = json.loads(result.images[0].metadata_path.read_text(encoding="utf-8"))
         assert meta["extra"]["prompt_id"] == "prompt-1"
         assert meta["extra"]["comfyui_filename"] == "fake_00001.png"
 
     async def test_writes_actual_image_bytes_to_disk(self, tmp_path: Path) -> None:
-        (results, _) = await _run(tmp_path, aspect_ratio="1x1")
+        (result, _) = await _run(tmp_path, aspect_ratio="1x1")
 
-        assert results[0].image_path.read_bytes() == b"FAKE_PNG_1"
+        assert result.images[0].image_path.read_bytes() == b"FAKE_PNG_1"
 
     async def test_metadata_includes_git_sha_when_provided(self, tmp_path: Path) -> None:
-        (results, _) = await _run(tmp_path, aspect_ratio="1x1", git_sha="deadbeef")
+        (result, _) = await _run(tmp_path, aspect_ratio="1x1", git_sha="deadbeef")
 
-        meta = json.loads(results[0].metadata_path.read_text(encoding="utf-8"))
+        meta = json.loads(result.images[0].metadata_path.read_text(encoding="utf-8"))
         assert meta["git_sha"] == "deadbeef"
 
     async def test_unknown_brand_raises(self, tmp_path: Path) -> None:
@@ -111,3 +138,103 @@ class TestRenderTheme:
 
         with pytest.raises(ThemeLoadError):
             await _run(tmp_path, theme_slug="ghost-theme")
+
+    async def test_captions_none_when_no_caption_client(self, tmp_path: Path) -> None:
+        (result, _) = await _run(tmp_path, aspect_ratio="1x1")
+
+        assert result.captions is None
+
+
+class ConcurrencyTrackingClient:
+    def __init__(self, model: str = "fake-model.safetensors") -> None:
+        self.model = model
+        self._in_flight = 0
+        self.peak_in_flight = 0
+        self._counter = 0
+
+    async def render(self, workflow: dict) -> RenderedImage:
+        self._in_flight += 1
+        self.peak_in_flight = max(self.peak_in_flight, self._in_flight)
+        self._counter += 1
+        c = self._counter
+        await asyncio.sleep(0.01)
+        self._in_flight -= 1
+        return RenderedImage(
+            image_bytes=f"FAKE_PNG_{c}".encode("utf-8"),
+            filename=f"fake_{c:05d}.png",
+            subfolder="",
+            prompt_id=f"prompt-{c}",
+        )
+
+
+class TestParallelRender:
+    async def test_renders_all_formats_concurrently(self, tmp_path: Path) -> None:
+        client = ConcurrencyTrackingClient()
+        (_, _) = await _run(tmp_path, client=client)
+
+        assert client.peak_in_flight == 3
+
+    async def test_results_preserve_brand_format_order(self, tmp_path: Path) -> None:
+        (result, _) = await _run(tmp_path)
+
+        ordered_aspects = [r.image_path.name.split("_")[1] for r in result.images]
+        assert ordered_aspects == ["1x1", "4x5", "9x16"]
+
+
+class TestCaptions:
+    async def test_calls_caption_client_once_per_theme(self, tmp_path: Path) -> None:
+        caption_client = FakeCaptionClient()
+        (_, _) = await _run(tmp_path, caption_client=caption_client)
+
+        assert caption_client.calls == [("personal", "weekly-build")]
+
+    async def test_writes_captions_file_alongside_images(self, tmp_path: Path) -> None:
+        caption_client = FakeCaptionClient()
+        caption_client.set_variants(
+            instagram="unique-ig-token-xyz", x="unique-x-token-pdq"
+        )
+        (result, _) = await _run(
+            tmp_path, aspect_ratio="1x1", caption_client=caption_client
+        )
+
+        assert result.captions is not None
+        body = result.captions.path.read_text(encoding="utf-8")
+        assert "unique-ig-token-xyz" in body
+        assert "unique-x-token-pdq" in body
+        assert result.captions.directory == result.images[0].image_path.parent
+
+    async def test_captions_filename_uses_theme_and_prompt_hash(
+        self, tmp_path: Path
+    ) -> None:
+        caption_client = FakeCaptionClient()
+        (result, _) = await _run(
+            tmp_path, aspect_ratio="1x1", caption_client=caption_client
+        )
+
+        assert result.captions is not None
+        assert result.captions.path.name.startswith("weekly-build_")
+        assert result.captions.path.name.endswith("_captions.md")
+
+    async def test_caption_failure_is_warning_not_fatal(self, tmp_path: Path) -> None:
+        caption_client = FakeCaptionClient()
+        caption_client.fail_with(CaptionGeneratorError("ollama down"))
+
+        (result, _) = await _run(
+            tmp_path, aspect_ratio="1x1", caption_client=caption_client
+        )
+
+        assert len(result.images) == 1
+        assert result.images[0].image_path.exists()
+        assert result.captions is None
+
+    async def test_captions_file_records_model_from_caption_client(
+        self, tmp_path: Path
+    ) -> None:
+        caption_client = FakeCaptionClient(model="phi4:14b")
+        (result, _) = await _run(
+            tmp_path, aspect_ratio="1x1", caption_client=caption_client
+        )
+
+        assert result.captions is not None
+        body = result.captions.path.read_text(encoding="utf-8")
+        assert "model: phi4:14b" in body

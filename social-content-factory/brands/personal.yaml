@@ -15,6 +15,7 @@ negative_prompts:
   - "nsfw"
 default_formats:
   - "1x1"
+  - "4x5"
   - "9x16"
 allow_auto_publish: false
 llm_provider: "phi4"

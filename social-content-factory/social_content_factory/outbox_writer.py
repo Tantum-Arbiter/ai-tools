@@ -26,6 +26,12 @@ class OutboxWriteResult:
     directory: Path
 
 
+@dataclass(frozen=True)
+class CaptionsWriteResult:
+    path: Path
+    directory: Path
+
+
 def write_render(
     *,
     outbox_root: Path,
@@ -81,6 +87,50 @@ def write_render(
         metadata_path=metadata_path,
         directory=directory,
     )
+
+
+def write_captions(
+    *,
+    outbox_root: Path,
+    brand_key: str,
+    theme_slug: str,
+    instagram: str,
+    x: str,
+    model: str,
+    prompt_hash: str,
+    timestamp: datetime | None = None,
+) -> CaptionsWriteResult:
+    if not PROMPT_HASH_PATTERN.match(prompt_hash):
+        raise OutboxWriterError(
+            f"prompt_hash must be 16 lowercase hex chars, got {prompt_hash!r}"
+        )
+    if not instagram.strip() or not x.strip():
+        raise OutboxWriterError("instagram and x captions must both be non-empty")
+
+    ts = timestamp or datetime.now(timezone.utc)
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+
+    directory = outbox_root / ts.strftime("%Y-%m-%d") / brand_key / theme_slug
+    directory.mkdir(parents=True, exist_ok=True)
+
+    short_hash = prompt_hash[:SHORT_HASH_LEN]
+    path = directory / f"{theme_slug}_{short_hash}_captions.md"
+
+    body = (
+        f"# {theme_slug}\n\n"
+        f"## Instagram\n\n{instagram.strip()}\n\n"
+        f"## X\n\n{x.strip()}\n\n"
+        f"---\n"
+        f"brand: {brand_key}\n"
+        f"theme: {theme_slug}\n"
+        f"model: {model}\n"
+        f"prompt_hash: {prompt_hash}\n"
+        f"generated_at: {ts.isoformat()}\n"
+    )
+    _atomic_write_bytes(path, body.encode("utf-8"))
+
+    return CaptionsWriteResult(path=path, directory=directory)
 
 
 def current_git_sha(repo_root: Path) -> str | None:
