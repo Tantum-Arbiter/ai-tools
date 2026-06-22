@@ -64,11 +64,9 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 # Provider priority: "claude" (fast + cheap), "ollama" (free local), "openai" (legacy)
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")
-# Cheap model for structured output (panels, followups) — GPT-4o-mini via OpenRouter
-# $0.15/M input, $0.60/M output — ~10x cheaper than Claude Haiku for panel generation
-_OPENROUTER_PANEL_MODEL = os.getenv("OPENROUTER_PANEL_MODEL", "openai/gpt-4o-mini")
-# CEO agent model via OpenRouter (replaces direct OpenAI GPT-4.1 calls)
-_OPENROUTER_AGENT_MODEL = os.getenv("OPENROUTER_AGENT_MODEL", "openai/gpt-4o-mini")
+# OpenRouter auto-routing — picks the best model for each task (free auto-routing)
+_OPENROUTER_PANEL_MODEL = os.getenv("OPENROUTER_PANEL_MODEL", "openrouter/auto")
+_OPENROUTER_AGENT_MODEL = os.getenv("OPENROUTER_AGENT_MODEL", "openrouter/auto")
 
 # ── OpenRouter Cost Safeguards ────────────────────────────────────────
 _OPENROUTER_DAILY_BUDGET_USD = float(os.getenv("OPENROUTER_DAILY_BUDGET_USD", "0.10"))  # $0.10/day ≈ $3/month
@@ -2725,13 +2723,13 @@ def _resolve_business_context(business_id: str | None = None) -> str | None:
 
 
 CEO_AGENTS = {
-    # ── Claude Sonnet — Strategic / Creative agents ──────────────────
+    # ── All agents via OpenRouter auto-routing (best model picked automatically) ──
     "chief_of_staff": {
         "id": "chief_of_staff",
         "name": "Chief of Staff",
         "role": "Executive Coordinator",
-        "model": _CLAUDE_AGENT_MODEL,
-        "provider": "claude",
+        "model": _OPENROUTER_AGENT_MODEL,
+        "provider": "openrouter",
         "icon": "shield",
         "colour": "#64ffda",
         "description": "Coordinates agents, resolves conflicts, produces executive decisions",
@@ -2741,8 +2739,8 @@ CEO_AGENTS = {
         "id": "visionary",
         "name": "Visionary",
         "role": "Creative Director",
-        "model": _CLAUDE_AGENT_MODEL,
-        "provider": "claude",
+        "model": _OPENROUTER_AGENT_MODEL,
+        "provider": "openrouter",
         "icon": "zap",
         "colour": "#e040fb",
         "description": "Original ideas, concepts, positioning & future opportunities",
@@ -2752,8 +2750,8 @@ CEO_AGENTS = {
         "id": "strategist",
         "name": "Strategist",
         "role": "Strategic Advisor",
-        "model": _CLAUDE_AGENT_MODEL,
-        "provider": "claude",
+        "model": _OPENROUTER_AGENT_MODEL,
+        "provider": "openrouter",
         "icon": "compass",
         "colour": "#448aff",
         "description": "Where to play and how to win — priorities & trade-offs",
@@ -2763,8 +2761,8 @@ CEO_AGENTS = {
         "id": "product",
         "name": "Product",
         "role": "Product Leader",
-        "model": _CLAUDE_AGENT_MODEL,
-        "provider": "claude",
+        "model": _OPENROUTER_AGENT_MODEL,
+        "provider": "openrouter",
         "icon": "box",
         "colour": "#69f0ae",
         "description": "Strategy → products, roadmaps, MVPs & validation plans",
@@ -2774,8 +2772,8 @@ CEO_AGENTS = {
         "id": "cto",
         "name": "CTO",
         "role": "Technical Vision",
-        "model": _CLAUDE_AGENT_MODEL,
-        "provider": "claude",
+        "model": _OPENROUTER_AGENT_MODEL,
+        "provider": "openrouter",
         "icon": "cpu",
         "colour": "#76ff03",
         "description": "Architecture, feasibility, security & engineering plans",
@@ -2785,20 +2783,19 @@ CEO_AGENTS = {
         "id": "risk",
         "name": "Risk",
         "role": "Risk & Compliance",
-        "model": _CLAUDE_AGENT_MODEL,
-        "provider": "claude",
+        "model": _OPENROUTER_AGENT_MODEL,
+        "provider": "openrouter",
         "icon": "alert-triangle",
         "colour": "#ff5252",
         "description": "Legal, privacy, security & operational risk assessment",
         "system_prompt": _load_agent_prompt("risk"),
     },
-    # ── Gemini — Research & Data agents (free tier) ──────────────────
     "researcher": {
         "id": "researcher",
         "name": "Researcher",
         "role": "Research Analyst",
-        "model": "gemini-2.5-pro",
-        "provider": "gemini",
+        "model": _OPENROUTER_AGENT_MODEL,
+        "provider": "openrouter",
         "icon": "search",
         "colour": "#00e5ff",
         "description": "Market intelligence, competitor analysis & evidence gathering",
@@ -2808,14 +2805,13 @@ CEO_AGENTS = {
         "id": "analyst",
         "name": "Analyst",
         "role": "Data Analyst",
-        "model": "gemini-2.5-flash",
-        "provider": "gemini",
+        "model": _OPENROUTER_AGENT_MODEL,
+        "provider": "openrouter",
         "icon": "bar-chart",
         "colour": "#b388ff",
         "description": "KPIs, trends, anomalies & data-driven recommendations",
         "system_prompt": _load_agent_prompt("analyst"),
     },
-    # ── OpenRouter GPT-4o-mini — Execution agents ────────────────────
     "cmo": {
         "id": "cmo",
         "name": "CMO",
@@ -2849,13 +2845,12 @@ CEO_AGENTS = {
         "description": "Delivery plans, milestones, tasks & timeline management",
         "system_prompt": _load_agent_prompt("coo"),
     },
-    # ── Extended Agent Roster ─────────────────────────────────────────
     "ceo_agent": {
         "id": "ceo_agent",
         "name": "CEO",
         "role": "Founder & Decision Maker",
-        "model": _CLAUDE_AGENT_MODEL,
-        "provider": "claude",
+        "model": _OPENROUTER_AGENT_MODEL,
+        "provider": "openrouter",
         "icon": "star",
         "colour": "#ffd700",
         "description": "Strategic decisions, prioritisation & business direction",
@@ -2865,8 +2860,8 @@ CEO_AGENTS = {
         "id": "intelligence",
         "name": "Intelligence",
         "role": "Intelligence Analyst",
-        "model": "gemini-2.5-pro",
-        "provider": "gemini",
+        "model": _OPENROUTER_AGENT_MODEL,
+        "provider": "openrouter",
         "icon": "eye",
         "colour": "#00e5ff",
         "description": "Market research, competitor analysis & industry trends",
@@ -2876,8 +2871,8 @@ CEO_AGENTS = {
         "id": "child_dev",
         "name": "Child Dev",
         "role": "Development Specialist",
-        "model": "gemini-2.5-pro",
-        "provider": "gemini",
+        "model": _OPENROUTER_AGENT_MODEL,
+        "provider": "openrouter",
         "icon": "heart",
         "colour": "#ff80ab",
         "description": "Developmental validation, age appropriateness & child wellbeing",
@@ -2887,8 +2882,8 @@ CEO_AGENTS = {
         "id": "story_architect",
         "name": "Story Architect",
         "role": "Story Creator",
-        "model": _CLAUDE_AGENT_MODEL,
-        "provider": "claude",
+        "model": _OPENROUTER_AGENT_MODEL,
+        "provider": "openrouter",
         "icon": "book",
         "colour": "#ea80fc",
         "description": "Children's stories, narratives & interactive content",
@@ -2898,8 +2893,8 @@ CEO_AGENTS = {
         "id": "content_visionary",
         "name": "Content Visionary",
         "role": "Content Strategist",
-        "model": _CLAUDE_AGENT_MODEL,
-        "provider": "claude",
+        "model": _OPENROUTER_AGENT_MODEL,
+        "provider": "openrouter",
         "icon": "film",
         "colour": "#b388ff",
         "description": "Content concepts, franchise potential & series ideas",
@@ -2909,8 +2904,8 @@ CEO_AGENTS = {
         "id": "creative_director",
         "name": "Creative Director",
         "role": "Art Direction",
-        "model": _CLAUDE_AGENT_MODEL,
-        "provider": "claude",
+        "model": _OPENROUTER_AGENT_MODEL,
+        "provider": "openrouter",
         "icon": "palette",
         "colour": "#ff4081",
         "description": "Visual direction, character design & brand consistency",
@@ -2942,8 +2937,8 @@ CEO_AGENTS = {
         "id": "trend_analyst",
         "name": "Trend Analyst",
         "role": "Social Media Trends",
-        "model": "gemini-2.5-flash",
-        "provider": "gemini",
+        "model": _OPENROUTER_AGENT_MODEL,
+        "provider": "openrouter",
         "icon": "activity",
         "colour": "#40c4ff",
         "description": "Trending topics, content formats & platform opportunities",
@@ -2953,8 +2948,8 @@ CEO_AGENTS = {
         "id": "financial",
         "name": "Financial",
         "role": "CFO / Financial Analyst",
-        "model": "gemini-2.5-pro",
-        "provider": "gemini",
+        "model": _OPENROUTER_AGENT_MODEL,
+        "provider": "openrouter",
         "icon": "dollar-sign",
         "colour": "#ffd740",
         "description": "Revenue, costs, margins, forecasts & financial modelling",
@@ -2964,8 +2959,8 @@ CEO_AGENTS = {
         "id": "investor",
         "name": "Investor",
         "role": "VC Partner Review",
-        "model": "gemini-2.5-pro",
-        "provider": "gemini",
+        "model": _OPENROUTER_AGENT_MODEL,
+        "provider": "openrouter",
         "icon": "briefcase",
         "colour": "#b2ff59",
         "description": "Investment memo, valuation, risks & fundraising analysis",
@@ -3431,8 +3426,8 @@ def _seed_service_agents() -> dict:
 
 
 _MODEL_TIERS = {
-    "strategic": {"model": _CLAUDE_AGENT_MODEL, "provider": "claude"},
-    "research":  {"model": "gemini-2.5-flash", "provider": "gemini"},
+    "strategic": {"model": _OPENROUTER_AGENT_MODEL, "provider": "openrouter"},
+    "research":  {"model": _OPENROUTER_AGENT_MODEL, "provider": "openrouter"},
     "execution": {"model": _OPENROUTER_AGENT_MODEL, "provider": "openrouter"},
 }
 
@@ -3894,11 +3889,11 @@ async def _org_execute_agent(agent_id: str, brief: str, directive: str) -> dict:
 
     result = await _ceo_dispatch(agent_id, task_prompt, source="org_run")
     output = result.get("response", result.get("error", "No response"))
+    actual_model = result.get("model", "")
 
-    # Real cost = delta across all providers (dispatch may fallback)
     cost = (_claude_usage["daily_cost_usd"] - _pre_claude) + \
            (_openrouter_usage["daily_cost_usd"] - _pre_or)
-    return {"output": output, "cost_usd": round(cost, 6)}
+    return {"output": output, "cost_usd": round(cost, 6), "model": actual_model}
 
 
 async def _org_compress_brief(agent_output: str, child_agents: list, directive: str) -> dict:
@@ -3982,6 +3977,7 @@ async def _org_run_level(run_id: str, level: int):
             result = await _org_execute_agent(node["agent_id"], node["brief_in"], run["directive"])
             node["output"] = result["output"]
             node["cost_usd"] = result["cost_usd"]
+            node["model"] = result.get("model", "")
             node["status"] = "complete"
             run["total_cost_usd"] += result["cost_usd"]
         except Exception as e:
@@ -4082,29 +4078,31 @@ async def _ceo_dispatch(agent_id: str, task: str, source: str = "dispatch",
     reply = None
     provider = agent["provider"]
     model = agent["model"]
-    actual_provider = provider  # Track which provider actually handled the request
+    actual_provider = provider
+    or_meta: dict = {}
 
     try:
-        if provider == "claude" and ANTHROPIC_API_KEY:
-            # Strategic agents via Claude Sonnet (with budget safeguards)
+        if provider == "openrouter" and OPENROUTER_API_KEY:
+            reply = await _chat_openrouter(
+                messages, max_tokens=2400, temperature=0.6,
+                model=model, out_meta=or_meta,
+            )
+        elif provider == "claude" and ANTHROPIC_API_KEY:
             block = _claude_check_budget()
             if block:
                 log.warning(f"Claude blocked ({block}) — falling back to OpenRouter for [{agent_id}]")
                 if OPENROUTER_API_KEY:
                     reply = await _chat_openrouter(
                         messages, max_tokens=2400, temperature=0.6,
-                        model=_OPENROUTER_AGENT_MODEL,
+                        model=_OPENROUTER_AGENT_MODEL, out_meta=or_meta,
                     )
                     actual_provider = "openrouter"
                 else:
                     reply = await _chat_llm(messages, max_tokens=2400, purpose=f"ceo-{agent_id}")
                     actual_provider = "ollama"
             else:
-                # Use _chat_claude which handles Anthropic format conversion + usage tracking
-                # But override the model to use Sonnet for agent work
                 client = _get_anthropic()
                 if client:
-                    # Convert messages to Anthropic format
                     system_text = ""
                     api_messages = []
                     for m in messages:
@@ -4122,7 +4120,7 @@ async def _ceo_dispatch(agent_id: str, task: str, source: str = "dispatch",
                         api_messages.insert(0, {"role": "user", "content": "Please respond."})
 
                     _create_kwargs = {
-                        "model": model,  # Uses _CLAUDE_AGENT_MODEL (Sonnet)
+                        "model": model,
                         "max_tokens": 2400,
                         "temperature": 0.6,
                         "messages": api_messages,
@@ -4131,7 +4129,6 @@ async def _ceo_dispatch(agent_id: str, task: str, source: str = "dispatch",
                         _create_kwargs["system"] = system_text.strip()
                     resp = await asyncio.to_thread(client.messages.create, **_create_kwargs)
                     reply = resp.content[0].text.strip() if resp.content else ""
-                    # Record usage for budget tracking
                     input_tok = resp.usage.input_tokens if resp.usage else 0
                     output_tok = resp.usage.output_tokens if resp.usage else 0
                     _claude_record_usage(input_tok, output_tok)
@@ -4140,21 +4137,19 @@ async def _ceo_dispatch(agent_id: str, task: str, source: str = "dispatch",
                     reply = await _chat_llm(messages, max_tokens=2400, purpose=f"ceo-{agent_id}")
                     actual_provider = "ollama"
         elif provider == "gemini" and GOOGLE_API_KEY:
-            # Check free-tier cap before calling
             gemini_block = _gemini_check_budget()
             if gemini_block:
                 log.warning(f"Gemini blocked ({gemini_block}) — falling back to OpenRouter for [{agent_id}]")
                 if OPENROUTER_API_KEY:
                     reply = await _chat_openrouter(
                         messages, max_tokens=2400, temperature=0.6,
-                        model=_OPENROUTER_AGENT_MODEL,
+                        model=_OPENROUTER_AGENT_MODEL, out_meta=or_meta,
                     )
                     actual_provider = "openrouter"
                 else:
                     reply = await _chat_llm(messages, max_tokens=2400, purpose=f"ceo-{agent_id}")
                     actual_provider = "ollama"
             else:
-                # Use Google Gemini via OpenAI-compatible endpoint (free tier)
                 from openai import OpenAI as _OAI
                 gemini = _OAI(
                     api_key=GOOGLE_API_KEY,
@@ -4167,7 +4162,6 @@ async def _ceo_dispatch(agent_id: str, task: str, source: str = "dispatch",
                         timeout=_OPENROUTER_TIMEOUT,
                     )
                     reply = resp.choices[0].message.content.strip()
-                    # Capture tokens from OpenAI-compatible response
                     _gin = getattr(resp.usage, 'prompt_tokens', 0) if resp.usage else 0
                     _gout = getattr(resp.usage, 'completion_tokens', 0) if resp.usage else 0
                     _gemini_record_success(_gin, _gout)
@@ -4177,18 +4171,12 @@ async def _ceo_dispatch(agent_id: str, task: str, source: str = "dispatch",
                     if OPENROUTER_API_KEY:
                         reply = await _chat_openrouter(
                             messages, max_tokens=2400, temperature=0.6,
-                            model=_OPENROUTER_AGENT_MODEL,
+                            model=_OPENROUTER_AGENT_MODEL, out_meta=or_meta,
                         )
                         actual_provider = "openrouter"
                     else:
                         reply = await _chat_llm(messages, max_tokens=2400, purpose=f"ceo-{agent_id}")
                         actual_provider = "ollama"
-        elif provider == "openrouter" and OPENROUTER_API_KEY:
-            # Route through OpenRouter with full cost safeguards
-            reply = await _chat_openrouter(
-                messages, max_tokens=2400, temperature=0.6,
-                model=model,
-            )
         elif provider == "openai" and OPENAI_API_KEY:
             resp = oai.chat.completions.create(
                 model=model, messages=messages,
@@ -4196,7 +4184,6 @@ async def _ceo_dispatch(agent_id: str, task: str, source: str = "dispatch",
             )
             reply = resp.choices[0].message.content.strip()
         else:
-            # Fallback to ARBITER's standard LLM chain (Ollama)
             reply = await _chat_llm(messages, max_tokens=2400, purpose=f"ceo-{agent_id}")
             actual_provider = "ollama"
     except Exception as e:
@@ -4217,16 +4204,17 @@ async def _ceo_dispatch(agent_id: str, task: str, source: str = "dispatch",
         )
         return {"error": error_msg, "agent_id": agent_id}
 
+    actual_model = or_meta.get("model", model)
     rid = arbiter_db.save_agent_result(
         agent_id=agent_id, agent_name=agent["name"], task=task,
-        response=reply, model=model, source=source,
+        response=reply, model=actual_model, source=source,
         broadcast_id=broadcast_id, business_id=business_id,
     )
-    log.info(f"CEO dispatch [{agent_id}]: completed via {actual_provider}/{model}")
+    log.info(f"CEO dispatch [{agent_id}]: completed via {actual_provider} → {actual_model}")
     return {
         "agent_id": agent_id,
         "agent_name": agent["name"],
-        "model": model,
+        "model": actual_model,
         "provider": actual_provider,
         "response": reply,
         "result_id": rid,
@@ -4562,6 +4550,7 @@ async def org_run_node_edit(run_id: str, node_index: int, request: Request):
             run["total_cost_usd"] -= node["cost_usd"]
             node["output"] = result["output"]
             node["cost_usd"] = result["cost_usd"]
+            node["model"] = result.get("model", "")
             node["status"] = "complete"
             run["total_cost_usd"] += result["cost_usd"]
         except Exception as e:
@@ -6107,6 +6096,7 @@ async def _pipeline_run_next(pipeline_id: str) -> dict:
         stage["status"] = "complete"
         stage["output"] = result.get("response", "")
         stage["result_id"] = result.get("result_id")
+        stage["model"] = result.get("model", "")
         stage["completed_at"] = datetime.utcnow().isoformat()
         idx += 1
 
@@ -6350,6 +6340,7 @@ async def ceo_pipeline_stage_edit(pipeline_id: str, stage_idx: int, request: Req
             st["status"] = "complete"
             st["output"] = result.get("response", "")
             st["result_id"] = result.get("result_id")
+            st["model"] = result.get("model", "")
         st["completed_at"] = datetime.utcnow().isoformat()
         arbiter_db.update_pipeline(pipeline_id, fresh["stages"], fresh["current_idx"], prev_pipe_status)
 
@@ -6494,6 +6485,7 @@ async def ceo_pipeline_trigger(pipeline_id: str, stage_idx: int):
         st["status"] = "complete"
         st["output"] = result.get("response", "")
         st["result_id"] = result.get("result_id")
+        st["model"] = result.get("model", "")
         st["completed_at"] = datetime.utcnow().isoformat()
         all_done = all(x["status"] == "complete" for x in s)
         final_status = "complete" if all_done else fresh["status"]
@@ -10399,10 +10391,14 @@ async def _chat_openrouter(
     temperature: float = 0.3,
     model: str | None = None,
     skip_budget_check: bool = False,
+    out_meta: dict | None = None,
 ) -> str | None:
     """Call OpenRouter API with full cost safeguards.
-    Uses GPT-4o-mini by default — $0.15/M input, $0.60/M output.
+    Uses openrouter/auto by default — auto-routing picks the best model.
     Falls back gracefully if not configured or budget exhausted.
+
+    When out_meta is provided, populates it with {"model": "<actual model used>"}
+    from the OpenRouter response (useful for auto-routing transparency).
 
     Safeguards:
     - Daily budget cap (default $0.10/day ≈ $3/month)
@@ -10444,7 +10440,6 @@ async def _chat_openrouter(
             if resp.status_code == 402:
                 log.error("OpenRouter credits exhausted (402) — all future calls will fall back to Ollama")
                 _or_record_error()
-                # Set circuit breaker to long duration — credits won't magically refill
                 _openrouter_usage["circuit_open_until"] = datetime.utcnow() + timedelta(hours=24)
                 return None
             if resp.status_code == 429:
@@ -10459,6 +10454,11 @@ async def _chat_openrouter(
             data = resp.json()
             text = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
 
+            # Capture actual model used (critical for auto-routing transparency)
+            actual_model = data.get("model", _model)
+            if out_meta is not None:
+                out_meta["model"] = actual_model
+
             # ── Record usage ──
             usage = data.get("usage", {})
             in_tok = usage.get("prompt_tokens", 0)
@@ -10466,11 +10466,11 @@ async def _chat_openrouter(
             if in_tok or out_tok:
                 _or_record_usage(in_tok, out_tok)
             else:
-                # No usage data — estimate from message lengths
                 est_in = sum(len(m.get("content", "")) for m in messages) // 4
                 est_out = len(text) // 4 if text else 0
                 _or_record_usage(est_in, est_out)
 
+            log.info(f"OpenRouter auto-routed to {actual_model}")
             return text or None
     except httpx.TimeoutException:
         log.warning(f"OpenRouter timeout after {_OPENROUTER_TIMEOUT}s — request killed")

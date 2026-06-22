@@ -8171,6 +8171,7 @@ function _orgRenderRun() {
                 const statusClass = node.status === 'complete' ? 'complete' : node.status === 'running' ? 'running' : node.status === 'error' ? 'error' : 'pending';
                 const statusIcon = node.status === 'complete' ? '✓' : node.status === 'running' ? '◌' : node.status === 'error' ? '✗' : '○';
                 const costStr = node.cost_usd > 0 ? `$${node.cost_usd.toFixed(3)}` : '';
+                const modelName = node.model ? node.model.split('/').pop() : '';
                 const canEdit = node.status === 'complete' && (_activeOrgRun.status === 'awaiting_approval' || _activeOrgRun.status === 'complete');
                 const clickable = node.output ? `onclick="_orgViewAgentOutput('${_activeOrgRun.id}','${node.agent_id}')" style="--tile-accent:${col}; flex-direction:column; align-items:stretch; max-width:280px; min-width:200px; cursor:pointer"` : `style="--tile-accent:${col}; flex-direction:column; align-items:stretch; max-width:280px; min-width:200px"`;
                 html += `
@@ -8184,7 +8185,7 @@ function _orgRenderRun() {
                             <span class="org-tile-tier ${tierClass}">${tierLabel}</span>
                             <span class="org-run-status-badge org-run-status-${statusClass}">${statusIcon}</span>
                         </div>
-                        ${costStr ? `<div style="font-size:7px;font-family:var(--font-mono);color:var(--text-dim);margin-top:4px">${costStr}</div>` : ''}
+                        ${modelName || costStr ? `<div style="font-size:7px;font-family:var(--font-mono);color:var(--text-dim);margin-top:4px;display:flex;gap:6px;align-items:center">${modelName ? `<span style="color:var(--accent);opacity:0.8" title="${_escHtml(node.model || '')}">⚡ ${_escHtml(modelName)}</span>` : ''}${costStr ? `<span>${costStr}</span>` : ''}</div>` : ''}
                         ${node.output ? `<div class="org-run-node-output">${_renderMarkdown(node.output.substring(0, 300))}${node.output.length > 300 ? '…' : ''}</div>` : ''}
                         ${node.brief_in && node.status !== 'pending' ? `<div class="org-run-node-brief"><b>BRIEF:</b> ${_escHtml(node.brief_in.substring(0, 150))}…</div>` : ''}
                         ${canEdit ? `<button class="org-edit-btn" onclick="event.stopPropagation(); _orgEditNode(${nodeIdx}, '${_escHtml(agent.name || node.agent_id)}')" title="Edit this agent's output">✏ EDIT</button>` : ''}
@@ -9216,8 +9217,10 @@ function _ceoPipelineUpdateUI(pipe) {
             _nodeSetStatus(aid, 'complete');
             if (output) {
                 output.classList.add('active');
+                const stageModel = stage.model ? stage.model.split('/').pop() : '';
+                const modelTag = stageModel ? `<div style="font-size:7px;font-family:var(--font-mono);color:var(--accent);opacity:0.8;margin-bottom:4px" title="${_escHtml(stage.model || '')}">⚡ ${_escHtml(stageModel)}</div>` : '';
                 const txt = stage.output || 'Complete';
-                output.innerHTML = _renderMarkdown(txt);
+                output.innerHTML = modelTag + _renderMarkdown(txt);
             }
             _ceoReadCount++;
             if (canEditPipeline && output) {
