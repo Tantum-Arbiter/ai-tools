@@ -7,8 +7,16 @@ from pathlib import Path
 import typer
 
 from . import pipeline
+from .brand_loader import BrandLoadError, load_brand
 from .caption_generator import OllamaCaptionClient
 from .comfyui_client import ComfyUIClient, ComfyUIConfigError, ComfyUIError
+from .instagram_publisher import (
+    InstagramConfigError,
+    InstagramError,
+    InstagramPublisher,
+)
+from .publish_plan import PublishPlanError, build_publish_plan
+from .schemas.brand import Brand
 from .tts_client import EdgeTTSClient
 from .video_renderer import KenBurnsRenderer
 from .voiceover_generator import OllamaVoiceoverClient
@@ -82,6 +90,89 @@ def render(
         typer.echo(str(result.captions.path))
     if result.video is not None:
         typer.echo(str(result.video.video_path))
+
+
+SUPPORTED_PLATFORMS = ("instagram",)
+
+
+def _load_brand_for_publish(brand_key: str) -> Brand:
+    return load_brand(brand_key, brands_dir=pipeline.DEFAULT_BRANDS_DIR)
+
+
+@app.command()
+def publish(
+    outbox_dir: Path = typer.Argument(
+        ..., exists=True, file_okay=False, dir_okay=True, resolve_path=True,
+        help="Outbox directory to publish (e.g. outbox/2026-06-22/personal/weekly-build).",
+    ),
+    platform: str = typer.Option(
+        "instagram", "--platform", help="Target platform. Only 'instagram' is supported."
+    ),
+    confirm: bool = typer.Option(
+        False, "--confirm",
+        help="Required to perform a live post. Without it, runs dry-run.",
+    ),
+    prefer_image: bool = typer.Option(
+        False, "--prefer-image",
+        help="Force image upload even when a 9x16 .mp4 is available.",
+    ),
+) -> None:
+    """Publish an outbox directory. Dry-run by default; --confirm posts live."""
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+    if platform not in SUPPORTED_PLATFORMS:
+        typer.echo(
+            f"error: unsupported platform '{platform}' (supported: {', '.join(SUPPORTED_PLATFORMS)})",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    try:
+        plan = build_publish_plan(outbox_dir, prefer_image=prefer_image)
+    except PublishPlanError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=3) from exc
+
+    try:
+        brand = _load_brand_for_publish(plan.brand_key)
+    except BrandLoadError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=3) from exc
+
+    typer.echo(
+        f"plan: brand={plan.brand_key} theme={plan.theme_slug} "
+        f"kind={plan.media_kind} asset={plan.asset_path.name} "
+        f"caption_len={len(plan.caption)}"
+    )
+
+    if confirm and not brand.allow_auto_publish:
+        typer.echo(
+            f"error: brand '{plan.brand_key}' has allow_auto_publish=false; "
+            "set it to true in brands/<key>.yaml before --confirm",
+            err=True,
+        )
+        raise typer.Exit(code=4)
+
+    dry_run = not confirm
+
+    try:
+        publisher = InstagramPublisher.from_env()
+    except InstagramConfigError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=3) from exc
+
+    try:
+        result = asyncio.run(publisher.publish(plan, dry_run=dry_run))
+    except InstagramError as exc:
+        typer.echo(f"instagram error: {exc}", err=True)
+        raise typer.Exit(code=5) from exc
+
+    if result.dry_run:
+        typer.echo(f"dry-run ok: asset_url={result.asset_url}")
+    else:
+        typer.echo(
+            f"published: media_id={result.media_id} permalink={result.permalink}"
+        )
 
 
 if __name__ == "__main__":
