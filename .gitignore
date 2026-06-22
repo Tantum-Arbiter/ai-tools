@@ -10,4 +10,5 @@ custom_agents.json
 org_templates.json
 arbiter-mission-control/reports/
 *.swp
+.pytest_cache/
 arbiter-mission-control/ALL_PROMPTS.md
