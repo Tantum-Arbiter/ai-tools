@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 
@@ -19,6 +21,7 @@ from .outbox_writer import (
 )
 from .schemas.brand import Brand
 from .schemas.theme import Theme
+from .status_log import RenderStatusEntry, StatusLogError, append_status_entry
 from .theme_loader import load_theme
 from .tts_client import TTSError, TTSResult
 from .video_renderer import VideoRenderError, VideoRenderResult
@@ -32,6 +35,7 @@ DEFAULT_BRANDS_DIR = MODULE_ROOT / "brands"
 DEFAULT_THEMES_DIR = MODULE_ROOT / "themes"
 DEFAULT_WORKFLOW_PATH = MODULE_ROOT / "workflows" / "image_sd35_base.json"
 DEFAULT_OUTBOX_ROOT = MODULE_ROOT / "outbox"
+DEFAULT_STATUS_LOG_PATH = MODULE_ROOT / "data" / "factory_status.jsonl"
 
 
 class RenderClient(Protocol):
@@ -105,72 +109,128 @@ async def render_theme(
     outbox_root: Path = DEFAULT_OUTBOX_ROOT,
     workflow_template_path: Path = DEFAULT_WORKFLOW_PATH,
     git_sha: str | None = None,
+    status_log_path: Path | None = None,
 ) -> RenderResult:
-    brand = load_brand(brand_key, brands_dir=brands_dir)
-    theme = load_theme(brand_key, theme_slug, themes_dir=themes_dir)
-    brief = build_brief(brand, theme)
-    template = load_workflow_template(workflow_template_path)
+    started_at = time.monotonic()
+    formats_used: list[str] = []
+    try:
+        brand = load_brand(brand_key, brands_dir=brands_dir)
+        theme = load_theme(brand_key, theme_slug, themes_dir=themes_dir)
+        brief = build_brief(brand, theme)
+        template = load_workflow_template(workflow_template_path)
 
-    formats = [aspect_ratio] if aspect_ratio else brief.formats
+        formats = [aspect_ratio] if aspect_ratio else brief.formats
+        formats_used = list(formats)
 
-    async def _render_one(fmt: str) -> OutboxWriteResult:
-        workflow = build_workflow(
-            template,
-            model=client.model,
-            positive=brief.prompt,
-            negative=brief.negative_prompt,
-            seed=brief.seed,
-            aspect_ratio=fmt,
-            filename_prefix=f"{brand_key}_{theme_slug}_{fmt}",
-        )
-        rendered = await client.render(workflow)
-        result = write_render(
-            outbox_root=outbox_root,
-            brand_key=brand_key,
-            theme_slug=theme_slug,
-            aspect_ratio=fmt,
-            image_bytes=rendered.image_bytes,
-            seed=brief.seed,
-            prompt_hash=brief.prompt_hash,
-            checkpoint=client.model,
-            git_sha=git_sha,
-            extra={
-                "prompt_id": rendered.prompt_id,
-                "comfyui_filename": rendered.filename,
-            },
-        )
-        logger.info(
-            "rendered brand=%s theme=%s aspect=%s -> %s",
-            brand_key, theme_slug, fmt, result.image_path,
-        )
-        return result
+        async def _render_one(fmt: str) -> OutboxWriteResult:
+            workflow = build_workflow(
+                template,
+                model=client.model,
+                positive=brief.prompt,
+                negative=brief.negative_prompt,
+                seed=brief.seed,
+                aspect_ratio=fmt,
+                filename_prefix=f"{brand_key}_{theme_slug}_{fmt}",
+            )
+            rendered = await client.render(workflow)
+            result = write_render(
+                outbox_root=outbox_root,
+                brand_key=brand_key,
+                theme_slug=theme_slug,
+                aspect_ratio=fmt,
+                image_bytes=rendered.image_bytes,
+                seed=brief.seed,
+                prompt_hash=brief.prompt_hash,
+                checkpoint=client.model,
+                git_sha=git_sha,
+                extra={
+                    "prompt_id": rendered.prompt_id,
+                    "comfyui_filename": rendered.filename,
+                },
+            )
+            logger.info(
+                "rendered brand=%s theme=%s aspect=%s -> %s",
+                brand_key, theme_slug, fmt, result.image_path,
+            )
+            return result
 
-    images = list(await asyncio.gather(*(_render_one(fmt) for fmt in formats)))
+        images = list(await asyncio.gather(*(_render_one(fmt) for fmt in formats)))
 
-    captions: CaptionsWriteResult | None = None
-    if caption_client is not None:
-        captions = await _generate_and_persist_captions(
-            caption_client=caption_client,
-            brand=brand,
-            theme=theme,
-            outbox_root=outbox_root,
-            prompt_hash=brief.prompt_hash,
-        )
-
-    video: VideoWriteResult | None = None
-    if voiceover_client is not None and tts_client is not None and video_renderer is not None:
-        image_9x16 = _find_aspect(images, VIDEO_ASPECT_RATIO)
-        if image_9x16 is not None:
-            video = await _generate_and_render_video(
-                voiceover_client=voiceover_client,
-                tts_client=tts_client,
-                video_renderer=video_renderer,
+        captions: CaptionsWriteResult | None = None
+        if caption_client is not None:
+            captions = await _generate_and_persist_captions(
+                caption_client=caption_client,
                 brand=brand,
                 theme=theme,
-                image_9x16=image_9x16,
+                outbox_root=outbox_root,
+                prompt_hash=brief.prompt_hash,
             )
 
+        video: VideoWriteResult | None = None
+        if voiceover_client is not None and tts_client is not None and video_renderer is not None:
+            image_9x16 = _find_aspect(images, VIDEO_ASPECT_RATIO)
+            if image_9x16 is not None:
+                video = await _generate_and_render_video(
+                    voiceover_client=voiceover_client,
+                    tts_client=tts_client,
+                    video_renderer=video_renderer,
+                    brand=brand,
+                    theme=theme,
+                    image_9x16=image_9x16,
+                )
+    except Exception as exc:
+        _record_status(
+            status_log_path,
+            brand_key=brand_key,
+            theme_slug=theme_slug,
+            status="failure",
+            formats=formats_used,
+            outputs=[],
+            error=str(exc),
+            duration_seconds=round(time.monotonic() - started_at, 3),
+        )
+        raise
+
+    _record_status(
+        status_log_path,
+        brand_key=brand_key,
+        theme_slug=theme_slug,
+        status="success",
+        formats=formats_used,
+        outputs=[str(image.image_path) for image in images],
+        error=None,
+        duration_seconds=round(time.monotonic() - started_at, 3),
+    )
     return RenderResult(images=images, captions=captions, video=video)
+
+
+def _record_status(
+    status_log_path: Path | None,
+    *,
+    brand_key: str,
+    theme_slug: str,
+    status: str,
+    formats: list[str],
+    outputs: list[str],
+    error: str | None,
+    duration_seconds: float,
+) -> None:
+    if status_log_path is None:
+        return
+    entry = RenderStatusEntry(
+        timestamp=datetime.now(timezone.utc),
+        brand=brand_key,
+        theme=theme_slug,
+        status=status,
+        formats=formats,
+        outputs=outputs,
+        error=error,
+        duration_seconds=duration_seconds,
+    )
+    try:
+        append_status_entry(status_log_path, entry)
+    except (OSError, StatusLogError) as exc:
+        logger.warning("failed to record render status: %s", exc)
 
 
 def _find_aspect(images: list[OutboxWriteResult], aspect: str) -> OutboxWriteResult | None:

@@ -36,6 +36,7 @@ from gcp_monitor import GCPMonitor
 from revenuecat_monitor import RevenueCatMonitor
 from service_health import ServiceHealthMonitor
 from persistence import ArbiterDB
+from factory_status import FactoryStatusPoller, FactoryStatusReader
 from rate_limit import SlidingWindowRateLimiter
 from security_headers import build_security_headers
 from audit_log import AuditLogger, is_sensitive_request
@@ -616,6 +617,14 @@ agent_reg = AgentRegistry()
 gcp_mon = GCPMonitor()
 rc_mon = RevenueCatMonitor()
 arbiter_db = ArbiterDB(str(Path(__file__).parent / "arbiter.db"))
+
+_FACTORY_STATUS_LOG = (
+    Path(__file__).parent.parent
+    / "social-content-factory" / "data" / "factory_status.jsonl"
+)
+factory_status_reader = FactoryStatusReader(_FACTORY_STATUS_LOG)
+factory_status_poller = FactoryStatusPoller(factory_status_reader, limit=5)
+_FACTORY_STATUS_POLL_SECONDS = 10.0
 
 
 # ── Scheduler Engine ──────────────────────────────────────────────────
@@ -1430,12 +1439,32 @@ DESKTOP & BROWSER — "open X" is handled server-side. Just confirm naturally: "
 Known shortcuts: comfyui=http://localhost:8188 | instagram=https://www.instagram.com | youtube=https://studio.youtube.com | gmail=https://mail.google.com | facebook=https://www.facebook.com | meta=https://business.facebook.com | analytics=https://analytics.google.com | gcp=https://console.cloud.google.com | revenuecat=https://app.revenuecat.com | play_console=https://play.google.com/console | app_store=https://appstoreconnect.apple.com"""
 
 
+async def _factory_status_poll_loop():
+    """Background poller that emits SSE ``factory_status`` events on log changes."""
+    while True:
+        try:
+            entries = await asyncio.to_thread(factory_status_poller.tick)
+            if entries is not None:
+                await _push_sse("factory_status", {
+                    "entries": [e.to_dict() for e in entries],
+                })
+        except Exception as exc:
+            log.warning("factory_status poller error: %s", exc)
+        await asyncio.sleep(_FACTORY_STATUS_POLL_SECONDS)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("ARBITER Mission Control online.")
     scheduler.load_user_jobs()
     scheduler.start()
+    factory_status_task = asyncio.create_task(_factory_status_poll_loop())
     yield
+    factory_status_task.cancel()
+    try:
+        await factory_status_task
+    except (asyncio.CancelledError, Exception):
+        pass
     scheduler.stop()
     log.info("ARBITER Mission Control shutting down.")
 
@@ -4705,6 +4734,17 @@ async def active_jobs():
     status_order = {"running": 0, "waiting": 1, "pending": 1, "awaiting_approval": 1, "complete": 2, "error": 3}
     jobs.sort(key=lambda j: (status_order.get(j["status"], 9), -(hash(j.get("created_at") or ""))))
     return {"jobs": jobs}
+
+
+# ── Social Content Factory (read-only) ────────────────────────────────
+@app.get("/api/factory/status")
+async def factory_status():
+    """Return the last N social-content-factory render attempts (read-only)."""
+    entries = await asyncio.to_thread(factory_status_reader.load_recent, limit=5)
+    return {
+        "log_path": str(factory_status_reader.log_path),
+        "entries": [e.to_dict() for e in entries],
+    }
 
 
 @app.post("/api/ceo/dispatch")

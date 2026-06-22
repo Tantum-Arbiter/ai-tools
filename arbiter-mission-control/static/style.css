@@ -5199,3 +5199,29 @@ body.locked .job-tracker { display: none; }
     cursor: pointer; display: block; width: fit-content;
 }
 .wf-edit-stage-btn:hover { background: rgba(0,240,255,0.18); border-color: var(--cyan); }
+
+
+/* ── Social Content Factory — Render Status (read-only) ─────── */
+.factory-status-list { display: flex; flex-direction: column; gap: 6px; padding: 8px 12px; }
+.fs-row {
+    border: 1px solid rgba(0,240,255,0.12); border-radius: 6px;
+    padding: 8px 10px; background: rgba(6,12,28,0.55);
+    font-family: var(--font-mono); font-size: 11px;
+}
+.fs-row-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.fs-status { font-weight: 700; letter-spacing: 1px; font-size: 10px; }
+.fs-status.nominal { color: var(--green); }
+.fs-status.alert { color: var(--red); }
+.fs-brand { color: var(--cyan); letter-spacing: 0.5px; }
+.fs-theme { color: var(--text-dim); }
+.fs-time { margin-left: auto; color: var(--text-dim); font-size: 10px; }
+.fs-row-meta {
+    display: flex; gap: 12px; margin-top: 4px;
+    font-size: 10px; color: var(--text-dim);
+}
+.fs-error {
+    margin-top: 6px; padding: 4px 6px; font-size: 10px;
+    color: var(--red); background: rgba(255,51,85,0.06);
+    border-left: 2px solid var(--red); border-radius: 2px;
+    white-space: pre-wrap; word-break: break-word;
+}

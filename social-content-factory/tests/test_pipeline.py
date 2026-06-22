@@ -472,3 +472,65 @@ class TestVideo:
         assert result.video is None
         assert voiceover.calls == []
         assert tts.calls == []
+
+
+class TestStatusLogIntegration:
+    async def test_success_writes_success_entry(self, tmp_path: Path) -> None:
+        from social_content_factory.status_log import read_recent_entries
+
+        status_log_path = tmp_path / "data" / "factory_status.jsonl"
+
+        (result, _) = await _run(
+            tmp_path,
+            aspect_ratio="1x1",
+            status_log_path=status_log_path,
+        )
+
+        entries = read_recent_entries(status_log_path, limit=5)
+        assert len(entries) == 1
+        entry = entries[0]
+        assert entry.status == "success"
+        assert entry.brand == "personal"
+        assert entry.theme == "weekly-build"
+        assert entry.formats == ["1x1"]
+        assert entry.outputs == [str(result.images[0].image_path)]
+        assert entry.error is None
+        assert entry.duration_seconds >= 0.0
+
+    async def test_failure_writes_failure_entry(self, tmp_path: Path) -> None:
+        from social_content_factory.comfyui_client import ComfyUIExecutionError
+        from social_content_factory.status_log import read_recent_entries
+
+        status_log_path = tmp_path / "data" / "factory_status.jsonl"
+        client = FakeComfyUIClient()
+
+        async def _boom(workflow: dict):
+            raise ComfyUIExecutionError("comfyui crashed")
+
+        client.render = _boom  # type: ignore[assignment]
+
+        with pytest.raises(ComfyUIExecutionError):
+            await _run(
+                tmp_path,
+                aspect_ratio="1x1",
+                client=client,
+                status_log_path=status_log_path,
+            )
+
+        entries = read_recent_entries(status_log_path, limit=5)
+        assert len(entries) == 1
+        assert entries[0].status == "failure"
+        assert entries[0].brand == "personal"
+        assert entries[0].theme == "weekly-build"
+        assert "comfyui crashed" in (entries[0].error or "")
+        assert entries[0].outputs == []
+
+    async def test_status_log_path_none_skips_logging(self, tmp_path: Path) -> None:
+        (result, _) = await _run(
+            tmp_path,
+            aspect_ratio="1x1",
+            status_log_path=None,
+        )
+
+        assert not (tmp_path / "data").exists()
+        assert result.images[0].image_path.exists()

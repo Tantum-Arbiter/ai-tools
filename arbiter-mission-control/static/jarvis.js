@@ -5159,6 +5159,74 @@ async function refreshCICD() {
     if (dockFail) dockFail.textContent = failCount;
 }
 
+// ── Social Content Factory — Render Status (read-only) ─────────
+function _factoryTimeAgo(iso) {
+    if (!iso) return '—';
+    const t = Date.parse(iso);
+    if (!isFinite(t)) return iso;
+    const s = Math.max(0, (Date.now() - t) / 1000);
+    if (s < 60) return `${Math.round(s)}s`;
+    if (s < 3600) return `${Math.round(s / 60)}m`;
+    if (s < 86400) return `${Math.round(s / 3600)}h`;
+    return `${Math.round(s / 86400)}d`;
+}
+
+function _renderFactoryStatus(entries) {
+    const list = document.getElementById('factory-status-list');
+    const dockLast = document.getElementById('dock-factory-last');
+    const dockDot = document.getElementById('dock-factory-dot');
+    const dockOk = document.getElementById('dock-factory-ok');
+
+    if (!entries || entries.length === 0) {
+        if (list) list.innerHTML = '<div class="feed-empty">NO RENDERS YET</div>';
+        if (dockLast) dockLast.textContent = '—';
+        if (dockDot) dockDot.className = 'dp-status-dot';
+        if (dockOk) dockOk.textContent = '0';
+        return;
+    }
+
+    const okCount = entries.filter(e => e.status === 'success').length;
+    const newest = entries[0];
+
+    if (dockLast) dockLast.textContent = _factoryTimeAgo(newest.timestamp);
+    if (dockDot) {
+        dockDot.className = 'dp-status-dot ' + (newest.status === 'success' ? 'ok' : 'err');
+    }
+    if (dockOk) dockOk.textContent = String(okCount);
+
+    if (list) {
+        list.innerHTML = entries.map(e => {
+            const cls = e.status === 'success' ? 'nominal' : 'alert';
+            const err = e.error ? `<div class="fs-error">${_escHtml(e.error)}</div>` : '';
+            const fmts = (e.formats || []).join(', ') || '—';
+            return `
+                <div class="fs-row">
+                    <div class="fs-row-head">
+                        <span class="fs-status ${cls}">${(e.status || '').toUpperCase()}</span>
+                        <span class="fs-brand">${_escHtml(e.brand || '')}</span>
+                        <span class="fs-theme">${_escHtml(e.theme || '')}</span>
+                        <span class="fs-time">${_factoryTimeAgo(e.timestamp)} ago</span>
+                    </div>
+                    <div class="fs-row-meta">
+                        <span class="fs-fmts">${_escHtml(fmts)}</span>
+                        <span class="fs-dur">${(e.duration_seconds || 0).toFixed(2)}s</span>
+                    </div>
+                    ${err}
+                </div>
+            `;
+        }).join('');
+    }
+}
+
+async function refreshFactoryStatus() {
+    try {
+        const data = await api('/api/factory/status');
+        _renderFactoryStatus((data && data.entries) || []);
+    } catch (e) {
+        console.warn('[FACTORY] refresh failed:', e);
+    }
+}
+
 // ── Claude Token Usage ──────────────────────────────────────────
 let _lastClaudeCost = 0;
 let _lastOrCost = 0;
@@ -6639,6 +6707,7 @@ const DOCK_EXPAND = {
     bulletins: { title: 'BULLETINS',                 panel: 'dock-panel-bulletins' },
     todo:      { title: 'TODO LIST',                 panel: 'dock-panel-todo' },
     cicd:      { title: 'CI/CD',                      panel: 'dock-panel-cicd' },
+    factory:   { title: 'CONTENT FACTORY — RENDERS',  panel: 'dock-panel-factory' },
     claude:    { title: 'CLAUDE API USAGE',           panel: 'dock-panel-claude' },
     ceo:       { title: 'AGENT ORCHESTRATOR',           panel: 'dock-panel-ceo' },
     org:       { title: 'CEO',                        panel: 'dock-panel-org' },
@@ -10552,6 +10621,7 @@ async function refreshAll() {
             refreshActiveAgents().catch(e => console.warn('refreshActiveAgents error:', e)),
             refreshOrgTeamCount().catch(e => console.warn('refreshOrgTeamCount error:', e)),
             refreshCICD().catch(e => console.warn('refreshCICD error:', e)),
+            refreshFactoryStatus().catch(e => console.warn('refreshFactoryStatus error:', e)),
             refreshClaudeUsage().catch(e => console.warn('refreshClaudeUsage error:', e)),
             refreshLLMStatus().catch(e => console.warn('refreshLLMStatus error:', e)),
             refreshSystemInfo().catch(e => console.warn('refreshSystemInfo error:', e)),
@@ -10839,6 +10909,12 @@ function _deliverSSEDirect(data) {
                 const data = JSON.parse(evt.data);
                 if (data.type === 'connected') {
                     console.log('[SSE] Scheduler jobs:', data.jobs);
+                    return;
+                }
+                if (data.type === 'factory_status') {
+                    if (typeof _renderFactoryStatus === 'function') {
+                        _renderFactoryStatus(data.entries || []);
+                    }
                     return;
                 }
                 if (data.type === 'briefing' || data.type === 'notification') {

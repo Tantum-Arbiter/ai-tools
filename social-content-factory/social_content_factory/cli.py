@@ -100,6 +100,7 @@ def render(
                 aspect_ratio=aspect_ratio,
                 outbox_root=outbox or pipeline.DEFAULT_OUTBOX_ROOT,
                 git_sha=pipeline.resolve_git_sha(),
+                status_log_path=pipeline.DEFAULT_STATUS_LOG_PATH,
             )
         )
     except ComfyUIError as exc:

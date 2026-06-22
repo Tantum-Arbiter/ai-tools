@@ -133,6 +133,22 @@ class TestRenderCommand:
         assert result.exit_code == 0, result.stderr
         assert mock_render.await_args.kwargs["caption_client"] is not None
 
+    def test_passes_default_status_log_path_to_pipeline(
+        self, configured_env: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mock_render = AsyncMock(return_value=FAKE_RESULT)
+        monkeypatch.setattr(pipeline, "render_theme", mock_render)
+
+        result = runner.invoke(
+            cli.app, ["render", "--brand", "personal", "--theme", "weekly-build"]
+        )
+
+        assert result.exit_code == 0, result.stderr
+        assert (
+            mock_render.await_args.kwargs["status_log_path"]
+            == pipeline.DEFAULT_STATUS_LOG_PATH
+        )
+
     def test_comfyui_error_exits_three(
         self, configured_env: None, monkeypatch: pytest.MonkeyPatch
     ) -> None:
