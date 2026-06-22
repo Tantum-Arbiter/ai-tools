@@ -4332,8 +4332,8 @@ async def org_run_create(request: Request):
     }
     _ORG_RUNS[run_id] = run
 
-    # Execute level 0 (root agents) immediately
-    await _org_run_level(run_id, 0)
+    # Execute level 0 in background so the response returns immediately
+    asyncio.create_task(_org_run_level(run_id, 0))
 
     return _ORG_RUNS[run_id]
 
@@ -4357,7 +4357,8 @@ async def org_run_approve(run_id: str):
         return {"error": f"Run is not awaiting approval (status={run['status']})"}
 
     next_level = run.get("approval_level", run["current_level"] + 1)
-    await _org_run_level(run_id, next_level)
+    run["status"] = "running"
+    asyncio.create_task(_org_run_level(run_id, next_level))
     return _ORG_RUNS[run_id]
 
 
@@ -4370,6 +4371,82 @@ async def org_run_reject(run_id: str):
     run["status"] = "rejected"
     run["completed_at"] = datetime.now().isoformat()
     return run
+
+
+@app.post("/api/org/run/{run_id}/node/{node_index}/edit")
+async def org_run_node_edit(run_id: str, node_index: int, request: Request):
+    """Re-run a specific agent node with CEO feedback injected into the prompt."""
+    run = _ORG_RUNS.get(run_id)
+    if not run:
+        return {"error": "Run not found"}
+    if run["status"] not in ("awaiting_approval", "complete"):
+        return {"error": f"Run is not editable (status={run['status']})"}
+
+    nodes = run.get("nodes", [])
+    if node_index < 0 or node_index >= len(nodes):
+        return {"error": f"Invalid node index: {node_index}"}
+
+    node = nodes[node_index]
+    if node["status"] != "complete":
+        return {"error": f"Node is not complete (status={node['status']})"}
+
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    feedback = body.get("feedback", "").strip() if isinstance(body, dict) else ""
+    if not feedback:
+        return {"error": "Feedback is required"}
+
+    prev_status = run["status"]
+    node["status"] = "running"
+    run["status"] = "running"
+
+    async def _rerun_node():
+        try:
+            enhanced_brief = (
+                f"{node['brief_in']}\n\n"
+                f"## CEO FEEDBACK ON YOUR PREVIOUS OUTPUT\n"
+                f"The CEO reviewed your previous response and requests the following changes:\n"
+                f"{feedback}\n\n"
+                f"## YOUR PREVIOUS OUTPUT (revise this)\n"
+                f"{node['output']}"
+            )
+            result = await _org_execute_agent(node["agent_id"], enhanced_brief, run["directive"])
+            run["total_cost_usd"] -= node["cost_usd"]
+            node["output"] = result["output"]
+            node["cost_usd"] = result["cost_usd"]
+            node["status"] = "complete"
+            run["total_cost_usd"] += result["cost_usd"]
+        except Exception as e:
+            node["status"] = "error"
+            node["output"] = str(e)
+        run["status"] = prev_status
+
+    asyncio.create_task(_rerun_node())
+    return run
+
+
+@app.get("/api/org/run/{run_id}/report/download")
+async def org_run_report_download(run_id: str, fmt: str = "md"):
+    """Download the org run report as synthesised markdown from all node outputs."""
+    from starlette.responses import Response
+    run = _ORG_RUNS.get(run_id)
+    if not run:
+        return JSONResponse(status_code=404, content={"error": "Run not found"})
+    nodes = run.get("nodes", [])
+    outputs = [n for n in nodes if n.get("output")]
+    if not outputs:
+        return JSONResponse(status_code=404, content={"error": "No agent outputs available"})
+    if fmt != "md":
+        return JSONResponse(content={"directive": run.get("directive", ""), "nodes": nodes})
+    all_agents = _get_all_agents()
+    md_lines = [f"# CEO ORGANISATION REPORT\n", f"**Directive:** {run.get('directive', '')}\n",
+                f"**Team:** {run.get('org_name', '')}\n"]
+    sorted_nodes = sorted(outputs, key=lambda n: n.get("level", 0))
+    for n in sorted_nodes:
+        agent = all_agents.get(n["agent_id"], {})
+        name = agent.get("name", n["agent_id"])
+        md_lines.append(f"## {name} (Level {n.get('level', 0)})\n")
+        md_lines.append(f"{n['output']}\n")
+    return Response(content="\n".join(md_lines), media_type="text/markdown")
 
 
 @app.get("/api/org/runs")
@@ -6053,6 +6130,81 @@ async def ceo_pipeline_reject(pipeline_id: str, request: Request):
 
     arbiter_db.update_pipeline(pipeline_id, stages, idx, "cancelled")
     log.info(f"Pipeline [{pipeline_id}] rejected at stage {idx}: {reason}")
+    return arbiter_db.get_pipeline(pipeline_id)
+
+
+@app.post("/api/ceo/pipeline/{pipeline_id}/stage/{stage_idx}/edit")
+async def ceo_pipeline_stage_edit(pipeline_id: str, stage_idx: int, request: Request):
+    """Re-run a specific completed pipeline stage with CEO feedback."""
+    pipe = arbiter_db.get_pipeline(pipeline_id)
+    if not pipe:
+        return {"error": "Pipeline not found"}
+    if pipe["status"] not in ("waiting", "complete"):
+        return {"error": f"Pipeline is not editable (status={pipe['status']})"}
+
+    stages = pipe["stages"]
+    if stage_idx < 0 or stage_idx >= len(stages):
+        return {"error": f"Invalid stage index: {stage_idx}"}
+
+    stage = stages[stage_idx]
+    if stage["status"] != "complete":
+        return {"error": f"Stage is not complete (status={stage['status']})"}
+
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    feedback = body.get("feedback", "").strip() if isinstance(body, dict) else ""
+    if not feedback:
+        return {"error": "Feedback is required"}
+
+    prior_output = ""
+    if stage_idx > 0 and stages[stage_idx - 1].get("output"):
+        prior_output = stages[stage_idx - 1]["output"]
+
+    all_outputs_parts = []
+    for prev_i in range(stage_idx):
+        prev = stages[prev_i]
+        if prev.get("output"):
+            all_outputs_parts.append(f"## {prev['agent_name']} Output\n{prev['output']}")
+    all_outputs = "\n\n---\n\n".join(all_outputs_parts) if all_outputs_parts else ""
+
+    task = stage["task_template"].format(
+        directive=pipe["directive"],
+        prior_output=prior_output,
+        all_outputs=all_outputs,
+    )
+    task += (
+        f"\n\n## CEO FEEDBACK ON YOUR PREVIOUS OUTPUT\n"
+        f"The CEO reviewed your previous response and requests the following changes:\n"
+        f"{feedback}\n\n"
+        f"## YOUR PREVIOUS OUTPUT (revise this)\n"
+        f"{stage['output']}"
+    )
+
+    stage["status"] = "running"
+    stage["started_at"] = datetime.utcnow().isoformat()
+    prev_pipe_status = pipe["status"]
+    arbiter_db.update_pipeline(pipeline_id, stages, pipe["current_idx"], "running")
+
+    async def _rerun_stage():
+        result = await _ceo_dispatch(
+            stage["agent_id"], task,
+            source="pipeline", broadcast_id=pipeline_id,
+            business_id=pipe.get("business_id"),
+        )
+        fresh = arbiter_db.get_pipeline(pipeline_id)
+        if not fresh:
+            return
+        st = fresh["stages"][stage_idx]
+        if result.get("error"):
+            st["status"] = "error"
+            st["error"] = result["error"]
+        else:
+            st["status"] = "complete"
+            st["output"] = result.get("response", "")
+            st["result_id"] = result.get("result_id")
+        st["completed_at"] = datetime.utcnow().isoformat()
+        arbiter_db.update_pipeline(pipeline_id, fresh["stages"], fresh["current_idx"], prev_pipe_status)
+
+    asyncio.create_task(_rerun_stage())
     return arbiter_db.get_pipeline(pipeline_id)
 
 

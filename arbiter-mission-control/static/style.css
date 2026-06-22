@@ -4446,6 +4446,15 @@ body.locked .lock-overlay { display: flex; }
 }
 
 /* ── Responsive — stack on narrow screens (tablets / small) ───── */
+@media (max-width: 1440px) {
+    .mc-clock {
+        padding-right: 64px;
+        gap: clamp(4px, 0.5vw, 8px);
+    }
+    .mc-global-mute {
+        flex-direction: column; gap: 2px;
+    }
+}
 @media (max-width: 1024px) {
     body { height: auto; overflow: auto; }
     .mc-viewport { flex-direction: column; }
@@ -4458,7 +4467,17 @@ body.locked .lock-overlay { display: flex; }
     .mc-dock { flex-wrap: wrap; }
     .dock-panel { min-width: 140px; }
     h1 { font-size: 22px; letter-spacing: 6px; }
-    .clock-time { font-size: 18px; }
+    .mc-clock {
+        padding-right: 42px;
+        gap: 4px;
+    }
+    .clock-time { font-size: 16px; letter-spacing: 1px; }
+    .clock-date { font-size: 8px; letter-spacing: 1px; }
+    .mc-global-mute {
+        flex-direction: column; gap: 1px;
+    }
+    .mc-mute-btn { padding: 2px; }
+    .mc-mute-btn svg { width: 12px; height: 12px; }
     .orb-wrapper canvas { width: 320px; height: 320px; }
     .chat-panel { left: 5%; right: 5%; width: auto; top: 5%; bottom: 5%; }
     .chat-panel.active { display: flex; }
@@ -4748,6 +4767,8 @@ body.locked .job-tracker { display: none; }
 .org-btn-approve:hover { background: rgba(0,230,118,0.2); }
 .org-btn-reject { border-color: rgba(255,34,85,0.3); color: var(--red); background: rgba(255,34,85,0.06); padding: 10px 20px; font-size: 11px; }
 .org-btn-reject:hover { background: rgba(255,34,85,0.15); }
+.org-btn-back { border-color: rgba(0,200,255,0.25); color: var(--cyan); background: rgba(0,200,255,0.06); padding: 6px 14px; font-size: 10px; letter-spacing: 1px; margin-right: auto; flex-shrink: 0; }
+.org-btn-back:hover { background: rgba(0,200,255,0.15); }
 .org-btn-save { width: 100%; padding: 10px; font-size: 11px; background: rgba(0,240,255,0.12); border-color: var(--cyan); }
 .org-btn-save:hover { background: rgba(0,240,255,0.25); }
 
@@ -5114,3 +5135,67 @@ body.locked .job-tracker { display: none; }
     margin-bottom: 12px; letter-spacing: 0.5px;
 }
 .org-run-gate-btns { display: flex; gap: 10px; }
+
+/* ── Edit Overlay (shared between org run + pipeline) ── */
+.org-edit-overlay {
+    position: fixed; inset: 0; z-index: 10000;
+    background: rgba(0,0,0,0.7); backdrop-filter: blur(4px);
+    display: none; align-items: center; justify-content: center;
+}
+.org-edit-overlay.active { display: flex; }
+.org-edit-modal {
+    background: rgba(6,12,28,0.97); border: 1px solid rgba(0,240,255,0.2);
+    border-radius: 10px; width: 500px; max-width: 90vw;
+    box-shadow: 0 8px 40px rgba(0,0,0,0.5), 0 0 20px rgba(0,240,255,0.08);
+}
+.org-edit-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 18px; border-bottom: 1px solid rgba(0,240,255,0.1);
+    font-family: var(--font-mono); font-size: 11px; letter-spacing: 1px; color: var(--cyan);
+}
+.org-edit-close {
+    background: none; border: none; color: var(--text-dim); font-size: 16px; cursor: pointer;
+    padding: 4px 8px; border-radius: 4px;
+}
+.org-edit-close:hover { color: var(--red); background: rgba(255,82,82,0.1); }
+.org-edit-body { padding: 18px; }
+.org-edit-body textarea {
+    width: 100%; margin-top: 8px; padding: 10px 12px;
+    background: rgba(0,0,0,0.3); border: 1px solid rgba(0,240,255,0.15);
+    border-radius: 6px; color: var(--text-primary); font-family: var(--font-sans);
+    font-size: 12px; resize: vertical; outline: none;
+}
+.org-edit-body textarea:focus { border-color: var(--cyan); }
+.org-edit-footer {
+    display: flex; gap: 10px; justify-content: flex-end;
+    padding: 12px 18px; border-top: 1px solid rgba(0,240,255,0.1);
+}
+.org-edit-cancel-btn {
+    background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1);
+    color: var(--text-dim); padding: 7px 16px; border-radius: 5px;
+    font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.5px; cursor: pointer;
+}
+.org-edit-cancel-btn:hover { background: rgba(255,255,255,0.1); }
+.org-edit-submit-btn {
+    background: rgba(0,240,255,0.12); border: 1px solid rgba(0,240,255,0.3);
+    color: var(--cyan); padding: 7px 16px; border-radius: 5px;
+    font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.5px; cursor: pointer;
+}
+.org-edit-submit-btn:hover { background: rgba(0,240,255,0.2); }
+.org-edit-submit-btn:disabled { opacity: 0.5; cursor: wait; }
+
+/* ── Edit buttons on tiles ── */
+.org-edit-btn {
+    background: rgba(0,240,255,0.08); border: 1px solid rgba(0,240,255,0.2);
+    color: var(--cyan); padding: 4px 10px; border-radius: 4px; margin-top: 6px;
+    font-family: var(--font-mono); font-size: 8px; letter-spacing: 0.5px;
+    cursor: pointer; align-self: flex-start;
+}
+.org-edit-btn:hover { background: rgba(0,240,255,0.18); border-color: var(--cyan); }
+.wf-edit-stage-btn {
+    background: rgba(0,240,255,0.08); border: 1px solid rgba(0,240,255,0.2);
+    color: var(--cyan); padding: 4px 10px; border-radius: 4px; margin-top: 6px;
+    font-family: var(--font-mono); font-size: 8px; letter-spacing: 0.5px;
+    cursor: pointer; display: block; width: fit-content;
+}
+.wf-edit-stage-btn:hover { background: rgba(0,240,255,0.18); border-color: var(--cyan); }

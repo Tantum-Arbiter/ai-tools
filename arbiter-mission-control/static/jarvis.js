@@ -7619,6 +7619,9 @@ async function _orgInitPanel() {
 
     // Load templates
     await _orgLoadTemplates();
+
+    // Restore active run from session if present
+    await _orgRestoreRun();
 }
 
 // Lightweight fetch of team count for the dock badge (no panel DOM needed)
@@ -8077,6 +8080,7 @@ async function _orgDeleteTeam(templateId) {
 async function _orgStartRun(orgId, directive) {
     const runView = document.getElementById('org-run-view');
     const teamsList = document.getElementById('org-teams-list');
+    const histEl = document.getElementById('org-run-history');
 
     try {
         const resp = await fetch('/api/org/run', {
@@ -8088,14 +8092,36 @@ async function _orgStartRun(orgId, directive) {
         if (data.error) { alert('Error: ' + data.error); return; }
 
         _activeOrgRun = data;
+        sessionStorage.setItem('_orgActiveRunId', data.id);
         if (teamsList) teamsList.style.display = 'none';
+        if (histEl) histEl.style.display = 'none';
         if (runView) runView.style.display = 'block';
         _orgRenderRun();
 
-        // Start polling if still running
         if (data.status === 'running') _orgStartRunPolling();
     } catch (e) {
         alert('Failed to start run: ' + e.message);
+    }
+}
+
+async function _orgRestoreRun() {
+    const savedId = sessionStorage.getItem('_orgActiveRunId');
+    if (!savedId) return;
+    try {
+        const resp = await fetch(`/api/org/run/${savedId}`);
+        const data = await resp.json();
+        if (data.error) { sessionStorage.removeItem('_orgActiveRunId'); return; }
+        _activeOrgRun = data;
+        const runView = document.getElementById('org-run-view');
+        const teamsList = document.getElementById('org-teams-list');
+        const histEl = document.getElementById('org-run-history');
+        if (teamsList) teamsList.style.display = 'none';
+        if (histEl) histEl.style.display = 'none';
+        if (runView) runView.style.display = 'block';
+        _orgRenderRun();
+        if (data.status === 'running') _orgStartRunPolling();
+    } catch (e) {
+        sessionStorage.removeItem('_orgActiveRunId');
     }
 }
 
@@ -8134,7 +8160,9 @@ function _orgRenderRun() {
             html += `<div class="org-flow-level" style="padding:6px 0">
                 <span class="org-flow-level-tag">${tag}</span>
                 <div class="org-flow-level-tiles" style="gap:8px">`;
-            for (const node of levelNodes) {
+            for (let ni = 0; ni < levelNodes.length; ni++) {
+                const node = levelNodes[ni];
+                const nodeIdx = nodes.indexOf(node);
                 const agent = agentMap[node.agent_id] || {};
                 const col = agent.colour || '#00e5ff';
                 const tier = agent.model_tier || (agent.provider === 'claude' ? 'strategic' : agent.provider === 'gemini' ? 'research' : 'execution');
@@ -8143,6 +8171,7 @@ function _orgRenderRun() {
                 const statusClass = node.status === 'complete' ? 'complete' : node.status === 'running' ? 'running' : node.status === 'error' ? 'error' : 'pending';
                 const statusIcon = node.status === 'complete' ? '✓' : node.status === 'running' ? '◌' : node.status === 'error' ? '✗' : '○';
                 const costStr = node.cost_usd > 0 ? `$${node.cost_usd.toFixed(3)}` : '';
+                const canEdit = node.status === 'complete' && (_activeOrgRun.status === 'awaiting_approval' || _activeOrgRun.status === 'complete');
                 const clickable = node.output ? `onclick="_orgViewAgentOutput('${_activeOrgRun.id}','${node.agent_id}')" style="--tile-accent:${col}; flex-direction:column; align-items:stretch; max-width:280px; min-width:200px; cursor:pointer"` : `style="--tile-accent:${col}; flex-direction:column; align-items:stretch; max-width:280px; min-width:200px"`;
                 html += `
                     <div class="org-agent-tile org-run-tile-${statusClass}" ${clickable}>
@@ -8158,6 +8187,7 @@ function _orgRenderRun() {
                         ${costStr ? `<div style="font-size:7px;font-family:var(--font-mono);color:var(--text-dim);margin-top:4px">${costStr}</div>` : ''}
                         ${node.output ? `<div class="org-run-node-output">${_renderMarkdown(node.output.substring(0, 300))}${node.output.length > 300 ? '…' : ''}</div>` : ''}
                         ${node.brief_in && node.status !== 'pending' ? `<div class="org-run-node-brief"><b>BRIEF:</b> ${_escHtml(node.brief_in.substring(0, 150))}…</div>` : ''}
+                        ${canEdit ? `<button class="org-edit-btn" onclick="event.stopPropagation(); _orgEditNode(${nodeIdx}, '${_escHtml(agent.name || node.agent_id)}')" title="Edit this agent's output">✏ EDIT</button>` : ''}
                     </div>`;
             }
             html += '</div></div>';
@@ -8177,7 +8207,7 @@ function _orgRenderRun() {
         }
     } else if (_activeOrgRun.status === 'complete') {
         if (controlsEl) controlsEl.style.display = 'block';
-        if (levelInfoEl) levelInfoEl.textContent = '✓ CEO run complete';
+        if (levelInfoEl) levelInfoEl.innerHTML = '✓ CEO run complete';
         const approveBtn = document.getElementById('org-run-approve');
         const rejectBtn = document.getElementById('org-run-reject');
         if (approveBtn) { approveBtn.style.display = ''; approveBtn.textContent = '📄 VIEW REPORT'; approveBtn.disabled = false; approveBtn.onclick = () => _orgViewRunReport(_activeOrgRun.id); }
@@ -8226,13 +8256,82 @@ async function _orgRunReject() {
     }
 }
 
+function _orgEditNode(nodeIndex, agentName) {
+    if (!_activeOrgRun) return;
+    const overlay = document.getElementById('org-edit-overlay');
+    if (!overlay) {
+        const div = document.createElement('div');
+        div.id = 'org-edit-overlay';
+        div.className = 'org-edit-overlay';
+        div.innerHTML = `
+            <div class="org-edit-modal">
+                <div class="org-edit-header">
+                    <span id="org-edit-title">EDIT AGENT OUTPUT</span>
+                    <button class="org-edit-close" onclick="_orgEditClose()">✕</button>
+                </div>
+                <div class="org-edit-body">
+                    <label style="font-size:9px;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;">What would you like changed?</label>
+                    <textarea id="org-edit-feedback" rows="5" placeholder="e.g. Simplify the pricing model, remove the enterprise tier, focus on freemium conversion..."></textarea>
+                </div>
+                <div class="org-edit-footer">
+                    <button id="org-edit-cancel" class="org-edit-cancel-btn" onclick="_orgEditClose()">CANCEL</button>
+                    <button id="org-edit-submit" class="org-edit-submit-btn">✏ RE-RUN WITH FEEDBACK</button>
+                </div>
+            </div>`;
+        document.body.appendChild(div);
+    }
+    const el = document.getElementById('org-edit-overlay') || div;
+    el.classList.add('active');
+    const titleEl = document.getElementById('org-edit-title');
+    if (titleEl) titleEl.textContent = `EDIT: ${agentName}`;
+    const textarea = document.getElementById('org-edit-feedback');
+    if (textarea) { textarea.value = ''; textarea.focus(); }
+    const submitBtn = document.getElementById('org-edit-submit');
+    if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = '✏ RE-RUN WITH FEEDBACK';
+        submitBtn.onclick = () => _orgEditSubmit(nodeIndex);
+    }
+}
+
+async function _orgEditSubmit(nodeIndex) {
+    const feedback = document.getElementById('org-edit-feedback')?.value?.trim();
+    if (!feedback) { alert('Please enter feedback'); return; }
+    const submitBtn = document.getElementById('org-edit-submit');
+    if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'RE-RUNNING...'; }
+    try {
+        const resp = await fetch(`/api/org/run/${_activeOrgRun.id}/node/${nodeIndex}/edit`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ feedback }),
+        });
+        const data = await resp.json();
+        if (data.error) { alert('Error: ' + data.error); if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = '✏ RE-RUN WITH FEEDBACK'; } return; }
+        _activeOrgRun = data;
+        _orgRenderRun();
+        _orgEditClose();
+        _orgStartRunPolling();
+    } catch (e) {
+        alert('Edit failed: ' + e.message);
+        if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = '✏ RE-RUN WITH FEEDBACK'; }
+    }
+}
+
+function _orgEditClose() {
+    const overlay = document.getElementById('org-edit-overlay');
+    if (overlay) overlay.classList.remove('active');
+}
+
 function _orgCloseRun() {
     _activeOrgRun = null;
+    sessionStorage.removeItem('_orgActiveRunId');
     _orgStopRunPolling();
     const runView = document.getElementById('org-run-view');
     const teamsList = document.getElementById('org-teams-list');
+    const histEl = document.getElementById('org-run-history');
     if (runView) runView.style.display = 'none';
     if (teamsList) teamsList.style.display = '';
+    if (histEl) histEl.style.display = '';
     const approveBtn = document.getElementById('org-run-approve');
     const rejectBtn = document.getElementById('org-run-reject');
     if (approveBtn) { approveBtn.style.display = ''; approveBtn.textContent = '✓ APPROVE & CONTINUE'; approveBtn.onclick = _orgRunApprove; }
@@ -8296,7 +8395,7 @@ async function _orgViewRunReport(runId) {
     body.innerHTML = '<div style="color:var(--text-dim);padding:20px;font-family:var(--font-mono);font-size:11px">Loading report...</div>';
     if (titleEl) titleEl.textContent = 'CEO TEAM REPORT';
     if (metaEl) metaEl.textContent = '';
-    overlay.style.display = 'flex';
+    overlay.classList.add('active');
 
     try {
         const resp = await fetch(`/api/org/run/${runId}/report/download?fmt=md`);
@@ -8331,8 +8430,9 @@ function _orgViewAgentOutput(runId, agentId) {
     if (titleEl) titleEl.textContent = `AGENT REPORT — ${name.toUpperCase()}`;
     if (metaEl) metaEl.textContent = agent.role || '';
     body.innerHTML = `<div class="pr-section-content">${_renderMarkdown(node.output)}</div>`;
-    overlay.style.display = 'flex';
+    overlay.classList.add('active');
 }
+
 
 // Set up drag-and-drop on level slots
 document.addEventListener('DOMContentLoaded', () => {
@@ -9100,10 +9200,14 @@ function _ceoPipelineUpdateUI(pipe) {
     const cancelBtn = document.getElementById('ceo-pipe-cancel');
     const launchBtn = document.getElementById('ceo-pipeline-btn');
 
-    // Update each node tile based on stage status
+    const canEditPipeline = pipe.status === 'waiting' || pipe.status === 'complete';
+
     pipe.stages.forEach((stage, i) => {
         const aid = stage.agent_id;
         const output = document.getElementById(`wf-output-${aid}`);
+
+        const existingEditBtn = document.getElementById(`wf-edit-btn-${aid}`);
+        if (existingEditBtn) existingEditBtn.remove();
 
         if (stage.status === 'running') {
             _nodeSetStatus(aid, 'working');
@@ -9116,6 +9220,14 @@ function _ceoPipelineUpdateUI(pipe) {
                 output.innerHTML = _renderMarkdown(txt);
             }
             _ceoReadCount++;
+            if (canEditPipeline && output) {
+                const editBtn = document.createElement('button');
+                editBtn.id = `wf-edit-btn-${aid}`;
+                editBtn.className = 'wf-edit-stage-btn';
+                editBtn.textContent = '✏ EDIT';
+                editBtn.onclick = (e) => { e.stopPropagation(); _ceoPipelineEditStage(i, stage.agent_name || aid); };
+                output.parentElement.appendChild(editBtn);
+            }
         } else if (stage.status === 'error') {
             _nodeSetStatus(aid, 'error');
             if (output) { output.classList.add('active'); output.textContent = `Error: ${stage.error}`; }
@@ -9125,7 +9237,6 @@ function _ceoPipelineUpdateUI(pipe) {
         } else if (stage.status === 'ready') {
             _nodeSetStatus(aid, 'ready');
         }
-        // pending — leave as default
     });
 
     _ceoUpdateStats();
@@ -9315,6 +9426,67 @@ async function _ceoPipelineReject() {
     _ceoProgressComplete(true);
     const masterStatus = document.querySelector('#ceo-master-card .ceo-master-status');
     if (masterStatus) { masterStatus.className = 'ceo-master-status ready'; masterStatus.innerHTML = '<span class="ceo-dot"></span> ONLINE'; }
+}
+
+function _ceoPipelineEditStage(stageIdx, agentName) {
+    if (!_activePipelineId && !(_lastPipeData && _lastPipeData.id)) return;
+    const pipeId = _activePipelineId || _lastPipeData.id;
+    const overlay = document.getElementById('org-edit-overlay');
+    if (!overlay) {
+        const div = document.createElement('div');
+        div.id = 'org-edit-overlay';
+        div.className = 'org-edit-overlay';
+        div.innerHTML = `
+            <div class="org-edit-modal">
+                <div class="org-edit-header">
+                    <span id="org-edit-title">EDIT AGENT OUTPUT</span>
+                    <button class="org-edit-close" onclick="_orgEditClose()">✕</button>
+                </div>
+                <div class="org-edit-body">
+                    <label style="font-size:9px;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;">What would you like changed?</label>
+                    <textarea id="org-edit-feedback" rows="5" placeholder="e.g. Simplify the pricing model, remove the enterprise tier, focus on freemium conversion..."></textarea>
+                </div>
+                <div class="org-edit-footer">
+                    <button id="org-edit-cancel" class="org-edit-cancel-btn" onclick="_orgEditClose()">CANCEL</button>
+                    <button id="org-edit-submit" class="org-edit-submit-btn">✏ RE-RUN WITH FEEDBACK</button>
+                </div>
+            </div>`;
+        document.body.appendChild(div);
+    }
+    const el = document.getElementById('org-edit-overlay');
+    el.classList.add('active');
+    const titleEl = document.getElementById('org-edit-title');
+    if (titleEl) titleEl.textContent = `EDIT: ${agentName}`;
+    const textarea = document.getElementById('org-edit-feedback');
+    if (textarea) { textarea.value = ''; textarea.focus(); }
+    const submitBtn = document.getElementById('org-edit-submit');
+    if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = '✏ RE-RUN WITH FEEDBACK';
+        submitBtn.onclick = () => _ceoPipelineEditSubmit(pipeId, stageIdx);
+    }
+}
+
+async function _ceoPipelineEditSubmit(pipeId, stageIdx) {
+    const feedback = document.getElementById('org-edit-feedback')?.value?.trim();
+    if (!feedback) { alert('Please enter feedback'); return; }
+    const submitBtn = document.getElementById('org-edit-submit');
+    if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'RE-RUNNING...'; }
+    try {
+        const resp = await fetch(`/api/ceo/pipeline/${pipeId}/stage/${stageIdx}/edit`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ feedback }),
+        });
+        const data = await resp.json();
+        if (data.error) { alert('Error: ' + data.error); if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = '✏ RE-RUN WITH FEEDBACK'; } return; }
+        _ceoPipelineUpdateUI(data);
+        _orgEditClose();
+        _ceoPipelineStartPolling();
+    } catch (e) {
+        alert('Edit failed: ' + e.message);
+        if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = '✏ RE-RUN WITH FEEDBACK'; }
+    }
 }
 
 function _ceoPipelineReportPoll(pipeId) {
@@ -9547,7 +9719,7 @@ async function _reportLoadFromHistory(filename) {
 
 function _ceoPipelineCloseReport() {
     const overlay = document.getElementById('pipeline-report-overlay');
-    if (overlay) overlay.classList.remove('active');
+    if (overlay) { overlay.classList.remove('active'); overlay.style.display = ''; }
     document.body.classList.remove('report-active');
 }
 
