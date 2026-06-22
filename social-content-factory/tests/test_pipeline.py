@@ -9,6 +9,12 @@ import pytest
 from social_content_factory.caption_generator import CaptionGeneratorError, CaptionSet
 from social_content_factory.comfyui_client import RenderedImage
 from social_content_factory.pipeline import render_theme
+from social_content_factory.tts_client import TTSError, TTSResult
+from social_content_factory.video_renderer import VideoRenderError, VideoRenderResult
+from social_content_factory.voiceover_generator import (
+    VoiceoverGeneratorError,
+    VoiceoverScript,
+)
 
 MODULE_ROOT = Path(__file__).resolve().parent.parent
 BRANDS_DIR = MODULE_ROOT / "brands"
@@ -55,14 +61,84 @@ class FakeCaptionClient:
         return CaptionSet(instagram=self._instagram, x=self._x, model=self.model)
 
 
+class FakeVoiceoverClient:
+    def __init__(self, model: str = "phi4:14b", text: str = "Today we shipped a renderer.") -> None:
+        self.model = model
+        self.calls: list[tuple[str, str]] = []
+        self._raise: Exception | None = None
+        self._text = text
+
+    def fail_with(self, exc: Exception) -> None:
+        self._raise = exc
+
+    async def generate(self, brand, theme) -> VoiceoverScript:
+        self.calls.append((brand.key, theme.slug))
+        if self._raise is not None:
+            raise self._raise
+        return VoiceoverScript(text=self._text, model=self.model)
+
+
+class FakeTTSClient:
+    def __init__(self, voice: str = "en-GB-RyanNeural") -> None:
+        self.voice = voice
+        self.calls: list[tuple[str, Path]] = []
+        self._raise: Exception | None = None
+
+    def fail_with(self, exc: Exception) -> None:
+        self._raise = exc
+
+    async def synthesize(self, text: str, output_path: Path) -> TTSResult:
+        self.calls.append((text, output_path))
+        if self._raise is not None:
+            raise self._raise
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"FAKE_MP3")
+        return TTSResult(audio_path=output_path, voice=self.voice)
+
+
+class FakeVideoRenderer:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+        self._raise: Exception | None = None
+
+    def fail_with(self, exc: Exception) -> None:
+        self._raise = exc
+
+    async def render(
+        self,
+        *,
+        image_path: Path,
+        audio_path: Path,
+        output_path: Path,
+        duration_seconds: float,
+    ) -> VideoRenderResult:
+        self.calls.append({
+            "image_path": image_path,
+            "audio_path": audio_path,
+            "output_path": output_path,
+            "duration_seconds": duration_seconds,
+        })
+        if self._raise is not None:
+            raise self._raise
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"FAKE_MP4")
+        return VideoRenderResult(video_path=output_path, duration_seconds=duration_seconds)
+
+
 async def _run(tmp_path: Path, **overrides):
     client = overrides.pop("client", FakeComfyUIClient())
     caption_client = overrides.pop("caption_client", None)
+    voiceover_client = overrides.pop("voiceover_client", None)
+    tts_client = overrides.pop("tts_client", None)
+    video_renderer = overrides.pop("video_renderer", None)
     result = await render_theme(
         brand_key=overrides.pop("brand_key", "personal"),
         theme_slug=overrides.pop("theme_slug", "weekly-build"),
         client=client,
         caption_client=caption_client,
+        voiceover_client=voiceover_client,
+        tts_client=tts_client,
+        video_renderer=video_renderer,
         brands_dir=BRANDS_DIR,
         themes_dir=THEMES_DIR,
         outbox_root=tmp_path / "outbox",
@@ -238,3 +314,161 @@ class TestCaptions:
         assert result.captions is not None
         body = result.captions.path.read_text(encoding="utf-8")
         assert "model: phi4:14b" in body
+
+
+
+class TestVideo:
+    async def test_video_none_when_no_video_clients(self, tmp_path: Path) -> None:
+        (result, _) = await _run(tmp_path)
+
+        assert result.video is None
+
+    async def test_renders_video_when_all_clients_provided(self, tmp_path: Path) -> None:
+        voiceover = FakeVoiceoverClient()
+        tts = FakeTTSClient()
+        renderer = FakeVideoRenderer()
+
+        (result, _) = await _run(
+            tmp_path,
+            voiceover_client=voiceover,
+            tts_client=tts,
+            video_renderer=renderer,
+        )
+
+        assert result.video is not None
+        assert result.video.video_path.exists()
+        assert result.video.video_path.read_bytes() == b"FAKE_MP4"
+
+    async def test_video_uses_9x16_image(self, tmp_path: Path) -> None:
+        voiceover = FakeVoiceoverClient()
+        tts = FakeTTSClient()
+        renderer = FakeVideoRenderer()
+
+        (result, _) = await _run(
+            tmp_path,
+            voiceover_client=voiceover,
+            tts_client=tts,
+            video_renderer=renderer,
+        )
+
+        assert len(renderer.calls) == 1
+        used_image = renderer.calls[0]["image_path"]
+        assert "_9x16_" in used_image.name
+
+    async def test_audio_and_video_written_alongside_image(self, tmp_path: Path) -> None:
+        voiceover = FakeVoiceoverClient()
+        tts = FakeTTSClient()
+        renderer = FakeVideoRenderer()
+
+        (result, _) = await _run(
+            tmp_path,
+            voiceover_client=voiceover,
+            tts_client=tts,
+            video_renderer=renderer,
+        )
+
+        assert result.video is not None
+        image_9x16 = next(r for r in result.images if "_9x16_" in r.image_path.name)
+        assert result.video.video_path.parent == image_9x16.image_path.parent
+        assert result.video.video_path.suffix == ".mp4"
+        assert result.video.audio_path.suffix == ".mp3"
+        assert result.video.audio_path.parent == image_9x16.image_path.parent
+
+    async def test_video_skipped_when_no_9x16_format(self, tmp_path: Path) -> None:
+        voiceover = FakeVoiceoverClient()
+        tts = FakeTTSClient()
+        renderer = FakeVideoRenderer()
+
+        (result, _) = await _run(
+            tmp_path,
+            aspect_ratio="1x1",
+            voiceover_client=voiceover,
+            tts_client=tts,
+            video_renderer=renderer,
+        )
+
+        assert result.video is None
+        assert voiceover.calls == []
+        assert tts.calls == []
+        assert renderer.calls == []
+
+    async def test_voiceover_failure_degrades_to_none(self, tmp_path: Path) -> None:
+        voiceover = FakeVoiceoverClient()
+        voiceover.fail_with(VoiceoverGeneratorError("ollama down"))
+        tts = FakeTTSClient()
+        renderer = FakeVideoRenderer()
+
+        (result, _) = await _run(
+            tmp_path,
+            voiceover_client=voiceover,
+            tts_client=tts,
+            video_renderer=renderer,
+        )
+
+        assert result.video is None
+        assert tts.calls == []
+        assert renderer.calls == []
+        assert len(result.images) == 3
+
+    async def test_tts_failure_degrades_to_none(self, tmp_path: Path) -> None:
+        voiceover = FakeVoiceoverClient()
+        tts = FakeTTSClient()
+        tts.fail_with(TTSError("microsoft down"))
+        renderer = FakeVideoRenderer()
+
+        (result, _) = await _run(
+            tmp_path,
+            voiceover_client=voiceover,
+            tts_client=tts,
+            video_renderer=renderer,
+        )
+
+        assert result.video is None
+        assert renderer.calls == []
+
+    async def test_video_render_failure_degrades_to_none(self, tmp_path: Path) -> None:
+        voiceover = FakeVoiceoverClient()
+        tts = FakeTTSClient()
+        renderer = FakeVideoRenderer()
+        renderer.fail_with(VideoRenderError("ffmpeg crashed"))
+
+        (result, _) = await _run(
+            tmp_path,
+            voiceover_client=voiceover,
+            tts_client=tts,
+            video_renderer=renderer,
+        )
+
+        assert result.video is None
+        assert len(result.images) == 3
+
+    async def test_video_records_voice_and_model(self, tmp_path: Path) -> None:
+        voiceover = FakeVoiceoverClient(model="phi4:14b")
+        tts = FakeTTSClient(voice="en-GB-RyanNeural")
+        renderer = FakeVideoRenderer()
+
+        (result, _) = await _run(
+            tmp_path,
+            voiceover_client=voiceover,
+            tts_client=tts,
+            video_renderer=renderer,
+        )
+
+        assert result.video is not None
+        assert result.video.voice == "en-GB-RyanNeural"
+        assert result.video.script_model == "phi4:14b"
+
+    async def test_video_requires_all_three_clients(self, tmp_path: Path) -> None:
+        voiceover = FakeVoiceoverClient()
+        tts = FakeTTSClient()
+
+        (result, _) = await _run(
+            tmp_path,
+            voiceover_client=voiceover,
+            tts_client=tts,
+            video_renderer=None,
+        )
+
+        assert result.video is None
+        assert voiceover.calls == []
+        assert tts.calls == []

@@ -20,6 +20,9 @@ from .outbox_writer import (
 from .schemas.brand import Brand
 from .schemas.theme import Theme
 from .theme_loader import load_theme
+from .tts_client import TTSError, TTSResult
+from .video_renderer import VideoRenderError, VideoRenderResult
+from .voiceover_generator import VoiceoverGeneratorError, VoiceoverScript
 from .workflow_template import build_workflow, load_workflow_template
 
 logger = logging.getLogger(__name__)
@@ -43,10 +46,48 @@ class CaptionClient(Protocol):
     async def generate(self, brand: Brand, theme: Theme) -> CaptionSet: ...
 
 
+class VoiceoverClient(Protocol):
+    model: str
+
+    async def generate(self, brand: Brand, theme: Theme) -> VoiceoverScript: ...
+
+
+class TTSClient(Protocol):
+    voice: str
+
+    async def synthesize(self, text: str, output_path: Path) -> TTSResult: ...
+
+
+class VideoRenderer(Protocol):
+    async def render(
+        self,
+        *,
+        image_path: Path,
+        audio_path: Path,
+        output_path: Path,
+        duration_seconds: float,
+    ) -> VideoRenderResult: ...
+
+
+VIDEO_ASPECT_RATIO: str = "9x16"
+WORDS_PER_SECOND: float = 2.5
+VIDEO_TAIL_BUFFER_SECONDS: float = 1.0
+
+
+@dataclass(frozen=True)
+class VideoWriteResult:
+    video_path: Path
+    audio_path: Path
+    duration_seconds: float
+    voice: str
+    script_model: str
+
+
 @dataclass(frozen=True)
 class RenderResult:
     images: list[OutboxWriteResult]
     captions: CaptionsWriteResult | None
+    video: VideoWriteResult | None = None
 
 
 async def render_theme(
@@ -55,6 +96,9 @@ async def render_theme(
     theme_slug: str,
     client: RenderClient,
     caption_client: CaptionClient | None = None,
+    voiceover_client: VoiceoverClient | None = None,
+    tts_client: TTSClient | None = None,
+    video_renderer: VideoRenderer | None = None,
     aspect_ratio: str | None = None,
     brands_dir: Path = DEFAULT_BRANDS_DIR,
     themes_dir: Path = DEFAULT_THEMES_DIR,
@@ -113,7 +157,93 @@ async def render_theme(
             prompt_hash=brief.prompt_hash,
         )
 
-    return RenderResult(images=images, captions=captions)
+    video: VideoWriteResult | None = None
+    if voiceover_client is not None and tts_client is not None and video_renderer is not None:
+        image_9x16 = _find_aspect(images, VIDEO_ASPECT_RATIO)
+        if image_9x16 is not None:
+            video = await _generate_and_render_video(
+                voiceover_client=voiceover_client,
+                tts_client=tts_client,
+                video_renderer=video_renderer,
+                brand=brand,
+                theme=theme,
+                image_9x16=image_9x16,
+            )
+
+    return RenderResult(images=images, captions=captions, video=video)
+
+
+def _find_aspect(images: list[OutboxWriteResult], aspect: str) -> OutboxWriteResult | None:
+    needle = f"_{aspect}_"
+    for img in images:
+        if needle in img.image_path.name:
+            return img
+    return None
+
+
+async def _generate_and_render_video(
+    *,
+    voiceover_client: VoiceoverClient,
+    tts_client: TTSClient,
+    video_renderer: VideoRenderer,
+    brand: Brand,
+    theme: Theme,
+    image_9x16: OutboxWriteResult,
+) -> VideoWriteResult | None:
+    try:
+        script = await voiceover_client.generate(brand, theme)
+    except VoiceoverGeneratorError as exc:
+        logger.warning(
+            "voiceover generation failed brand=%s theme=%s err=%s",
+            brand.key, theme.slug, exc,
+        )
+        return None
+
+    base = image_9x16.image_path.with_suffix("")
+    audio_path = base.with_name(f"{base.name}.mp3")
+    video_path = base.with_name(f"{base.name}.mp4")
+
+    try:
+        tts_result = await tts_client.synthesize(script.text, audio_path)
+    except TTSError as exc:
+        logger.warning(
+            "tts synthesis failed brand=%s theme=%s err=%s",
+            brand.key, theme.slug, exc,
+        )
+        return None
+
+    duration_seconds = _estimate_duration_seconds(script.text)
+
+    try:
+        render_result = await video_renderer.render(
+            image_path=image_9x16.image_path,
+            audio_path=tts_result.audio_path,
+            output_path=video_path,
+            duration_seconds=duration_seconds,
+        )
+    except VideoRenderError as exc:
+        logger.warning(
+            "video render failed brand=%s theme=%s err=%s",
+            brand.key, theme.slug, exc,
+        )
+        return None
+
+    logger.info(
+        "video written brand=%s theme=%s duration=%.2fs -> %s",
+        brand.key, theme.slug, render_result.duration_seconds, render_result.video_path,
+    )
+    return VideoWriteResult(
+        video_path=render_result.video_path,
+        audio_path=tts_result.audio_path,
+        duration_seconds=render_result.duration_seconds,
+        voice=tts_result.voice,
+        script_model=script.model,
+    )
+
+
+def _estimate_duration_seconds(text: str) -> float:
+    words = max(1, len(text.split()))
+    return round(words / WORDS_PER_SECOND + VIDEO_TAIL_BUFFER_SECONDS, 2)
 
 
 async def _generate_and_persist_captions(

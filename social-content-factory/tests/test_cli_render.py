@@ -47,6 +47,7 @@ class TestRenderCommand:
         assert "--theme" in result.stdout
         assert "--aspect-ratio" in result.stdout
         assert "--no-captions" in result.stdout
+        assert "--video" in result.stdout
 
     def test_missing_brand_exits_nonzero(self, configured_env: None) -> None:
         result = runner.invoke(cli.app, ["render", "--theme", "weekly-build"])
@@ -163,3 +164,61 @@ class TestRenderCommand:
         assert result.exit_code == 0, result.stderr
         kwargs = mock_render.await_args.kwargs
         assert kwargs["outbox_root"] == tmp_path / "custom-outbox"
+
+
+    def test_default_skips_video_clients(
+        self, configured_env: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mock_render = AsyncMock(return_value=FAKE_RESULT)
+        monkeypatch.setattr(pipeline, "render_theme", mock_render)
+
+        result = runner.invoke(
+            cli.app, ["render", "--brand", "personal", "--theme", "weekly-build"]
+        )
+
+        assert result.exit_code == 0, result.stderr
+        kwargs = mock_render.await_args.kwargs
+        assert kwargs["voiceover_client"] is None
+        assert kwargs["tts_client"] is None
+        assert kwargs["video_renderer"] is None
+
+    def test_video_flag_passes_all_three_clients(
+        self, configured_env: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mock_render = AsyncMock(return_value=FAKE_RESULT)
+        monkeypatch.setattr(pipeline, "render_theme", mock_render)
+
+        result = runner.invoke(
+            cli.app,
+            ["render", "--brand", "personal", "--theme", "weekly-build", "--video"],
+        )
+
+        assert result.exit_code == 0, result.stderr
+        kwargs = mock_render.await_args.kwargs
+        assert kwargs["voiceover_client"] is not None
+        assert kwargs["tts_client"] is not None
+        assert kwargs["video_renderer"] is not None
+
+    def test_echoes_video_path_when_present(
+        self, configured_env: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from social_content_factory.pipeline import VideoWriteResult
+
+        video = VideoWriteResult(
+            video_path=Path("/tmp/fake.mp4"),
+            audio_path=Path("/tmp/fake.mp3"),
+            duration_seconds=8.0,
+            voice="en-GB-RyanNeural",
+            script_model="phi4:14b",
+        )
+        result_with_video = RenderResult(images=[FAKE_IMAGE], captions=None, video=video)
+        monkeypatch.setattr(
+            pipeline, "render_theme", AsyncMock(return_value=result_with_video)
+        )
+
+        result = runner.invoke(
+            cli.app,
+            ["render", "--brand", "personal", "--theme", "weekly-build", "--video"],
+        )
+
+        assert "/tmp/fake.mp4" in result.stdout
