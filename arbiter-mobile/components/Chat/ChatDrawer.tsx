@@ -119,12 +119,31 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
   const startHeight = useSharedValue(collapsedHeight);
   const translateY = useSharedValue(visible ? 0 : expandedHeight + 200);
 
+  // Animate the drawer height only when the operator toggles expansion.
+  // Dimension-driven changes to expandedHeight (iPad multitasking /
+  // Stage Manager resize) are applied directly below so the drawer
+  // tracks the window in real time without a 220ms tween fighting each
+  // resize tick.
   useEffect(() => {
     height.value = withTiming(state.expanded ? expandedHeight : collapsedHeight, {
       duration: 220,
     });
     onExpansionChange?.(state.expanded);
-  }, [state.expanded, expandedHeight, collapsedHeight, height, onExpansionChange]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.expanded]);
+
+  // Track the latest target heights without re-firing the animation
+  // when iPadOS reports a new window size mid-drag.
+  const lastExpandedHeight = useRef(expandedHeight);
+  const lastCollapsedHeight = useRef(collapsedHeight);
+  useEffect(() => {
+    const expandedChanged = expandedHeight !== lastExpandedHeight.current;
+    const collapsedChanged = collapsedHeight !== lastCollapsedHeight.current;
+    lastExpandedHeight.current = expandedHeight;
+    lastCollapsedHeight.current = collapsedHeight;
+    if (!expandedChanged && !collapsedChanged) return;
+    height.value = state.expanded ? expandedHeight : collapsedHeight;
+  }, [expandedHeight, collapsedHeight, state.expanded, height]);
 
   useEffect(() => {
     translateY.value = withTiming(visible ? 0 : expandedHeight + 200, { duration: 260 });

@@ -32,8 +32,14 @@ const DRAWER_COLLAPSED = 84;
 // asked for a small, focused panel — kept at 20% so the orb stays the
 // dominant element.
 const DRAWER_EXPANDED = 0.20;
+// Floor on the expanded drawer height so an iPad in Stage Manager
+// resized to a short window can't collapse the chat to a sliver.
+const DRAWER_EXPANDED_MIN_PX = 220;
 // Tablet split-layout breakpoint. iPad mini portrait = 768 — anything
-// at or above that gets the right-rail PanelFeed.
+// at or above that gets the right-rail PanelFeed. Computed off the
+// live useWindowDimensions value so iPad multitasking (Slide Over /
+// Split View / Stage Manager) flips between single-pane and split as
+// the window is resized.
 const TABLET_BREAKPOINT = 768;
 // Cap on retained panel-feed items so the right rail can't grow
 // unbounded over a long session.
@@ -294,7 +300,7 @@ export default function Home() {
         pendingInput={pendingTranscript}
         expandSignal={expandSignal}
         collapsedHeight={DRAWER_COLLAPSED}
-        expandedHeight={height * DRAWER_EXPANDED}
+        expandedHeight={Math.max(DRAWER_EXPANDED_MIN_PX, height * DRAWER_EXPANDED)}
         onExpansionChange={onExpansionChange}
         onClose={onChatClose}
         onSendingChange={setChatSending}
@@ -373,8 +379,11 @@ const styles = StyleSheet.create({
     right: 0,
     flexDirection: 'row',
     justifyContent: 'center',
-    gap: 12,
-    paddingHorizontal: 16,
+    // Gap + paddings tuned so 3 buttons fit a 320pt iPad Slide Over
+    // window (84*3 + 10*2 + 12*2 = 296 ≤ 320) without altering the
+    // iPhone cluster width.
+    gap: 10,
+    paddingHorizontal: 12,
   },
   dockBtn: {
     flexDirection: 'column',
@@ -382,8 +391,8 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: 6,
     paddingVertical: 10,
-    paddingHorizontal: 14,
-    minWidth: 96,
+    paddingHorizontal: 12,
+    minWidth: 84,
     borderRadius: 6,
     borderWidth: 1,
     borderColor: 'rgba(32, 244, 255, 0.22)',
