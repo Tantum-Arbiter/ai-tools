@@ -11,6 +11,12 @@ import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-na
 import { useRouter } from 'expo-router';
 import { useIsFocused } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import Animated, {
+  useAnimatedStyle,
+  useSharedValue,
+  withTiming,
+  Easing,
+} from 'react-native-reanimated';
 import {
   Activity,
   AlertTriangle,
@@ -107,6 +113,54 @@ export default function Home() {
     return () => clearTimeout(t);
   }, [pendingTranscript]);
 
+  // Focus mode: when a shared-content panel (currently just the
+  // settings overlay) is up on a phone, the orb shrinks and tucks into
+  // the bottom-right corner so the panel reads as the primary surface
+  // and the dock hides. Tablets keep the split layout — the orb is
+  // already in its own column, no transition needed.
+  const focusActive = settings.isOpen && !isTablet;
+  const focusProgress = useSharedValue(0);
+  useEffect(() => {
+    focusProgress.value = withTiming(focusActive ? 1 : 0, {
+      duration: 320,
+      easing: Easing.bezier(0.22, 1, 0.36, 1),
+    });
+  }, [focusActive, focusProgress]);
+
+  // Target geometry for the focused orb. Scale is applied via
+  // transform (Skia canvas internal size unchanged so the animation
+  // stays on the UI thread) and translation moves the centre of the
+  // orb wrapper from its resting point to the bottom-right corner.
+  const FOCUS_SCALE = 0.34;
+  const FOCUS_MARGIN_RIGHT = 20;
+  const FOCUS_MARGIN_BOTTOM = 24;
+  const focusedSize = orbSize * FOCUS_SCALE;
+  const restingCenterX = chatColumnWidth / 2;
+  const restingCenterY = height / 2;
+  const targetCenterX = width - FOCUS_MARGIN_RIGHT - focusedSize / 2;
+  const targetCenterY = height - insets.bottom - FOCUS_MARGIN_BOTTOM - focusedSize / 2;
+  const focusDx = targetCenterX - restingCenterX;
+  const focusDy = targetCenterY - restingCenterY;
+
+  const orbAnimStyle = useAnimatedStyle(() => {
+    const p = focusProgress.value;
+    return {
+      transform: [
+        { translateX: focusDx * p },
+        { translateY: focusDy * p },
+        { scale: 1 - (1 - FOCUS_SCALE) * p },
+      ],
+    };
+  });
+
+  const dockAnimStyle = useAnimatedStyle(() => {
+    const p = focusProgress.value;
+    return {
+      opacity: 1 - p,
+      transform: [{ translateY: 40 * p }],
+    };
+  });
+
   // The chat is a small (~20%) floating card so the orb stays the
   // dominant visual. We only track expansion to keep state in sync; we
   // deliberately do NOT pause or fade the orb here — doing so used to
@@ -181,15 +235,17 @@ export default function Home() {
         style={[styles.orbWrap, { width: chatColumnWidth, height }]}
         pointerEvents="box-none"
       >
-        <Pressable
-          onPress={onOrbPress}
-          accessibilityRole="button"
-          accessibilityLabel="Open chat with Arbiter"
-          hitSlop={20}
-          style={{ width: orbSize, height: orbSize }}
-        >
-          <Orb size={orbSize} state={orbState} paused={!isFocused} />
-        </Pressable>
+        <Animated.View style={orbAnimStyle}>
+          <Pressable
+            onPress={onOrbPress}
+            accessibilityRole="button"
+            accessibilityLabel="Open chat with Arbiter"
+            hitSlop={20}
+            style={{ width: orbSize, height: orbSize }}
+          >
+            <Orb size={orbSize} state={orbState} paused={!isFocused} />
+          </Pressable>
+        </Animated.View>
       </View>
 
       {isTablet && (
@@ -273,18 +329,19 @@ export default function Home() {
       {/* Dock stays mounted whether the chat is open or not — the chat
           panel is a small floating card so the dock remains visible and
           tappable underneath it. Only hidden while the operator is
-          actively dictating with the chat closed, to keep that surface
-          minimal. */}
+          actively dictating with the chat closed, OR while a focused
+          shared-content panel (settings overlay on phones) is up. */}
       {!(voiceActive && !chatVisible) && (
-        <View
+        <Animated.View
           style={[
             styles.dock,
             {
               bottom: insets.bottom + 24,
               right: isTablet ? width - chatColumnWidth : 0,
             },
+            dockAnimStyle,
           ]}
-          pointerEvents="box-none"
+          pointerEvents={focusActive ? 'none' : 'box-none'}
         >
           <DockButton
             label="Business"
@@ -301,18 +358,19 @@ export default function Home() {
             icon={<Activity size={20} color="#20f4ff" strokeWidth={2} />}
             onPress={() => router.push('/uptime')}
           />
-        </View>
+        </Animated.View>
       )}
 
-      {/* Notification-shaped card pinned to the right rail, slightly
-          below the top bar (insets.top + 8 padding + 48 button + 12
-          breathing room). Mirrors the website's .notif-banner.warning
-          (style.css ~line 2372) — 3px amber left border, tinted
-          background, source label + message stack. */}
+      {/* Notification-shaped card pinned to the right rail. Sits well
+          below the top bar so a tap doesn't fight the buttons.
+          Mirrors the website's .notif-banner.warning (style.css ~2372)
+          — 3px amber left border, tinted background, source label +
+          message stack. Tap opens settings (and, on phones, kicks the
+          orb into the bottom-right focus state). */}
       {status === 'unconfigured' && !voiceActive && (
         <Pressable
           onPress={settings.open}
-          style={[styles.notifBanner, { top: insets.top + 68 }]}
+          style={[styles.notifBanner, { top: insets.top + 120 }]}
           accessibilityRole="button"
           accessibilityLabel="Configure host URL and API key"
         >
