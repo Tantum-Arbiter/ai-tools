@@ -159,9 +159,21 @@ export default function Home() {
         ? 'thinking'
         : 'idle';
 
+  // Anchor the radial lighting to the orb on tablets so it tracks the
+  // orb into the left column instead of staying glued to viewport
+  // centre during iPad landscape / Stage Manager. On phones the orb
+  // sits dead-centre so the default centre is correct.
+  const lightingCenterX = isTablet ? chatColumnWidth / 2 : width / 2;
+  const lightingCenterY = height / 2;
+
   return (
     <View style={styles.root}>
-      <TronBackground width={width} height={height} />
+      <TronBackground
+        width={width}
+        height={height}
+        centerX={lightingCenterX}
+        centerY={lightingCenterY}
+      />
 
       <View
         style={[styles.orbWrap, { width: chatColumnWidth, height }]}

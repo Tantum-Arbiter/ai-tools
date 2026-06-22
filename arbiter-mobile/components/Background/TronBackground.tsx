@@ -25,6 +25,15 @@ import Svg, {
 export interface TronBackgroundProps {
   width: number;
   height: number;
+  /**
+   * Optional pixel-space centre for the radial fade-mask and the soft
+   * blue illumination. Defaults to (width/2, height/2). The home
+   * screen overrides this on tablets so the lighting follows the orb
+   * into the left column instead of staying glued to the middle of an
+   * iPad landscape window. Values are clamped into the visible area.
+   */
+  centerX?: number;
+  centerY?: number;
 }
 
 const FINE_STEP = 30;
@@ -32,11 +41,19 @@ const MAJOR_STEP = 150;
 const FINE_STROKE = 'rgba(0, 240, 255, 0.055)';
 const MAJOR_STROKE = 'rgba(0, 240, 255, 0.10)';
 
-const TronBackgroundImpl: React.FC<TronBackgroundProps> = ({ width, height }) => {
-  const cx = width * 0.5;
-  const cy = height * 0.5;
-  const rx = width * 0.55;
-  const ry = height * 0.55;
+const TronBackgroundImpl: React.FC<TronBackgroundProps> = ({
+  width,
+  height,
+  centerX,
+  centerY,
+}) => {
+  const cx = clamp(centerX ?? width * 0.5, 0, width);
+  const cy = clamp(centerY ?? height * 0.5, 0, height);
+  // Radii scale off the larger axis so an off-centre orb on a wide
+  // landscape iPad still throws light across most of the surface, not
+  // a small puddle around the column centre.
+  const rx = Math.max(width, height) * 0.55;
+  const ry = rx;
 
   return (
     <Svg
@@ -102,6 +119,10 @@ const TronBackgroundImpl: React.FC<TronBackgroundProps> = ({ width, height }) =>
     </Svg>
   );
 };
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
 
 export const TronBackground = React.memo(TronBackgroundImpl);
 
