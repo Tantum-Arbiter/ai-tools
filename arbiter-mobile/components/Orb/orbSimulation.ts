@@ -21,8 +21,12 @@ export const STATE_LABEL: Readonly<Record<OrbState, string>> = {
   speaking:  'SPEAKING',
 };
 
+// Particle angular-drift multiplier per state. Bumped ~1.8x from the
+// web-port defaults so the nebula reads as livelier on mobile (the
+// adaptive 15fps idle / 24fps active throttling made the original
+// values look almost frozen).
 const SPEED_MULTIPLIER: Readonly<Record<OrbState, number>> = {
-  idle: 2.5, listening: 4.5, thinking: 6, speaking: 5.5,
+  idle: 4.5, listening: 8, thinking: 11, speaking: 10,
 };
 
 // Smoothing constants (per-frame at ~60 fps; matches jarvis.js):

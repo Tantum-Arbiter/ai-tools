@@ -65,7 +65,7 @@ const styles = StyleSheet.create({
   title: {
     color: HUD_COLORS.cyan,
     fontFamily: HUD_FONTS.mono,
-    fontSize: 11,
+    fontSize: 12,
     letterSpacing: 1.4,
     textTransform: 'uppercase',
   },

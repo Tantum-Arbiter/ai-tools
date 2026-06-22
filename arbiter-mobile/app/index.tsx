@@ -8,7 +8,8 @@
 
 import React, { useCallback, useEffect, useState } from 'react';
 import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
-import { Link, useRouter } from 'expo-router';
+import { useRouter } from 'expo-router';
+import { useIsFocused } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   Activity,
@@ -22,6 +23,7 @@ import { Orb } from '../components/Orb/Orb';
 import { ChatDrawer } from '../components/Chat/ChatDrawer';
 import { TronBackground } from '../components/Background/TronBackground';
 import { useApi, useCredentials } from '../lib/credentials';
+import { useSettingsOverlay } from '../lib/settingsOverlay';
 import { useVoiceSession } from '../components/Voice/useVoiceSession';
 
 const DRAWER_COLLAPSED = 84;
@@ -36,6 +38,11 @@ export default function Home() {
   const api = useApi();
   const { status } = useCredentials();
   const router = useRouter();
+  const settings = useSettingsOverlay();
+  // Pause the Skia orb whenever the home screen is not the focused
+  // route in the stack. Cuts CPU/GPU to ~0 while the operator is on
+  // Uptime/Business/Orchestration — single biggest thermal win.
+  const isFocused = useIsFocused();
 
   const orbSize = Math.min(width, height) * 0.62;
   const [drawerExpanded, setDrawerExpanded] = useState(false);
@@ -78,24 +85,33 @@ export default function Home() {
     setDrawerExpanded(expanded);
   };
 
-  // Orb tap is the primary voice affordance: opens the chat and toggles
-  // the mic. The text input never triggers voice (that was the earlier
-  // bug — focusing the field auto-started dictation); the mic now only
-  // fires from an explicit mic gesture (orb tap, topbar mic, or the
-  // inline mic in the chat header).
+  // Orb tap is the primary voice affordance. Blue → green: opens the
+  // chat and starts dictation. Green → blue: stops dictation AND
+  // closes the chat entirely so the orb returns to a clean idle
+  // surface (operator request). The text input never triggers voice
+  // (that was the earlier bug — focusing the field auto-started
+  // dictation); the mic now only fires from an explicit mic gesture
+  // (orb tap or topbar mic).
   const onOrbPress = () => {
+    if (voiceActive || listeningOverride) {
+      voice.stop();
+      setListeningOverride(false);
+      setChatVisible(false);
+      return;
+    }
     setChatVisible(true);
     setExpandSignal((n) => n + 1);
-    onMicToggle();
+    setListeningOverride(true);
+    void voice.start();
   };
 
   const onChatClose = () => {
     setChatVisible(false);
   };
 
-  // Mic toggle — shared by the topbar button and the inline button in
-  // the chat header. Voice never closes the chat; if the operator wants
-  // a heads-up dictation view they can dismiss the chat first.
+  // Mic toggle — used by the topbar mic. Does NOT touch chat
+  // visibility (the topbar mic is a heads-up dictation affordance, not
+  // a chat opener); use the orb tap if you want chat + voice together.
   const onMicToggle = () => {
     if (voiceActive || listeningOverride) {
       voice.stop();
@@ -130,7 +146,7 @@ export default function Home() {
           hitSlop={20}
           style={{ width: orbSize, height: orbSize }}
         >
-          <Orb size={orbSize} state={orbState} />
+          <Orb size={orbSize} state={orbState} paused={!isFocused} />
         </Pressable>
       </View>
 
@@ -148,16 +164,15 @@ export default function Home() {
             <MicOff size={18} color="#bfe6ff" strokeWidth={2} />
           )}
         </Pressable>
-        <Link href="/settings" asChild>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Open settings"
-            hitSlop={12}
-            style={styles.iconBtn}
-          >
-            <SettingsIcon size={18} color="#bfe6ff" strokeWidth={2} />
-          </Pressable>
-        </Link>
+        <Pressable
+          onPress={settings.open}
+          accessibilityRole="button"
+          accessibilityLabel="Open settings"
+          hitSlop={12}
+          style={styles.iconBtn}
+        >
+          <SettingsIcon size={18} color="#bfe6ff" strokeWidth={2} />
+        </Pressable>
       </View>
 
       {voiceActive && (
@@ -217,7 +232,7 @@ export default function Home() {
 
       {status === 'unconfigured' && !voiceActive && (
         <Pressable
-          onPress={() => router.push('/settings')}
+          onPress={settings.open}
           style={[styles.unconfiguredBanner, { top: insets.top + 56 }]}
           accessibilityRole="button"
           accessibilityLabel="Configure host URL and API key"
@@ -324,7 +339,7 @@ const styles = StyleSheet.create({
   },
   dockBtnLabel: {
     color: '#bfe6ff',
-    fontSize: 12,
+    fontSize: 13,
     letterSpacing: 0.5,
   },
   unconfiguredBanner: {
@@ -341,7 +356,7 @@ const styles = StyleSheet.create({
   },
   unconfiguredText: {
     color: '#ffd980',
-    fontSize: 13,
+    fontSize: 14,
     letterSpacing: 0.3,
     textAlign: 'center',
   },
@@ -363,7 +378,7 @@ const styles = StyleSheet.create({
   },
   voiceBannerText: {
     color: '#e8f4ff',
-    fontSize: 13,
+    fontSize: 14,
     letterSpacing: 0.3,
     textAlign: 'center',
   },

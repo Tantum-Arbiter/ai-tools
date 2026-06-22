@@ -8,6 +8,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useApi, useCredentials } from '../lib/credentials';
+import { useSettingsOverlay } from '../lib/settingsOverlay';
 import {
   HudScreen,
   Panel,
@@ -56,6 +57,7 @@ function worstStatus(items: Array<{ status?: string }>): string {
 export default function Uptime() {
   const router = useRouter();
   const api = useApi();
+  const settings = useSettingsOverlay();
   const { status: credStatus } = useCredentials();
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [gcp, setGcp] = useState<GcpSummary | null>(null);
@@ -114,7 +116,7 @@ export default function Uptime() {
           </Text>
           <Pressable
             style={styles.settingsBtn}
-            onPress={() => router.push('/settings')}
+            onPress={settings.open}
             accessibilityRole="button"
           >
             <Text style={styles.settingsBtnText}>Open Settings</Text>
@@ -204,8 +206,8 @@ export default function Uptime() {
 }
 
 const styles = StyleSheet.create({
-  errorText: { color: '#ffb0b0', fontSize: 13 },
-  hint: { color: HUD_COLORS.textMuted, fontSize: 13, lineHeight: 18 },
+  errorText: { color: '#ffb0b0', fontSize: 14 },
+  hint: { color: HUD_COLORS.textMuted, fontSize: 14, lineHeight: 20 },
   settingsBtn: {
     marginTop: 12,
     paddingVertical: 8,
@@ -218,7 +220,7 @@ const styles = StyleSheet.create({
   },
   settingsBtnText: {
     color: HUD_COLORS.cyan,
-    fontSize: 11,
+    fontSize: 12,
     letterSpacing: 0.8,
   },
 });

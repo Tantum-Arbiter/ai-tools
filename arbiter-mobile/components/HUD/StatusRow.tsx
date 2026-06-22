@@ -73,20 +73,20 @@ const styles = StyleSheet.create({
   dot: {},
   label: {
     color: HUD_COLORS.textBright,
-    fontSize: 13,
+    fontSize: 14,
     flexShrink: 1,
     flex: 1,
   },
   note: {
     color: HUD_COLORS.textDim,
-    fontSize: 11,
+    fontSize: 12,
     fontFamily: HUD_FONTS.mono,
     letterSpacing: 0.5,
     textTransform: 'uppercase',
   },
   value: {
     color: HUD_COLORS.cyan,
-    fontSize: 12,
+    fontSize: 13,
     fontFamily: HUD_FONTS.mono,
     letterSpacing: 0.5,
   },

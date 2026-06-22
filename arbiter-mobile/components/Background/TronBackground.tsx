@@ -3,7 +3,10 @@
 // arbiter-mission-control/static/style.css around line 40-66).
 //
 // Static — no animation, no per-frame work. Drawn once with SVG so it
-// composites cheaply alongside the Skia orb canvas above it.
+// composites cheaply alongside the Skia orb canvas above it. Memoised
+// because Home re-renders on every voice interim-transcript / chat
+// state tick and re-reconciling 15+ SVG nodes (patterns, masks,
+// gradients) is wasted work when nothing visible changes.
 
 import React from 'react';
 import { StyleSheet } from 'react-native';
@@ -29,7 +32,7 @@ const MAJOR_STEP = 150;
 const FINE_STROKE = 'rgba(0, 240, 255, 0.055)';
 const MAJOR_STROKE = 'rgba(0, 240, 255, 0.10)';
 
-export const TronBackground: React.FC<TronBackgroundProps> = ({ width, height }) => {
+const TronBackgroundImpl: React.FC<TronBackgroundProps> = ({ width, height }) => {
   const cx = width * 0.5;
   const cy = height * 0.5;
   const rx = width * 0.55;
@@ -99,5 +102,7 @@ export const TronBackground: React.FC<TronBackgroundProps> = ({ width, height })
     </Svg>
   );
 };
+
+export const TronBackground = React.memo(TronBackgroundImpl);
 
 export default TronBackground;

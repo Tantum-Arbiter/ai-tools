@@ -14,6 +14,7 @@ import {
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useApi, useCredentials } from '../lib/credentials';
+import { useSettingsOverlay } from '../lib/settingsOverlay';
 import {
   HudScreen,
   Panel,
@@ -39,6 +40,7 @@ interface AgentRow {
 export default function Orchestration() {
   const router = useRouter();
   const api = useApi();
+  const settings = useSettingsOverlay();
   const { status: credStatus } = useCredentials();
   const [tab, setTab] = useState<Tab>('ceo');
   const [ceo, setCeo] = useState<AgentRow[]>([]);
@@ -111,7 +113,7 @@ export default function Orchestration() {
           </Text>
           <Pressable
             style={styles.settingsBtn}
-            onPress={() => router.push('/settings')}
+            onPress={settings.open}
             accessibilityRole="button"
           >
             <Text style={styles.settingsBtnText}>Open Settings</Text>
@@ -206,31 +208,31 @@ const styles = StyleSheet.create({
   },
   segText: {
     color: HUD_COLORS.textDim,
-    fontSize: 11,
+    fontSize: 12,
     fontFamily: HUD_FONTS.mono,
     letterSpacing: 1.4,
     textTransform: 'uppercase',
   },
   segTextActive: { color: HUD_COLORS.cyan },
   agentRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  emoji: { fontSize: 20 },
-  agentName: { color: HUD_COLORS.textBright, fontSize: 14 },
+  emoji: { fontSize: 22 },
+  agentName: { color: HUD_COLORS.textBright, fontSize: 15 },
   agentRole: {
     color: HUD_COLORS.textDim,
-    fontSize: 11,
+    fontSize: 12,
     marginTop: 2,
     fontFamily: HUD_FONTS.mono,
     letterSpacing: 0.5,
   },
   agentStatus: {
     color: HUD_COLORS.cyan,
-    fontSize: 10,
+    fontSize: 11,
     fontFamily: HUD_FONTS.mono,
     letterSpacing: 1.2,
   },
-  empty: { color: HUD_COLORS.textMuted, fontSize: 13, textAlign: 'center' },
-  errorText: { color: '#ffb0b0', fontSize: 13 },
-  hint: { color: HUD_COLORS.textMuted, fontSize: 13, lineHeight: 18 },
+  empty: { color: HUD_COLORS.textMuted, fontSize: 14, textAlign: 'center' },
+  errorText: { color: '#ffb0b0', fontSize: 14 },
+  hint: { color: HUD_COLORS.textMuted, fontSize: 14, lineHeight: 20 },
   settingsBtn: {
     marginTop: 12,
     paddingVertical: 8,
@@ -244,7 +246,7 @@ const styles = StyleSheet.create({
   settingsBtnText: {
     color: HUD_COLORS.cyan,
     fontFamily: HUD_FONTS.mono,
-    fontSize: 11,
+    fontSize: 12,
     letterSpacing: 0.8,
   },
 });

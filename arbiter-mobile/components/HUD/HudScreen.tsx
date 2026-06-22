@@ -1,7 +1,10 @@
 // Shared chrome for HUD view screens: back button, mono uppercase title,
-// optional refresh affordance, top safe-area handling, and the dark Tron
-// background. Centralises the boilerplate that business-summary,
-// uptime, and orchestration were all copy-pasting.
+// optional refresh affordance, bottom safe-area handling, and the dark
+// Tron background. Centralises the boilerplate that business-summary,
+// uptime, and orchestration were all copy-pasting. The chrome strip
+// sits at the bottom of the screen so the operator's thumb can reach
+// back / refresh without crossing the viewport — the title doubles as
+// a footer label.
 
 import React from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
@@ -14,7 +17,7 @@ export interface HudScreenProps {
   title: string;
   onBack: () => void;
   onRefresh?: () => void;
-  /** Renders below the title in the header strip (e.g. segmented control). */
+  /** Renders directly above the footer chrome (e.g. segmented control). */
   headerExtra?: React.ReactNode;
   /** When true, content is rendered without the inner ScrollView so the
    *  caller can compose its own. Defaults to false. */
@@ -34,7 +37,20 @@ export const HudScreen: React.FC<HudScreenProps> = ({
   return (
     <View style={styles.root}>
       <Stack.Screen options={{ headerShown: false }} />
-      <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
+      {scroll ? (
+        <ScrollView
+          contentContainerStyle={[
+            styles.content,
+            { paddingTop: insets.top + 14, paddingBottom: 24 },
+          ]}
+        >
+          {children}
+        </ScrollView>
+      ) : (
+        <View style={[styles.flex, { paddingTop: insets.top + 14 }]}>{children}</View>
+      )}
+      {headerExtra}
+      <View style={[styles.footer, { paddingBottom: insets.bottom + 10 }]}>
         <Pressable
           onPress={onBack}
           hitSlop={12}
@@ -42,7 +58,7 @@ export const HudScreen: React.FC<HudScreenProps> = ({
           accessibilityRole="button"
           accessibilityLabel="Back"
         >
-          <ArrowLeft size={18} color={HUD_COLORS.textMain} strokeWidth={2} />
+          <ArrowLeft size={20} color={HUD_COLORS.textMain} strokeWidth={2} />
         </Pressable>
         <Text style={styles.title}>{title}</Text>
         {onRefresh ? (
@@ -53,40 +69,32 @@ export const HudScreen: React.FC<HudScreenProps> = ({
             accessibilityRole="button"
             accessibilityLabel="Refresh"
           >
-            <RefreshCw size={18} color={HUD_COLORS.textMain} strokeWidth={2} />
+            <RefreshCw size={20} color={HUD_COLORS.textMain} strokeWidth={2} />
           </Pressable>
         ) : (
           <View style={styles.iconBtnPlaceholder} />
         )}
       </View>
-      {headerExtra}
-      {scroll ? (
-        <ScrollView
-          contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + 24 }]}
-        >
-          {children}
-        </ScrollView>
-      ) : (
-        children
-      )}
     </View>
   );
 };
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: HUD_COLORS.bg },
-  header: {
+  flex: { flex: 1 },
+  footer: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 16,
-    paddingBottom: 10,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: 'rgba(32, 244, 255, 0.18)',
+    paddingTop: 10,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: 'rgba(32, 244, 255, 0.18)',
+    backgroundColor: 'rgba(8, 16, 28, 0.92)',
   },
   iconBtn: {
-    width: 36,
-    height: 36,
+    width: 40,
+    height: 40,
     alignItems: 'center',
     justifyContent: 'center',
     borderRadius: 4,
@@ -94,12 +102,12 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(0, 240, 255, 0.18)',
     backgroundColor: 'rgba(0, 240, 255, 0.04)',
   },
-  iconBtnPlaceholder: { width: 36, height: 36 },
+  iconBtnPlaceholder: { width: 40, height: 40 },
   title: {
     color: HUD_COLORS.textBright,
-    fontSize: 12,
+    fontSize: 15,
     fontFamily: HUD_FONTS.mono,
-    letterSpacing: 2.2,
+    letterSpacing: 2.4,
     textTransform: 'uppercase',
   },
   content: { padding: 14, gap: 14 },

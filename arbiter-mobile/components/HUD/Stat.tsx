@@ -88,21 +88,21 @@ const styles = StyleSheet.create({
   left: { alignItems: 'flex-start' },
   value: {
     fontFamily: HUD_FONTS.mono,
-    fontSize: 22,
+    fontSize: 24,
     fontWeight: '300',
     letterSpacing: 0.5,
   },
   label: {
     color: HUD_COLORS.textDim,
     fontFamily: HUD_FONTS.mono,
-    fontSize: 10,
+    fontSize: 11,
     letterSpacing: 1.1,
     textTransform: 'uppercase',
   },
   labelRowCenter: { flexDirection: 'row', alignItems: 'center', gap: 4, justifyContent: 'center' },
   labelRowLeft: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   deltaWrap: { flexDirection: 'row', alignItems: 'center', gap: 2 },
-  delta: { fontFamily: HUD_FONTS.mono, fontSize: 10, letterSpacing: 0.5 },
+  delta: { fontFamily: HUD_FONTS.mono, fontSize: 11, letterSpacing: 0.5 },
   grid: { flexDirection: 'row', flexWrap: 'wrap', gap: 14, justifyContent: 'space-around' },
 });
 

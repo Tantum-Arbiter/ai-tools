@@ -15,6 +15,11 @@ import * as SecureStore from 'expo-secure-store';
 import { createApi, type ArbiterApi, type Credentials } from './api';
 import { createCredentialStore } from './storage';
 
+// AFTER_FIRST_UNLOCK: entries are readable as soon as the user has
+// unlocked the device once after boot. The default (WHEN_UNLOCKED) is
+// stricter and can cause spurious "missing" reads on background launch.
+const KEYCHAIN_ACCESSIBLE = SecureStore.AFTER_FIRST_UNLOCK;
+
 export type CredentialStatus = 'loading' | 'ready' | 'unconfigured';
 
 interface CredentialsContextValue {
@@ -30,7 +35,13 @@ const Ctx = createContext<CredentialsContextValue | null>(null);
 export const CredentialsProvider: React.FC<{ children: React.ReactNode }> = ({
   children,
 }) => {
-  const store = useMemo(() => createCredentialStore(SecureStore), []);
+  const store = useMemo(
+    () =>
+      createCredentialStore(SecureStore, {
+        keychainAccessible: KEYCHAIN_ACCESSIBLE,
+      }),
+    [],
+  );
   const credsRef = useRef<Credentials | null>(null);
   const [credentials, setCredentialsState] = useState<Credentials | null>(null);
   const [status, setStatus] = useState<CredentialStatus>('loading');

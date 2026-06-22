@@ -21,11 +21,12 @@ import {
 import { OrbSimulation, type OrbState } from './orbSimulation';
 import { frameToDrawables, type OrbDrawSpec } from './frameToDrawables';
 
-// Target ~24fps. Anything higher fries phone GPUs running Skia + 100+
-// circles + a radial gradient + a blur mask. Tunable per device class
-// later (e.g. promote to 30fps on tablets) but 24fps is plenty for the
-// nebula/halo look — the human eye reads it as smooth.
-const TARGET_FRAME_MS = 1000 / 24;
+// Adaptive frame rate: idle runs at 15fps (the nebula barely moves, so
+// the eye can't tell), active states (listening/thinking/speaking) get
+// 24fps so voice reactivity feels live. Anything higher fries phone
+// GPUs running Skia + 80+ circles + a radial gradient + a blur mask.
+const IDLE_FRAME_MS = 1000 / 15;
+const ACTIVE_FRAME_MS = 1000 / 24;
 
 export interface OrbProps {
   /** Side length in DIPs. Component renders a square. */
@@ -33,7 +34,7 @@ export interface OrbProps {
   state?: OrbState;
   /** 0–1; clamped & smoothed inside the simulation. */
   audioLevel?: number;
-  /** Number of particles. Defaults tuned for mobile thermals (120). */
+  /** Number of particles. Defaults tuned for mobile thermals (80). */
   particleCount?: number;
   /** Stable seed so layout is identical across remounts and tests. */
   rngSeed?: number;
@@ -48,13 +49,17 @@ export interface OrbProps {
 /**
  * <Orb /> — animated nebula/voice ring driven by OrbSimulation.
  * Throttled to ~24fps via Reanimated's useFrameCallback (UI-thread
- * scheduled, not RAF) to keep mobile thermals under control.
+ * scheduled, not RAF) to keep mobile thermals under control. Memoised
+ * (see export below) because Home re-renders on every voice interim
+ * transcript / chat-state tick and we don't want to walk this JSX
+ * tree more often than necessary — internal `setSpec` calls still
+ * trigger local re-renders for the throttled animation steps.
  */
-export const Orb: React.FC<OrbProps> = ({
+const OrbImpl: React.FC<OrbProps> = ({
   size,
   state = 'idle',
   audioLevel = 0,
-  particleCount = 120,
+  particleCount = 80,
   rngSeed = 0xa1b2c3d4,
   paused = false,
 }) => {
@@ -73,9 +78,14 @@ export const Orb: React.FC<OrbProps> = ({
 
   // Frame scheduling via Reanimated's UI-thread frame callback. Steps
   // the sim on JS (the sim holds class state — not worklet-portable).
-  // Throttled to TARGET_FRAME_MS by accumulating dt on a sharedValue
-  // and only crossing the bridge once per ~42ms window.
+  // Throttled by accumulating dt on a sharedValue and only crossing the
+  // bridge once per IDLE/ACTIVE window. The sharedValue is read inside
+  // the worklet to avoid re-creating the callback when state changes.
   const accumulator = useSharedValue(0);
+  const frameMs = useSharedValue(IDLE_FRAME_MS);
+  useEffect(() => {
+    frameMs.value = state === 'idle' ? IDLE_FRAME_MS : ACTIVE_FRAME_MS;
+  }, [state, frameMs]);
   const stepAndRender = useCallback(
     (dt: number) => {
       sim.step(dt);
@@ -88,7 +98,7 @@ export const Orb: React.FC<OrbProps> = ({
     const dtMs = info.timeSincePreviousFrame ?? 16;
     if (dtMs <= 0) return;
     accumulator.value += dtMs;
-    if (accumulator.value < TARGET_FRAME_MS) return;
+    if (accumulator.value < frameMs.value) return;
     const stepMs = accumulator.value;
     accumulator.value = 0;
     runOnJS(stepAndRender)(Math.min(0.1, stepMs / 1000));
@@ -301,5 +311,7 @@ const styles = StyleSheet.create({
     overflow: 'visible',
   },
 });
+
+export const Orb = React.memo(OrbImpl);
 
 export default Orb;

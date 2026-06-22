@@ -1,4 +1,9 @@
-import { createCredentialStore, createMemoryStore } from '../storage';
+import {
+  KEYCHAIN_SERVICE,
+  createCredentialStore,
+  createMemoryStore,
+  type SecureStoreLike,
+} from '../storage';
 
 describe('createCredentialStore', () => {
   it('returns null when nothing is stored', async () => {
@@ -46,5 +51,51 @@ describe('createCredentialStore', () => {
       hostUrl: 'https://b',
       apiKey: 'k2',
     });
+  });
+
+  it('passes a stable keychainService to every secure-store call', async () => {
+    // Spy on every call so we can assert the options are threaded
+    // through to load / save / clear — without these, dev-client
+    // rebuilds on the iOS Simulator can orphan keychain entries.
+    const calls: Array<{ op: string; key: string; service: string | undefined }> = [];
+    const spy: SecureStoreLike = {
+      async getItemAsync(key, options) {
+        calls.push({ op: 'get', key, service: options?.keychainService });
+        return null;
+      },
+      async setItemAsync(key, _value, options) {
+        calls.push({ op: 'set', key, service: options?.keychainService });
+      },
+      async deleteItemAsync(key, options) {
+        calls.push({ op: 'del', key, service: options?.keychainService });
+      },
+    };
+    const store = createCredentialStore(spy);
+    await store.load();
+    await store.save({ hostUrl: 'https://x', apiKey: 'k' });
+    await store.clear();
+    for (const c of calls) {
+      expect(c.service).toBe(KEYCHAIN_SERVICE);
+    }
+    expect(calls.map((c) => c.op)).toEqual([
+      'get',
+      'get',
+      'set',
+      'set',
+      'del',
+      'del',
+    ]);
+  });
+
+  it('honours a custom keychainService override', async () => {
+    const calls: Array<string | undefined> = [];
+    const spy: SecureStoreLike = {
+      async getItemAsync(_k, o) { calls.push(o?.keychainService); return null; },
+      async setItemAsync(_k, _v, o) { calls.push(o?.keychainService); },
+      async deleteItemAsync(_k, o) { calls.push(o?.keychainService); },
+    };
+    const store = createCredentialStore(spy, { keychainService: 'custom' });
+    await store.load();
+    expect(calls.every((s) => s === 'custom')).toBe(true);
   });
 });

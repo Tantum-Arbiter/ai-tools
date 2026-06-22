@@ -453,7 +453,7 @@ const styles = StyleSheet.create({
   },
   followupBtnText: {
     color: '#bfe6ff',
-    fontSize: 12,
+    fontSize: 13,
     letterSpacing: 0.4,
     fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace' }),
   },
@@ -474,7 +474,7 @@ const styles = StyleSheet.create({
   bubbleError: {
     backgroundColor: 'rgba(220, 80, 80, 0.25)',
   },
-  bubbleText: { color: '#e8f4ff', fontSize: 15, lineHeight: 20 },
+  bubbleText: { color: '#e8f4ff', fontSize: 17, lineHeight: 22 },
   bubbleTextError: { color: '#ffd5d5' },
   inputRow: {
     flexDirection: 'row',
@@ -488,7 +488,7 @@ const styles = StyleSheet.create({
     minHeight: 40,
     maxHeight: 120,
     color: '#e8f4ff',
-    fontSize: 15,
+    fontSize: 17,
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 12,
@@ -504,7 +504,7 @@ const styles = StyleSheet.create({
   sendBtnText: { color: '#e8f4ff', fontWeight: '600' },
   errorText: {
     color: '#ffb0b0',
-    fontSize: 12,
+    fontSize: 13,
     paddingHorizontal: 14,
     paddingBottom: 8,
   },

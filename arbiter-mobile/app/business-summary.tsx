@@ -8,6 +8,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useApi, useCredentials } from '../lib/credentials';
+import { useSettingsOverlay } from '../lib/settingsOverlay';
 import {
   HudScreen,
   Panel,
@@ -50,6 +51,7 @@ function refundTone(rate: number | undefined): StatTone {
 export default function BusinessSummary() {
   const router = useRouter();
   const api = useApi();
+  const settings = useSettingsOverlay();
   const { status: credStatus } = useCredentials();
   const [data, setData] = useState<RevenueSummary | null>(null);
   const [loading, setLoading] = useState(true);
@@ -93,7 +95,7 @@ export default function BusinessSummary() {
           </Text>
           <Pressable
             style={styles.settingsBtn}
-            onPress={() => router.push('/settings')}
+            onPress={settings.open}
             accessibilityRole="button"
           >
             <Text style={styles.settingsBtnText}>Open Settings</Text>
@@ -159,29 +161,29 @@ export default function BusinessSummary() {
 }
 
 const styles = StyleSheet.create({
-  askText: { color: HUD_COLORS.textBright, fontSize: 14, lineHeight: 20 },
-  errorText: { color: '#ffb0b0', fontSize: 13 },
-  hint: { color: HUD_COLORS.textMuted, fontSize: 13, lineHeight: 18 },
+  askText: { color: HUD_COLORS.textBright, fontSize: 15, lineHeight: 22 },
+  errorText: { color: '#ffb0b0', fontSize: 14 },
+  hint: { color: HUD_COLORS.textMuted, fontSize: 14, lineHeight: 20 },
   heroRow: { flexDirection: 'row', alignItems: 'stretch', gap: 14, paddingVertical: 4 },
   heroBlock: { flex: 1, gap: 4 },
   heroDivider: { width: StyleSheet.hairlineWidth, backgroundColor: HUD_COLORS.divider },
   heroValue: {
     color: HUD_COLORS.cyan,
     fontFamily: HUD_FONTS.mono,
-    fontSize: 30,
+    fontSize: 33,
     fontWeight: '300',
     letterSpacing: 0.5,
   },
   heroValueSecondary: {
     color: HUD_COLORS.cyanSoft,
     fontFamily: HUD_FONTS.mono,
-    fontSize: 22,
+    fontSize: 24,
     fontWeight: '300',
     letterSpacing: 0.5,
   },
   heroLabel: {
     color: HUD_COLORS.textDim,
-    fontSize: 10,
+    fontSize: 11,
     fontFamily: HUD_FONTS.mono,
     letterSpacing: 1.2,
     textTransform: 'uppercase',
@@ -199,7 +201,7 @@ const styles = StyleSheet.create({
   settingsBtnText: {
     color: HUD_COLORS.cyan,
     fontFamily: HUD_FONTS.mono,
-    fontSize: 11,
+    fontSize: 12,
     letterSpacing: 0.8,
   },
 });
