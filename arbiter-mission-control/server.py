@@ -37,6 +37,8 @@ from revenuecat_monitor import RevenueCatMonitor
 from service_health import ServiceHealthMonitor
 from persistence import ArbiterDB
 from rate_limit import SlidingWindowRateLimiter
+from security_headers import build_security_headers
+from audit_log import AuditLogger, is_sensitive_request
 from client_gate import (
     filter_response_for_client,
     normalise_client,
@@ -111,6 +113,14 @@ _auth_check_limiter = SlidingWindowRateLimiter(
 
 def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
+
+
+# ── Audit log ─────────────────────────────────────────────────────────
+# Persists auth failures and write requests to /api/* in JSONL files
+# (logs/audit-YYYY-MM-DD.jsonl). Lets the operator forensically check
+# token usage after the fact. Token values never enter the log.
+_AUDIT_LOG_DIR = Path(os.getenv("ARBITER_AUDIT_DIR", str(Path(__file__).parent / "logs")))
+_audit = AuditLogger(log_dir=_AUDIT_LOG_DIR)
 
 # ── Input Length Limits ───────────────────────────────────────────────
 _MAX_DIRECTIVE_LEN = int(os.getenv("MAX_DIRECTIVE_LEN", "4000"))      # ~1000 tokens
@@ -1446,20 +1456,57 @@ class _AuthMiddleware(BaseHTTPMiddleware):
             if not _auth_fail_limiter.check(ip):
                 retry = int(_auth_fail_limiter.retry_after(ip)) + 1
                 log.warning(f"auth fail rate-limited ip={ip} retry_after={retry}s")
+                _audit.record(
+                    event="auth_rate_limited", route=path, ip=ip, status=429,
+                    extra={"limiter": "auth_fail", "retry_after": retry,
+                           "method": request.method},
+                )
                 return JSONResponse(
                     status_code=429,
                     content={"error": "Too many failed auth attempts — slow down"},
                     headers={"Retry-After": str(retry)},
                 )
+            _audit.record(
+                event="auth_fail", route=path, ip=ip, status=401,
+                extra={"method": request.method,
+                       "has_bearer": bool(auth_header.startswith("Bearer ")),
+                       "has_query_key": bool(request.query_params.get("api_key", ""))},
+            )
             return JSONResponse(
                 status_code=401,
                 content={"error": "Unauthorized — set API key in Settings"},
             )
 
-        return await call_next(request)
+        response = await call_next(request)
+        if is_sensitive_request(request.method, path) and response.status_code < 400:
+            _audit.record(
+                event="write", route=path, ip=_client_ip(request),
+                status=response.status_code, extra={"method": request.method},
+            )
+        return response
 
 
 app.add_middleware(_AuthMiddleware)
+
+
+# ── Security Headers Middleware ───────────────────────────────────────
+# Applies CSP + nosniff + no-referrer + frame-options + permissions
+# policy to every response. CSP is the meaningful XSS exfil control:
+# connect-src 'self' blocks an injected payload from posting the API
+# key to an external origin. Referrer-Policy plugs the ?api_key= query
+# string leak path.
+_SECURITY_HEADERS = build_security_headers()
+
+
+class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        for name, value in _SECURITY_HEADERS.items():
+            response.headers.setdefault(name, value)
+        return response
+
+
+app.add_middleware(_SecurityHeadersMiddleware)
 
 
 def _query(db_path: Path, sql: str, params: tuple = ()) -> list[dict]:
@@ -1514,6 +1561,10 @@ async def auth_check(request: Request):
     if not _auth_check_limiter.check(ip):
         retry = int(_auth_check_limiter.retry_after(ip)) + 1
         log.warning(f"auth-check rate-limited ip={ip} retry_after={retry}s")
+        _audit.record(
+            event="auth_rate_limited", route="/api/auth/check", ip=ip, status=429,
+            extra={"limiter": "auth_check", "retry_after": retry},
+        )
         return JSONResponse(
             status_code=429,
             content={"error": "Too many auth-check requests — slow down"},
