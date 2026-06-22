@@ -78,9 +78,10 @@ export default function Settings() {
         }}
       />
       <ScrollView
-        contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + 24 }]}
+        contentContainerStyle={[styles.scroll, { paddingBottom: insets.bottom + 24 }]}
         keyboardShouldPersistTaps="handled"
       >
+       <View style={styles.card}>
         <Text style={styles.label}>Host URL</Text>
         <TextInput
           style={styles.input}
@@ -136,6 +137,7 @@ export default function Settings() {
           Connect over Tailscale or a similar private network. The host URL
           must be reachable from this device.
         </Text>
+       </View>
       </ScrollView>
     </KeyboardAvoidingView>
   );
@@ -143,7 +145,22 @@ export default function Settings() {
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: '#000814' },
-  content: { padding: 20, gap: 12 },
+  scroll: {
+    flexGrow: 1,
+    paddingHorizontal: 16,
+    paddingTop: 24,
+    alignItems: 'center',
+  },
+  card: {
+    width: '100%',
+    maxWidth: 520,
+    padding: 20,
+    gap: 12,
+    borderRadius: 14,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(120, 200, 255, 0.25)',
+    backgroundColor: 'rgba(8, 16, 24, 0.92)',
+  },
   label: { color: '#9fc4dc', fontSize: 13, marginTop: 8 },
   input: {
     color: '#e8f4ff',

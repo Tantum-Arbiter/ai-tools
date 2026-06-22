@@ -27,6 +27,11 @@ export interface ArbiterApi {
   checkAuth(): Promise<AuthCheckResponse>;
   sendChat(message: string, history: HistoryEntry[], signal?: AbortSignal): Promise<ChatResponse>;
   sendVision(req: VisionRequest, signal?: AbortSignal): Promise<VisionResponse>;
+  getRevenueSummary(signal?: AbortSignal): Promise<unknown>;
+  getSystemStatus(signal?: AbortSignal): Promise<unknown>;
+  getGcpSummary(signal?: AbortSignal): Promise<unknown>;
+  getAgents(signal?: AbortSignal): Promise<unknown>;
+  getCeoAgents(signal?: AbortSignal): Promise<unknown>;
 }
 
 const JSON_HEADERS = { 'Content-Type': 'application/json' } as const;
@@ -114,6 +119,36 @@ export function createApi(deps: ApiDeps): ArbiterApi {
       if (signal) init.signal = signal;
       const raw = await authedRequest<VisionResponse>('/api/jarvis/vision', init);
       return sanitizeResponse(raw);
+    },
+
+    async getRevenueSummary(signal) {
+      const init: RequestInit = { method: 'GET' };
+      if (signal) init.signal = signal;
+      return authedRequest<unknown>('/api/revenue/summary', init);
+    },
+
+    async getSystemStatus(signal) {
+      const init: RequestInit = { method: 'GET' };
+      if (signal) init.signal = signal;
+      return authedRequest<unknown>('/api/status', init);
+    },
+
+    async getGcpSummary(signal) {
+      const init: RequestInit = { method: 'GET' };
+      if (signal) init.signal = signal;
+      return authedRequest<unknown>('/api/gcp/summary', init);
+    },
+
+    async getAgents(signal) {
+      const init: RequestInit = { method: 'GET' };
+      if (signal) init.signal = signal;
+      return authedRequest<unknown>('/api/agents', init);
+    },
+
+    async getCeoAgents(signal) {
+      const init: RequestInit = { method: 'GET' };
+      if (signal) init.signal = signal;
+      return authedRequest<unknown>('/api/ceo/agents', init);
     },
   };
 }

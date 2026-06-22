@@ -31,9 +31,9 @@ const MAJOR_STROKE = 'rgba(0, 240, 255, 0.10)';
 
 export const TronBackground: React.FC<TronBackgroundProps> = ({ width, height }) => {
   const cx = width * 0.5;
-  const cy = height * 0.55;
+  const cy = height * 0.5;
   const rx = width * 0.55;
-  const ry = height * 0.60;
+  const ry = height * 0.55;
 
   return (
     <Svg
@@ -75,11 +75,11 @@ export const TronBackground: React.FC<TronBackgroundProps> = ({ width, height })
         <RadialGradient
           id="illumination"
           cx={cx}
-          cy={height * 0.52}
+          cy={cy}
           rx={rx}
           ry={ry}
           fx={cx}
-          fy={height * 0.52}
+          fy={cy}
           gradientUnits="userSpaceOnUse"
         >
           <Stop offset="0" stopColor="rgb(0, 180, 255)" stopOpacity={0.24} />
@@ -95,7 +95,7 @@ export const TronBackground: React.FC<TronBackgroundProps> = ({ width, height })
         <Rect x={0} y={0} width={width} height={height} fill="url(#major-grid)" />
       </G>
 
-      <Ellipse cx={cx} cy={height * 0.52} rx={rx} ry={ry} fill="url(#illumination)" />
+      <Ellipse cx={cx} cy={cy} rx={rx} ry={ry} fill="url(#illumination)" />
     </Svg>
   );
 };

@@ -6,6 +6,7 @@
 import React, { useCallback, useEffect, useReducer, useRef } from 'react';
 import {
   FlatList,
+  Keyboard,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -22,7 +23,8 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
-import { ChevronDown, ChevronUp, Send } from 'lucide-react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { ChevronDown, ChevronUp, Send, X } from 'lucide-react-native';
 import {
   chatReducer,
   INITIAL_STATE,
@@ -45,6 +47,27 @@ export interface ChatDrawerProps {
   expandedHeight?: number;
   /** Called when the drawer's expansion state changes (lets the host fade out the orb). */
   onExpansionChange?: (expanded: boolean) => void;
+  /** App-level visibility. When false the drawer slides off-screen. Default true. */
+  visible?: boolean;
+  /**
+   * Optional externally-supplied transcript (e.g. from voice). When this
+   * value changes to a non-empty string, the drawer expands and sets it
+   * as the input so the operator can review/edit before sending.
+   */
+  pendingInput?: string | null;
+  /**
+   * Monotonic counter; whenever it increments, the drawer force-expands.
+   * Used by the host (e.g. tap on the orb) to open the chat fully without
+   * having to thread an `expanded` controlled prop through the reducer.
+   */
+  expandSignal?: number;
+  /** Dismiss the drawer (host flips `visible` to false). */
+  onClose?: () => void;
+  /**
+   * Notified when the in-flight send state changes. Lets the host drive
+   * the orb's `thinking` colour while a reply is being generated.
+   */
+  onSendingChange?: (sending: boolean) => void;
 }
 
 const defaultIdFactory = () =>
@@ -57,13 +80,20 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
   collapsedHeight = 72,
   expandedHeight = 480,
   onExpansionChange,
+  visible = true,
+  pendingInput = null,
+  expandSignal = 0,
+  onClose,
+  onSendingChange,
 }) => {
+  const insets = useSafeAreaInsets();
   const [state, dispatch] = useReducer(chatReducer, INITIAL_STATE);
   const stateRef = useRef<ChatState>(state);
   stateRef.current = state;
 
   const height = useSharedValue(collapsedHeight);
   const startHeight = useSharedValue(collapsedHeight);
+  const translateY = useSharedValue(visible ? 0 : expandedHeight + 200);
 
   useEffect(() => {
     height.value = withTiming(state.expanded ? expandedHeight : collapsedHeight, {
@@ -72,7 +102,38 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
     onExpansionChange?.(state.expanded);
   }, [state.expanded, expandedHeight, collapsedHeight, height, onExpansionChange]);
 
-  const animatedStyle = useAnimatedStyle(() => ({ height: height.value }));
+  useEffect(() => {
+    translateY.value = withTiming(visible ? 0 : expandedHeight + 200, { duration: 260 });
+  }, [visible, expandedHeight, translateY]);
+
+  // Inbound transcript from the voice session. Populate the input and
+  // expand the drawer so the operator can confirm / edit / send.
+  useEffect(() => {
+    if (!pendingInput) return;
+    dispatch({ type: 'INPUT_CHANGED', value: pendingInput });
+    dispatch({ type: 'SET_EXPANDED', expanded: true });
+  }, [pendingInput]);
+
+  // External expansion trigger (e.g. tap on the orb). The host bumps
+  // `expandSignal` to request the drawer be opened fully; we skip the
+  // initial 0 value so a freshly mounted drawer doesn't auto-expand.
+  const expandSignalSeen = useRef(expandSignal);
+  useEffect(() => {
+    if (expandSignal === expandSignalSeen.current) return;
+    expandSignalSeen.current = expandSignal;
+    dispatch({ type: 'SET_EXPANDED', expanded: true });
+  }, [expandSignal]);
+
+  // Surface the in-flight send state so the host can flip the orb to
+  // its `thinking` colour while a reply is being generated.
+  useEffect(() => {
+    onSendingChange?.(state.sending);
+  }, [state.sending, onSendingChange]);
+
+  const animatedStyle = useAnimatedStyle(() => ({
+    height: height.value,
+    transform: [{ translateY: translateY.value }],
+  }));
 
   const setExpansion = useCallback((expanded: boolean) => {
     if (stateRef.current.expanded !== expanded) {
@@ -114,55 +175,106 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
 
   const handleGesture = Gesture.Race(panGesture, tapGesture);
 
-  const send = useCallback(async () => {
-    const current = stateRef.current;
-    if (!canSend(current)) return;
-    const messageText = current.input.trim();
-    const historyEntries = toHistoryEntries(current.messages);
-    const userId = idFactory();
-    const assistantId = idFactory();
-    dispatch({ type: 'SEND_REQUESTED', id: userId, assistantId, timestamp: now() });
-    try {
-      const res = await api.sendChat(messageText, historyEntries);
+  const sendText = useCallback(
+    async (overrideText?: string) => {
+      const current = stateRef.current;
+      const source = overrideText !== undefined ? overrideText : current.input;
+      const messageText = source.trim();
+      if (!messageText || current.sending) return;
+      // Dismiss the soft keyboard so the orb + "thinking" feedback are
+      // visible while the reply is being generated.
+      Keyboard.dismiss();
+      const historyEntries = toHistoryEntries(current.messages);
+      const userId = idFactory();
+      const assistantId = idFactory();
       dispatch({
-        type: 'SEND_SUCCEEDED',
+        type: 'SEND_REQUESTED',
+        id: userId,
         assistantId,
-        reply: res.reply ?? '',
-        ...(res.panel !== undefined ? { panel: res.panel } : {}),
-        ...(res.actions !== undefined ? { actions: res.actions } : {}),
-        ...(res.followups !== undefined ? { followups: res.followups } : {}),
+        timestamp: now(),
+        ...(overrideText !== undefined ? { text: overrideText } : {}),
       });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Send failed';
-      dispatch({ type: 'SEND_FAILED', assistantId, error: msg });
-    }
-  }, [api, idFactory, now]);
+      try {
+        const res = await api.sendChat(messageText, historyEntries);
+        dispatch({
+          type: 'SEND_SUCCEEDED',
+          assistantId,
+          reply: res.reply ?? '',
+          ...(res.panel !== undefined ? { panel: res.panel } : {}),
+          ...(res.actions !== undefined ? { actions: res.actions } : {}),
+          ...(res.followups !== undefined ? { followups: res.followups } : {}),
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Send failed';
+        dispatch({ type: 'SEND_FAILED', assistantId, error: msg });
+      }
+    },
+    [api, idFactory, now],
+  );
+
+  const send = useCallback(() => {
+    if (!canSend(stateRef.current)) return;
+    void sendText();
+  }, [sendText]);
+
+  const onFollowupPress = useCallback(
+    (messageId: string, text: string) => {
+      // Mirror the website's behaviour: clear the chip strip on tap and
+      // immediately fire the send so a single tap commits the choice.
+      dispatch({ type: 'FOLLOWUPS_CLEARED', messageId });
+      void sendText(text);
+    },
+    [sendText],
+  );
+
+  // Tapping the X dismisses the keyboard before handing control back to
+  // the host so the parent UI isn't left with a stranded soft keyboard.
+  const handleClose = useCallback(() => {
+    Keyboard.dismiss();
+    onClose?.();
+  }, [onClose]);
 
   return (
     <KeyboardAvoidingView
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      style={styles.container}
+      style={[styles.container, { bottom: insets.bottom + 12 }]}
       pointerEvents="box-none"
     >
       <Animated.View style={[styles.sheet, animatedStyle]}>
-        <GestureDetector gesture={handleGesture}>
-          <View
-            style={styles.grabber}
-            accessibilityRole="button"
-            accessibilityLabel={state.expanded ? 'Collapse chat' : 'Expand chat'}
-            testID="chat-drawer-toggle"
-          >
-            <View style={styles.grabberHandle} />
-            {state.expanded ? (
-              <ChevronDown size={14} color="#78a8bc" strokeWidth={2} />
-            ) : (
-              <ChevronUp size={14} color="#78a8bc" strokeWidth={2} />
-            )}
-          </View>
-        </GestureDetector>
+        <View style={styles.header}>
+          <GestureDetector gesture={handleGesture}>
+            <View
+              style={styles.grabber}
+              accessibilityRole="button"
+              accessibilityLabel={state.expanded ? 'Collapse chat' : 'Expand chat'}
+              testID="chat-drawer-toggle"
+            >
+              <View style={styles.grabberHandle} />
+              {state.expanded ? (
+                <ChevronDown size={14} color="#78a8bc" strokeWidth={2} />
+              ) : (
+                <ChevronUp size={14} color="#78a8bc" strokeWidth={2} />
+              )}
+            </View>
+          </GestureDetector>
+          {onClose && (
+            <Pressable
+              onPress={handleClose}
+              style={styles.headerBtn}
+              accessibilityRole="button"
+              accessibilityLabel="Close chat"
+              testID="chat-drawer-close"
+            >
+              <X size={14} color="#78a8bc" strokeWidth={2} />
+            </Pressable>
+          )}
+        </View>
 
         {state.expanded && (
-          <MessageList messages={state.messages} />
+          <MessageList
+            messages={state.messages}
+            onFollowupPress={onFollowupPress}
+          />
         )}
 
         <View style={styles.inputRow}>
@@ -175,7 +287,6 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
             multiline
             blurOnSubmit={false}
             editable={!state.sending}
-            onFocus={() => dispatch({ type: 'SET_EXPANDED', expanded: true })}
             onSubmitEditing={send}
             returnKeyType="send"
             testID="chat-drawer-input"
@@ -206,58 +317,99 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
 
 interface MessageListProps {
   messages: ChatMessage[];
+  onFollowupPress: (messageId: string, text: string) => void;
 }
 
-const renderMessage: ListRenderItem<ChatMessage> = ({ item }) => {
-  const isUser = item.role === 'user';
+interface MessageRowProps {
+  message: ChatMessage;
+  onFollowupPress: (messageId: string, text: string) => void;
+}
+
+const MessageRow: React.FC<MessageRowProps> = ({ message, onFollowupPress }) => {
+  const isUser = message.role === 'user';
   return (
-    <View
-      style={[
-        styles.bubble,
-        isUser ? styles.bubbleUser : styles.bubbleAssistant,
-        item.error && styles.bubbleError,
-      ]}
-      testID={`chat-msg-${item.id}`}
-    >
-      <Text style={[styles.bubbleText, item.error && styles.bubbleTextError]}>
-        {item.pending ? '…' : item.text}
-      </Text>
+    <View style={styles.messageRow}>
+      <View
+        style={[
+          styles.bubble,
+          isUser ? styles.bubbleUser : styles.bubbleAssistant,
+          message.error && styles.bubbleError,
+        ]}
+        testID={`chat-msg-${message.id}`}
+      >
+        <Text style={[styles.bubbleText, message.error && styles.bubbleTextError]}>
+          {message.pending ? '…' : message.text}
+        </Text>
+      </View>
+      {!isUser && !message.pending && message.followups && message.followups.length > 0 && (
+        <View style={styles.followupWrap} testID={`chat-followups-${message.id}`}>
+          {message.followups.map((fu, i) => (
+            <Pressable
+              key={`${message.id}-fu-${i}`}
+              onPress={() => onFollowupPress(message.id, fu)}
+              style={({ pressed }) => [
+                styles.followupBtn,
+                pressed && styles.followupBtnPressed,
+              ]}
+              accessibilityRole="button"
+              accessibilityLabel={`Suggested reply: ${fu}`}
+              testID={`chat-followup-${message.id}-${i}`}
+            >
+              <Text style={styles.followupBtnText}>{fu}</Text>
+            </Pressable>
+          ))}
+        </View>
+      )}
     </View>
   );
 };
 
 const keyExtractor = (m: ChatMessage) => m.id;
 
-const MessageList: React.FC<MessageListProps> = ({ messages }) => (
-  <FlatList
-    style={styles.list}
-    contentContainerStyle={styles.listContent}
-    data={messages}
-    renderItem={renderMessage}
-    keyExtractor={keyExtractor}
-    keyboardShouldPersistTaps="handled"
-    testID="chat-drawer-list"
-  />
-);
+const MessageList: React.FC<MessageListProps> = ({ messages, onFollowupPress }) => {
+  const renderItem: ListRenderItem<ChatMessage> = ({ item }) => (
+    <MessageRow message={item} onFollowupPress={onFollowupPress} />
+  );
+  return (
+    <FlatList
+      style={styles.list}
+      contentContainerStyle={styles.listContent}
+      data={messages}
+      renderItem={renderItem}
+      keyExtractor={keyExtractor}
+      keyboardShouldPersistTaps="handled"
+      testID="chat-drawer-list"
+    />
+  );
+};
 
 // ── Styles ────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
   container: {
     position: 'absolute',
-    left: 0,
-    right: 0,
+    left: 16,
+    right: 16,
     bottom: 0,
+    alignItems: 'center',
   },
   sheet: {
+    width: '100%',
+    maxWidth: 520,
     backgroundColor: 'rgba(8, 16, 24, 0.92)',
-    borderTopLeftRadius: 18,
-    borderTopRightRadius: 18,
-    borderTopWidth: StyleSheet.hairlineWidth,
+    borderRadius: 14,
+    borderWidth: StyleSheet.hairlineWidth,
     borderColor: 'rgba(120, 200, 255, 0.25)',
     overflow: 'hidden',
   },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 8,
+  },
   grabber: {
+    flex: 1,
     alignItems: 'center',
     paddingVertical: 8,
   },
@@ -267,8 +419,44 @@ const styles = StyleSheet.create({
     borderRadius: 2,
     backgroundColor: 'rgba(120, 200, 255, 0.45)',
   },
+  headerBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0, 200, 255, 0.08)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(120, 200, 255, 0.25)',
+  },
   list: { flex: 1 },
-  listContent: { padding: 12, gap: 8 },
+  listContent: { padding: 12, gap: 10 },
+  messageRow: { gap: 6 },
+  followupWrap: {
+    alignSelf: 'flex-start',
+    maxWidth: '92%',
+    flexDirection: 'column',
+    gap: 4,
+    paddingTop: 2,
+  },
+  followupBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: 'rgba(0, 200, 255, 0.22)',
+    backgroundColor: 'rgba(0, 200, 255, 0.06)',
+  },
+  followupBtnPressed: {
+    borderColor: 'rgba(32, 244, 255, 0.85)',
+    backgroundColor: 'rgba(0, 200, 255, 0.16)',
+  },
+  followupBtnText: {
+    color: '#bfe6ff',
+    fontSize: 12,
+    letterSpacing: 0.4,
+    fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace' }),
+  },
   bubble: {
     paddingHorizontal: 12,
     paddingVertical: 8,

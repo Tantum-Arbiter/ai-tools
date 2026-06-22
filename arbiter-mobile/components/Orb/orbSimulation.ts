@@ -22,7 +22,7 @@ export const STATE_LABEL: Readonly<Record<OrbState, string>> = {
 };
 
 const SPEED_MULTIPLIER: Readonly<Record<OrbState, number>> = {
-  idle: 1, listening: 1.8, thinking: 3, speaking: 2.2,
+  idle: 2.5, listening: 4.5, thinking: 6, speaking: 5.5,
 };
 
 // Smoothing constants (per-frame at ~60 fps; matches jarvis.js):
@@ -52,7 +52,27 @@ export interface OrbFrame {
   readonly voiceBlend: number; // 0 = nebula, 1 = ring
   readonly particles: ReadonlyArray<OrbParticle>;
   readonly waveData: ReadonlyArray<number>;
+  /** Continuous rotation (rad) of the outer cog halo. */
+  readonly ringAngle: number;
+  /** Continuous rotation (rad) per compass ring; same length & order as COMPASS_RINGS. */
+  readonly compassRingAngles: ReadonlyArray<number>;
 }
+
+// Compass rings — matches jarvis.js `this.rings`. Radii are fractions of maxR.
+export interface CompassRingConfig {
+  readonly r: number;
+  readonly ticks: number;
+  readonly w: number;
+  readonly speed: number;
+}
+export const COMPASS_RINGS: ReadonlyArray<CompassRingConfig> = [
+  { r: 0.62, ticks: 72,  w: 1.0, speed:  0.08 },
+  { r: 0.78, ticks: 90,  w: 0.7, speed: -0.05 },
+  { r: 0.92, ticks: 120, w: 0.5, speed:  0.03 },
+];
+
+// Outer halo rotation speed (rad/s) — matches jarvis._drawHalo: ringAngle += dt * 0.15.
+const HALO_ROTATION_SPEED = 0.15;
 
 export interface OrbSimulationOptions {
   particleCount?: number;
@@ -85,6 +105,8 @@ export class OrbSimulation {
   private _audio = 0;
   private _audioTarget = 0;
   private _blend = 0;
+  private _ringAngle = 0;
+  private readonly _compassRingAngles: number[];
   private readonly _particles: OrbParticle[];
   private readonly _wave: Float64Array;
 
@@ -94,6 +116,7 @@ export class OrbSimulation {
     const rng = mulberry32(opts.rngSeed ?? 0xa1b2c3d4);
     this._particles = buildParticles(n, rng);
     this._wave = new Float64Array(bands);
+    this._compassRingAngles = COMPASS_RINGS.map(() => 0);
   }
 
   get state(): OrbState { return this._state; }
@@ -102,6 +125,8 @@ export class OrbSimulation {
   get voiceBlend(): number { return this._blend; }
   get bandCount(): number { return this._wave.length; }
   get particleCount(): number { return this._particles.length; }
+  get ringAngle(): number { return this._ringAngle; }
+  get compassRingAngles(): ReadonlyArray<number> { return this._compassRingAngles; }
 
   setState(s: OrbState): void { this._state = s; }
 
@@ -119,6 +144,10 @@ export class OrbSimulation {
     const target = voiceActive ? 1 : 0;
     const k = target > this._blend ? BLEND_ATTACK : BLEND_DECAY;
     this._blend += (target - this._blend) * k;
+    this._ringAngle += dt * HALO_ROTATION_SPEED;
+    for (let i = 0; i < this._compassRingAngles.length; i++) {
+      this._compassRingAngles[i]! += dt * COMPASS_RINGS[i]!.speed;
+    }
     this._updateWaveData();
     this._stepParticles(dt);
   }
@@ -144,6 +173,8 @@ export class OrbSimulation {
       voiceBlend: this._blend,
       particles: this._particles,
       waveData: Array.from(this._wave),
+      ringAngle: this._ringAngle,
+      compassRingAngles: this._compassRingAngles.slice(),
     };
   }
 

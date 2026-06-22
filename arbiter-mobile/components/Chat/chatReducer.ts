@@ -46,7 +46,14 @@ export type ChatAction =
   | { type: 'INPUT_CHANGED'; value: string }
   | { type: 'SET_EXPANDED'; expanded: boolean }
   | { type: 'TOGGLE_EXPANDED' }
-  | { type: 'SEND_REQUESTED'; id: string; assistantId: string; timestamp: number }
+  | {
+      type: 'SEND_REQUESTED';
+      id: string;
+      assistantId: string;
+      timestamp: number;
+      /** When set, this overrides state.input (used by followup-chip taps). */
+      text?: string;
+    }
   | {
       type: 'SEND_SUCCEEDED';
       assistantId: string;
@@ -58,7 +65,9 @@ export type ChatAction =
   | { type: 'SEND_FAILED'; assistantId: string; error: string }
   | { type: 'ERROR_DISMISSED' }
   | { type: 'HISTORY_LOADED'; messages: ChatMessage[] }
-  | { type: 'CLEAR_HISTORY' };
+  | { type: 'CLEAR_HISTORY' }
+  /** Clear followup chips from a message after the user picks one. */
+  | { type: 'FOLLOWUPS_CLEARED'; messageId: string };
 
 export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   switch (action.type) {
@@ -72,7 +81,8 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return { ...state, expanded: !state.expanded };
 
     case 'SEND_REQUESTED': {
-      const trimmed = state.input.trim();
+      const source = action.text !== undefined ? action.text : state.input;
+      const trimmed = source.trim();
       // Guard against double-send and empty messages — the host should also
       // check canSend(state) before dispatching, but the reducer is the
       // authority.
@@ -92,12 +102,23 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       };
       return {
         ...state,
-        input: '',
+        // Only clear the typed input when the send was sourced from it;
+        // a chip-driven send shouldn't wipe what the operator is typing.
+        input: action.text !== undefined ? state.input : '',
         sending: true,
         lastError: null,
         expanded: true,
         messages: capMessages([...state.messages, userMsg, placeholder]),
       };
+    }
+
+    case 'FOLLOWUPS_CLEARED': {
+      const messages = state.messages.map((m) => {
+        if (m.id !== action.messageId || !m.followups) return m;
+        const { followups: _f, ...rest } = m;
+        return rest;
+      });
+      return { ...state, messages };
     }
 
     case 'SEND_SUCCEEDED': {

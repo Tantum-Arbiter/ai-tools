@@ -1,7 +1,7 @@
 // Pure projection from OrbFrame → typed draw specs in pixel space.
 // Keeps the Skia view dumb: it just iterates these arrays.
 
-import type { OrbFrame, RGB } from './orbSimulation';
+import { COMPASS_RINGS, type OrbFrame, type RGB } from './orbSimulation';
 
 export interface DrawableCircle {
   cx: number;
@@ -20,24 +20,67 @@ export interface DrawableRing {
   opacity: number;
 }
 
+// Radial tick mark in centred polar coordinates (origin = orb centre).
+// Rendering layer translates + rotates a Group, then draws each tick as
+// a line from cos(angle)*innerR..outerR. Keeping ticks as polar tuples
+// lets the simulation's rotation drive the whole array via one rotate.
+export interface TickSpec {
+  angle: number;
+  innerR: number;
+  outerR: number;
+  opacity: number;
+  strokeWidth: number;
+}
+
+export interface OuterHaloSpec {
+  cx: number;
+  cy: number;
+  rotation: number;
+  r: number;       // outer ring circle radius
+  innerR: number;  // inner faint ring circle radius
+  color: RGB;
+  ringOpacity: number;     // outer ring stroke opacity
+  innerRingOpacity: number;
+  ticks: TickSpec[];       // 120 tick marks
+  cogs: TickSpec[];        // 12 cog teeth (rendered as thick radial bars)
+}
+
+export interface CompassRingSpec {
+  cx: number;
+  cy: number;
+  rotation: number;
+  r: number;
+  strokeWidth: number;
+  color: RGB;
+  opacity: number;
+  ticks: TickSpec[];
+}
+
 export interface OrbDrawSpec {
   size: number;
   cx: number;
   cy: number;
   color: RGB;
+  outerGlow: DrawableCircle;
+  outerHalo: OuterHaloSpec;
   halo: DrawableCircle;
   core: DrawableCircle;
   particles: DrawableCircle[];
   waveformRing: DrawableRing | null;
-  orbitalRing: DrawableRing;
+  compassRings: CompassRingSpec[];
 }
 
 const CORE_R_FRAC = 0.06;
 const HALO_R_FRAC = 1.6;
 const NEBULA_MAX_R_FRAC = 0.36; // matches Orb.maxR (size * 0.36)
-const ORBITAL_R_FRAC = 0.62;
 const WAVE_BASE_FRAC = 0.28; // matches jarvis.js _drawWaveformRing baseR
 const WAVE_AMP_FRAC = 0.35;
+const OUTER_HALO_R_FRAC = 1.28;       // jarvis: maxR * 1.28
+const OUTER_GLOW_R_FRAC = 1.2;        // jarvis: maxR * 1.2 * pulse
+const HALO_TICK_COUNT = 120;
+const HALO_BIG_TICK_EVERY = 10;
+const HALO_TICK_LEN = 7;
+const HALO_COG_COUNT = 12;
 
 export function frameToDrawables(frame: OrbFrame, size: number): OrbDrawSpec {
   const s = Math.max(10, size);
@@ -104,16 +147,87 @@ export function frameToDrawables(frame: OrbFrame, size: number): OrbDrawSpec {
       }
     : null;
 
-  // One subtle orbital ring outline (matches the first web ring at r=0.62).
-  const orbitalRing: DrawableRing = {
+  // Ambient pulsing radial glow behind everything (jarvis._drawOuterGlow).
+  const glowPulse = 1 + Math.sin(frame.time * 1.2) * 0.08;
+  const outerGlow: DrawableCircle = {
     cx, cy,
-    r: maxR * (ORBITAL_R_FRAC / NEBULA_MAX_R_FRAC) * 0.62, // ≈ size*0.225
-    strokeWidth: 1,
+    r: maxR * OUTER_GLOW_R_FRAC * glowPulse,
     color,
     opacity: 0.18,
   };
 
-  return { size: s, cx, cy, color, halo, core, particles, waveformRing, orbitalRing };
+  // Rotating outer cog halo (jarvis._drawHalo). Geometry in centred polar
+  // coords; renderer applies `rotation` as a Group transform.
+  const haloR = maxR * OUTER_HALO_R_FRAC;
+  const ticks: TickSpec[] = new Array(HALO_TICK_COUNT);
+  for (let i = 0; i < HALO_TICK_COUNT; i++) {
+    const isBig = i % HALO_BIG_TICK_EVERY === 0;
+    const tl = isBig ? HALO_TICK_LEN + 3 : HALO_TICK_LEN;
+    ticks[i] = {
+      angle: (i / HALO_TICK_COUNT) * Math.PI * 2,
+      innerR: haloR - tl,
+      outerR: haloR,
+      opacity: isBig ? 0.35 : 0.14,
+      strokeWidth: isBig ? 1.5 : 0.7,
+    };
+  }
+  // Cog teeth — 12 thick radial bars sitting just outside the halo ring.
+  const cogOuter = Math.min(haloR + 8, s * 0.48);
+  const cogs: TickSpec[] = new Array(HALO_COG_COUNT);
+  for (let i = 0; i < HALO_COG_COUNT; i++) {
+    cogs[i] = {
+      angle: (i / HALO_COG_COUNT) * Math.PI * 2,
+      innerR: haloR - 1,
+      outerR: cogOuter,
+      opacity: 0.22,
+      strokeWidth: 4,
+    };
+  }
+  const outerHalo: OuterHaloSpec = {
+    cx, cy,
+    rotation: frame.ringAngle,
+    r: haloR,
+    innerR: haloR - HALO_TICK_LEN - 2,
+    color,
+    ringOpacity: 0.16,
+    innerRingOpacity: 0.08,
+    ticks,
+    cogs,
+  };
+
+  // Compass rings (jarvis._drawRings) — three concentric rotating rings
+  // with tick marks. Speeds and tick counts come from COMPASS_RINGS.
+  const compassRings: CompassRingSpec[] = COMPASS_RINGS.map((cfg, i) => {
+    const r = maxR * cfg.r;
+    const tickLen = 4 + cfg.w * 3;
+    const majorEvery = Math.max(1, Math.floor(cfg.ticks / 12));
+    const rTicks: TickSpec[] = new Array(cfg.ticks);
+    for (let k = 0; k < cfg.ticks; k++) {
+      const isMajor = k % majorEvery === 0;
+      const len = isMajor ? tickLen * 1.8 : tickLen;
+      rTicks[k] = {
+        angle: (k / cfg.ticks) * Math.PI * 2,
+        innerR: r - len / 2,
+        outerR: r + len / 2,
+        opacity: isMajor ? 0.35 : 0.12,
+        strokeWidth: isMajor ? 1.5 : 0.5,
+      };
+    }
+    return {
+      cx, cy,
+      rotation: frame.compassRingAngles[i] ?? 0,
+      r,
+      strokeWidth: cfg.w,
+      color,
+      opacity: 0.12 * cfg.w,
+      ticks: rTicks,
+    };
+  });
+
+  return {
+    size: s, cx, cy, color,
+    outerGlow, outerHalo, halo, core, particles, waveformRing, compassRings,
+  };
 }
 
 function clamp01(v: number): number {

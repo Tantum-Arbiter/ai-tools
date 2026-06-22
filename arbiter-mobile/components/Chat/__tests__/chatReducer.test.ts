@@ -64,6 +64,49 @@ describe('chatReducer — SEND_REQUESTED', () => {
     const s = mk({ input: 'hi', sending: true });
     expect(send(s)).toEqual(s);
   });
+
+  it('uses action.text when provided and leaves typed input untouched', () => {
+    const s = chatReducer(
+      mk({ input: 'typing this' }),
+      { type: 'SEND_REQUESTED', id: 'u1', assistantId: 'a1', timestamp: 0, text: 'pick me' },
+    );
+    expect(s.messages[0]).toMatchObject({ role: 'user', text: 'pick me' });
+    expect(s.input).toBe('typing this');
+  });
+
+  it('sends with action.text even when state.input is empty', () => {
+    const s = chatReducer(
+      mk({ input: '' }),
+      { type: 'SEND_REQUESTED', id: 'u1', assistantId: 'a1', timestamp: 0, text: 'why?' },
+    );
+    expect(s.messages).toHaveLength(2);
+    expect(s.messages[0]).toMatchObject({ text: 'why?' });
+  });
+});
+
+describe('chatReducer — FOLLOWUPS_CLEARED', () => {
+  const seeded: ChatState = mk({
+    messages: [
+      {
+        id: 'a1',
+        role: 'assistant',
+        text: 'hi',
+        timestamp: 0,
+        followups: ['why?', 'how?'],
+      },
+    ],
+  });
+
+  it('drops the followups array from the targeted message', () => {
+    const s = chatReducer(seeded, { type: 'FOLLOWUPS_CLEARED', messageId: 'a1' });
+    expect(s.messages[0]!.followups).toBeUndefined();
+    expect(s.messages[0]!.text).toBe('hi');
+  });
+
+  it('is a no-op for an unknown messageId', () => {
+    const s = chatReducer(seeded, { type: 'FOLLOWUPS_CLEARED', messageId: 'zzz' });
+    expect(s).toEqual(seeded);
+  });
 });
 
 describe('chatReducer — SEND_SUCCEEDED', () => {
