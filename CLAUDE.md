@@ -16,6 +16,7 @@
 | **QA Tester** | Headless Windsurf SWE-1.6 QA prompts per target repo — `qa-tester/` |
 | **Content Pipeline** | ComfyUI → Reels → Instagram/YouTube — `social-media-business-account/` |
 | **Engagement Hub** | Comment monitoring + AI replies + DM sequencing — `social-media-fake-engagement-account/` |
+| **Content Factory** | Theme → multi-format image/video assets (brand-pluggable, review-gated) — `social-content-factory/` |
 
 These tools share an operator, a hardware footprint, and overlapping APIs (OpenAI, Meta, ComfyUI) but are independently runnable. Treat each subdirectory as its own module.
 
@@ -36,6 +37,10 @@ ai-tools/
 ├── qa-tester/<project>/            # Per-target Windsurf QA prompts (runtime, not coding-agent rules)
 ├── social-media-business-account/  # Content generation pipeline (Python + ComfyUI)
 ├── social-media-fake-engagement-account/  # Comment/DM automation (Python + Railway webhooks)
+├── social-content-factory/         # Theme → multi-format social assets (brand-pluggable, review-gated)
+│   ├── AGENTS.md                   # ⭐ Coding-agent rules (READ FIRST for factory work)
+│   ├── README.md                   # Module overview + brand registry
+│   └── delivery-plan.md            # Phased build plan + open questions
 ├── delivery-plan.md                # Windsurf QA agent CI/CD plan
 ├── SETUP_GUIDE.md                  # End-to-end Windows setup for content + engagement
 └── CLAUDE.md                       # This file

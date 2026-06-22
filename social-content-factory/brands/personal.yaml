@@ -1,0 +1,21 @@
+key: personal
+name: "Sir Luke"
+voice: "first-person, calm, technically precise but warm; explainer-of-cool-things, never preachy"
+audience: "tech-curious friends, fellow builders, indie-hacker community"
+visual_style: "dark holographic, J.A.R.V.I.S.-adjacent aesthetic; muted blue/teal accents on near-black; no human faces; restrained motion"
+negative_prompts:
+  - "real human faces"
+  - "children"
+  - "logos or brand marks"
+  - "text overlays"
+  - "watermarks"
+  - "cluttered backgrounds"
+  - "cartoon"
+  - "anime"
+  - "nsfw"
+default_formats:
+  - "1x1"
+  - "9x16"
+allow_auto_publish: false
+llm_provider: "phi4"
+draft: true

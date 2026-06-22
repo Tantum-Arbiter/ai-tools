@@ -1,0 +1,21 @@
+themes:
+  - slug: weekly-build
+    title: "Weekly Build Recap"
+    subject: "an isolated holographic terminal floating above a dark desk, glowing with calm telemetry"
+    narrative: "what shipped this week, distilled to one screen"
+    tags: [recap, builder, weekly]
+    cta: "what did you ship this week?"
+
+  - slug: arbiter-voice-shipped
+    title: "ARBITER voice pipeline shipped"
+    subject: "a stylised waveform spiralling into a glowing orb against deep navy, audio-reactive aesthetic"
+    narrative: "local phi-4 to edge-tts in under two seconds, fully offline"
+    tags: [arbiter, voice, local-first]
+    cta: "would you trust a voice that never leaves your machine?"
+
+  - slug: local-first-stack
+    title: "Local-first AI stack"
+    subject: "two machines connected by a thin glowing thread on a clean desk, soft teal accents"
+    narrative: "Mac orchestrates, RTX renders; no cloud, no rent"
+    tags: [local-first, infra, ollama, comfyui]
+    cta: "what would you put on the GPU side?"

@@ -1,0 +1,27 @@
+# Runtime output — never commit generated assets or render history
+outbox/
+data/
+
+# Operator-private brand overrides
+brands/*.private.yaml
+
+# Python
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Env
+.env
+.env.local
+
+# Editor
+.vscode/
+.idea/
+.DS_Store
