@@ -83,6 +83,16 @@ export default function Home() {
   // Set by the ChatDrawer while an API round-trip is in-flight so the
   // orb flips to its `thinking` colour while a reply is generated.
   const [chatSending, setChatSending] = useState(false);
+  // One-shot dismissal for the unconfigured-credentials notification.
+  // Tapping it acknowledges the alert (the operator is on their way to
+  // fix it via the settings overlay); we hide the banner so it
+  // doesn't keep nagging while they edit. Reset whenever the
+  // credential status leaves 'unconfigured' so a later clear-and-
+  // re-launch surfaces a fresh alert.
+  const [unconfiguredDismissed, setUnconfiguredDismissed] = useState(false);
+  useEffect(() => {
+    if (status !== 'unconfigured') setUnconfiguredDismissed(false);
+  }, [status]);
 
   // Capture each assistant-attached panel into the feed. Replaces by id
   // so streaming updates from /stream don't pile up duplicates.
@@ -367,9 +377,12 @@ export default function Home() {
           — 3px amber left border, tinted background, source label +
           message stack. Tap opens settings (and, on phones, kicks the
           orb into the bottom-right focus state). */}
-      {status === 'unconfigured' && !voiceActive && (
+      {status === 'unconfigured' && !voiceActive && !unconfiguredDismissed && (
         <Pressable
-          onPress={settings.open}
+          onPress={() => {
+            setUnconfiguredDismissed(true);
+            settings.open();
+          }}
           style={[styles.notifBanner, { top: insets.top + 120 }]}
           accessibilityRole="button"
           accessibilityLabel="Configure host URL and API key"
