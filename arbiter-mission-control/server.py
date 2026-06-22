@@ -36,6 +36,7 @@ from gcp_monitor import GCPMonitor
 from revenuecat_monitor import RevenueCatMonitor
 from service_health import ServiceHealthMonitor
 from persistence import ArbiterDB
+from rate_limit import SlidingWindowRateLimiter
 from client_gate import (
     filter_response_for_client,
     normalise_client,
@@ -91,6 +92,25 @@ if _ARBITER_AUTH_ENABLED:
     log.info(f"API auth ENABLED (key len={len(ARBITER_API_KEY)})")
 else:
     log.warning("API auth DISABLED — set ARBITER_API_KEY in .env to protect endpoints")
+
+# ── Auth rate-limiting (oracle + 401 path) ────────────────────────────
+# Caps how often a single client IP can probe /api/auth/check or fail
+# a bearer check on /api/*. Successful authenticated traffic is not
+# rate-limited. Defaults give 10 attempts per minute per IP.
+_AUTH_FAIL_LIMIT = int(os.getenv("ARBITER_AUTH_FAIL_LIMIT", "10"))
+_AUTH_FAIL_WINDOW_S = float(os.getenv("ARBITER_AUTH_FAIL_WINDOW_S", "60"))
+_AUTH_CHECK_LIMIT = int(os.getenv("ARBITER_AUTH_CHECK_LIMIT", "10"))
+_AUTH_CHECK_WINDOW_S = float(os.getenv("ARBITER_AUTH_CHECK_WINDOW_S", "60"))
+_auth_fail_limiter = SlidingWindowRateLimiter(
+    max_requests=_AUTH_FAIL_LIMIT, window_seconds=_AUTH_FAIL_WINDOW_S,
+)
+_auth_check_limiter = SlidingWindowRateLimiter(
+    max_requests=_AUTH_CHECK_LIMIT, window_seconds=_AUTH_CHECK_WINDOW_S,
+)
+
+
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
 
 # ── Input Length Limits ───────────────────────────────────────────────
 _MAX_DIRECTIVE_LEN = int(os.getenv("MAX_DIRECTIVE_LEN", "4000"))      # ~1000 tokens
@@ -1422,6 +1442,15 @@ class _AuthMiddleware(BaseHTTPMiddleware):
             supplied_key = request.query_params.get("api_key", "")
 
         if not supplied_key or not hmac.compare_digest(supplied_key, ARBITER_API_KEY):
+            ip = _client_ip(request)
+            if not _auth_fail_limiter.check(ip):
+                retry = int(_auth_fail_limiter.retry_after(ip)) + 1
+                log.warning(f"auth fail rate-limited ip={ip} retry_after={retry}s")
+                return JSONResponse(
+                    status_code=429,
+                    content={"error": "Too many failed auth attempts — slow down"},
+                    headers={"Retry-After": str(retry)},
+                )
             return JSONResponse(
                 status_code=401,
                 content={"error": "Unauthorized — set API key in Settings"},
@@ -1477,10 +1506,19 @@ async def panel_route(panel_key: str):
 @app.get("/api/auth/check")
 async def auth_check(request: Request):
     """Check whether auth is enabled and whether the supplied key is valid.
-    This endpoint is excluded from auth middleware so the UI can probe it."""
+    This endpoint is excluded from auth middleware so the UI can probe it.
+    Rate-limited per client IP to neutralise the oracle behaviour."""
     if not _ARBITER_AUTH_ENABLED:
         return {"auth_required": False, "valid": True}
-    # Check the supplied key
+    ip = _client_ip(request)
+    if not _auth_check_limiter.check(ip):
+        retry = int(_auth_check_limiter.retry_after(ip)) + 1
+        log.warning(f"auth-check rate-limited ip={ip} retry_after={retry}s")
+        return JSONResponse(
+            status_code=429,
+            content={"error": "Too many auth-check requests — slow down"},
+            headers={"Retry-After": str(retry)},
+        )
     supplied_key = ""
     auth_header = request.headers.get("authorization", "")
     if auth_header.startswith("Bearer "):
