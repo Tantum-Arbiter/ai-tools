@@ -23,6 +23,7 @@ import { Orb } from '../components/Orb/Orb';
 import { ChatDrawer } from '../components/Chat/ChatDrawer';
 import { TronBackground } from '../components/Background/TronBackground';
 import { PanelFeed, type PanelFeedItem } from '../components/panels';
+import { HUD_FONTS } from '../components/HUD/tokens';
 import { useApi, useCredentials } from '../lib/credentials';
 import { useSettingsOverlay } from '../lib/settingsOverlay';
 import { useVoiceSession } from '../components/Voice/useVoiceSession';
@@ -216,11 +217,15 @@ export default function Home() {
           style={[styles.iconBtn, voiceActive && styles.iconBtnActive]}
         >
           {voiceActive ? (
-            <Mic size={18} color="#20f4ff" strokeWidth={2} />
+            <Mic size={22} color="#20f4ff" strokeWidth={2} />
           ) : (
-            <MicOff size={18} color="#bfe6ff" strokeWidth={2} />
+            <MicOff size={22} color="#bfe6ff" strokeWidth={2} />
           )}
         </Pressable>
+        <View style={styles.brand} pointerEvents="none">
+          <Text style={styles.brandTitle}>ARBITER</Text>
+          <Text style={styles.brandSub}>MISSION CONTROL</Text>
+        </View>
         <Pressable
           onPress={settings.open}
           accessibilityRole="button"
@@ -228,7 +233,7 @@ export default function Home() {
           hitSlop={12}
           style={styles.iconBtn}
         >
-          <SettingsIcon size={18} color="#bfe6ff" strokeWidth={2} />
+          <SettingsIcon size={22} color="#bfe6ff" strokeWidth={2} />
         </Pressable>
       </View>
 
@@ -354,14 +359,15 @@ const styles = StyleSheet.create({
     right: 0,
     flexDirection: 'row',
     justifyContent: 'space-between',
+    alignItems: 'center',
     paddingHorizontal: 16,
   },
   iconBtn: {
-    width: 36,
-    height: 36,
+    width: 48,
+    height: 48,
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 4,
+    borderRadius: 6,
     borderWidth: 1,
     borderColor: 'rgba(0, 240, 255, 0.12)',
     backgroundColor: 'rgba(0, 240, 255, 0.04)',
@@ -369,6 +375,30 @@ const styles = StyleSheet.create({
   iconBtnActive: {
     borderColor: 'rgba(32, 244, 255, 0.55)',
     backgroundColor: 'rgba(32, 244, 255, 0.12)',
+  },
+  // Centered text "logo" — mirrors the website's .mc-brand strip
+  // (ARBITER / MISSION CONTROL) but stacked on a single column so it
+  // sits between the mic and settings buttons regardless of width.
+  brand: {
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 2,
+  },
+  brandTitle: {
+    color: '#20f4ff',
+    fontSize: 15,
+    fontWeight: '200',
+    letterSpacing: 5,
+    textShadowColor: 'rgba(0, 240, 255, 0.45)',
+    textShadowRadius: 8,
+    textShadowOffset: { width: 0, height: 0 },
+  },
+  brandSub: {
+    color: '#9fc4dc',
+    fontFamily: HUD_FONTS.mono,
+    fontSize: 8,
+    letterSpacing: 2.4,
   },
   orbWrap: {
     position: 'absolute',
