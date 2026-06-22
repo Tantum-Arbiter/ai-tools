@@ -9,16 +9,17 @@ import yaml
 
 from . import pipeline
 from .brand_loader import BrandLoadError, load_brand
-from .caption_generator import OllamaCaptionClient
+from .caption_generator import make_caption_client
 from .comfyui_client import ComfyUIClient, ComfyUIConfigError, ComfyUIError
 from .ingest.github_releases import GitHubReleasesClient, GitHubReleasesError
-from .ingest.ranker import OllamaRankerClient, rank_items
+from .ingest.ranker import make_ranker_client, rank_items
 from .ingest.suggested_writer import (
     SuggestedWriterError,
     load_suggestions,
     remove_suggestion,
     write_suggestions,
 )
+from .llm_client import LLMClientConfigError
 from .schemas.suggested_theme import SuggestedTheme
 from .theme_loader import ThemeLoadError, load_themes
 from .instagram_publisher import (
@@ -30,7 +31,7 @@ from .publish_plan import PublishPlanError, build_publish_plan
 from .schemas.brand import Brand
 from .tts_client import EdgeTTSClient
 from .video_renderer import KenBurnsRenderer
-from .voiceover_generator import OllamaVoiceoverClient
+from .voiceover_generator import make_voiceover_client
 
 app = typer.Typer(
     name="factory",
@@ -71,8 +72,18 @@ def render(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
 
-    caption_client = None if no_captions else OllamaCaptionClient.from_env()
-    voiceover_client = OllamaVoiceoverClient.from_env() if video else None
+    try:
+        brand_obj = load_brand(brand, brands_dir=pipeline.DEFAULT_BRANDS_DIR)
+    except BrandLoadError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    try:
+        caption_client = None if no_captions else make_caption_client(brand_obj)
+        voiceover_client = make_voiceover_client(brand_obj) if video else None
+    except LLMClientConfigError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
     tts_client = EdgeTTSClient.from_env() if video else None
     video_renderer = KenBurnsRenderer() if video else None
 
@@ -237,6 +248,9 @@ def ingest(
         candidates = asyncio.run(
             _run_github_ingest(brand_model, limit=limit, min_score=threshold)
         )
+    except LLMClientConfigError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
     except GitHubReleasesError as exc:
         typer.echo(f"github error: {exc}", err=True)
         raise typer.Exit(code=3) from exc
@@ -262,7 +276,7 @@ async def _run_github_ingest(
 ):
     assert brand.ingest is not None
     collector = GitHubReleasesClient.from_env()
-    ranker = OllamaRankerClient.from_env()
+    ranker = make_ranker_client(brand)
 
     raw_items = []
     for repo in brand.ingest.github_repos:

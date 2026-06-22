@@ -13,7 +13,7 @@ from social_content_factory.ingest.github_releases import (
     GitHubReleasesError,
     RawIngestItem,
 )
-from social_content_factory.ingest.ranker import RankedCandidate
+from social_content_factory.ingest.ranker import RankedCandidate, RankerClient
 
 runner = CliRunner()
 
@@ -115,7 +115,7 @@ class TestIngestCommand:
         async def fake_rank(self, brand, item):
             return _candidate(slug=item.tag, score=0.8 if item.tag == "v0-4" else 0.4)
 
-        monkeypatch.setattr(cli.OllamaRankerClient, "rank", fake_rank)
+        monkeypatch.setattr(RankerClient, "rank", fake_rank)
 
         result = runner.invoke(
             cli.app,

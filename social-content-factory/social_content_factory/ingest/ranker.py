@@ -1,15 +1,18 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Final
 
-import httpx
-
 from social_content_factory.ingest.github_releases import RawIngestItem
+from social_content_factory.llm_client import (
+    LLMClient,
+    LLMClientError,
+    OllamaLLMClient,
+    make_llm_client,
+)
 from social_content_factory.schemas.brand import Brand
 
 logger = logging.getLogger(__name__)
@@ -17,6 +20,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_BASE_URL: Final[str] = "http://localhost:11434"
 DEFAULT_MODEL: Final[str] = "phi4:14b"
 DEFAULT_TIMEOUT_SECONDS: Final[float] = 90.0
+RANKER_MODEL_ENV_VAR: Final[str] = "SCF_RANKER_MODEL"
 
 
 class RankerError(Exception):
@@ -52,7 +56,25 @@ _SYSTEM_PROMPT = (
 )
 
 
-class OllamaRankerClient:
+class RankerClient:
+    def __init__(self, llm: LLMClient) -> None:
+        self._llm = llm
+        self.model = llm.model
+
+    async def rank(self, brand: Brand, item: RawIngestItem) -> RankedCandidate:
+        try:
+            parsed = await self._llm.chat_json(
+                system=_SYSTEM_PROMPT,
+                user=_user_prompt(brand, item),
+                options={"temperature": 0.4},
+            )
+        except LLMClientError as exc:
+            raise RankerError(str(exc)) from exc
+
+        return _coerce_candidate(parsed, item, self.model)
+
+
+class OllamaRankerClient(RankerClient):
     def __init__(
         self,
         *,
@@ -60,57 +82,27 @@ class OllamaRankerClient:
         model: str,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     ) -> None:
-        self.base_url = base_url.rstrip("/")
-        self.model = model
+        super().__init__(
+            OllamaLLMClient(
+                base_url=base_url, model=model, timeout_seconds=timeout_seconds
+            )
+        )
+        self.base_url = self._llm.base_url
         self.timeout_seconds = timeout_seconds
 
     @classmethod
     def from_env(cls) -> "OllamaRankerClient":
         base_url = os.environ.get("SCF_OLLAMA_BASE_URL", DEFAULT_BASE_URL)
-        model = os.environ.get("SCF_RANKER_MODEL", DEFAULT_MODEL)
+        model = os.environ.get(RANKER_MODEL_ENV_VAR, DEFAULT_MODEL)
         return cls(base_url=base_url, model=model)
 
-    async def rank(self, brand: Brand, item: RawIngestItem) -> RankedCandidate:
-        payload = {
-            "model": self.model,
-            "format": "json",
-            "stream": False,
-            "messages": [
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": _user_prompt(brand, item)},
-            ],
-            "options": {"temperature": 0.4},
-        }
 
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout_seconds) as http:
-                response = await http.post(f"{self.base_url}/api/chat", json=payload)
-        except httpx.HTTPError as exc:
-            raise RankerError(f"Ollama request failed: {exc}") from exc
-
-        if response.status_code >= 400:
-            raise RankerError(
-                f"Ollama returned HTTP {response.status_code}: {response.text[:200]}"
-            )
-
-        try:
-            body = response.json()
-            content = body["message"]["content"]
-        except (json.JSONDecodeError, KeyError, TypeError) as exc:
-            raise RankerError(f"unexpected Ollama response shape: {exc}") from exc
-
-        try:
-            parsed = json.loads(content)
-        except json.JSONDecodeError as exc:
-            raise RankerError(
-                f"phi4 did not return valid JSON content: {content[:200]}"
-            ) from exc
-
-        return _coerce_candidate(parsed, item, self.model)
+def make_ranker_client(brand: Brand) -> RankerClient:
+    return RankerClient(make_llm_client(brand, model_env_var=RANKER_MODEL_ENV_VAR))
 
 
 async def rank_items(
-    client: OllamaRankerClient,
+    client: RankerClient,
     brand: Brand,
     items: list[RawIngestItem],
     *,

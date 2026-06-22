@@ -47,6 +47,7 @@ RSS / GH (Phase 5) ───┘    (local phi4)      (brand-aware)         │
 - DreamShaper 8 (already downloaded) + 1 SDXL checkpoint for sharper text-on-image work (Phase 2 download, ~6 GB).
 - Mac M1 Pro with `phi4:14b` available via Ollama (already in use).
 - `ffmpeg` on PATH (already required by Grow with Freya pipeline).
+- Optional: `OPENROUTER_API_KEY` in `.env` (operator-managed, never committed) — required only for brands that set `llm_provider: openrouter` in `brands/<key>.yaml`. Default brands stay on local `phi4` and need no key.
 
 ---
 
@@ -153,8 +154,9 @@ RSS / GH (Phase 5) ───┘    (local phi4)      (brand-aware)         │
 
 ---
 
-## Cost: $0/month
+## Cost: $0/month (default)
 - ComfyUI on existing RTX 3080. `phi4` local via Ollama. `edge-tts` free. Instagram Graph API free tier.
+- Per-brand opt-in to OpenRouter (`llm_provider: openrouter` + `llm_model: <slug>`) incurs metered cost on `OPENROUTER_API_KEY`; fails loudly on remote error (no silent local fallback).
 
 ---
 

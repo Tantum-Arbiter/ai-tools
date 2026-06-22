@@ -1,13 +1,16 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
 from dataclasses import dataclass
 from typing import Final
 
-import httpx
-
+from social_content_factory.llm_client import (
+    LLMClient,
+    LLMClientError,
+    OllamaLLMClient,
+    make_llm_client,
+)
 from social_content_factory.schemas.brand import Brand
 from social_content_factory.schemas.theme import Theme
 
@@ -17,6 +20,7 @@ DEFAULT_BASE_URL: Final[str] = "http://localhost:11434"
 DEFAULT_MODEL: Final[str] = "phi4:14b"
 DEFAULT_TIMEOUT_SECONDS: Final[float] = 90.0
 MAX_WORDS: Final[int] = 28
+VOICEOVER_MODEL_ENV_VAR: Final[str] = "SCF_VOICEOVER_MODEL"
 
 
 class VoiceoverGeneratorError(Exception):
@@ -42,59 +46,20 @@ _SYSTEM_PROMPT = (
 )
 
 
-class OllamaVoiceoverClient:
-    def __init__(
-        self,
-        *,
-        base_url: str,
-        model: str,
-        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
-    ) -> None:
-        self.base_url = base_url.rstrip("/")
-        self.model = model
-        self.timeout_seconds = timeout_seconds
-
-    @classmethod
-    def from_env(cls) -> "OllamaVoiceoverClient":
-        base_url = os.environ.get("SCF_OLLAMA_BASE_URL", DEFAULT_BASE_URL)
-        model = os.environ.get("SCF_VOICEOVER_MODEL", DEFAULT_MODEL)
-        return cls(base_url=base_url, model=model)
+class VoiceoverClient:
+    def __init__(self, llm: LLMClient) -> None:
+        self._llm = llm
+        self.model = llm.model
 
     async def generate(self, brand: Brand, theme: Theme) -> VoiceoverScript:
-        payload = {
-            "model": self.model,
-            "format": "json",
-            "stream": False,
-            "messages": [
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": _user_prompt(brand, theme)},
-            ],
-            "options": {"temperature": 0.6},
-        }
-
         try:
-            async with httpx.AsyncClient(timeout=self.timeout_seconds) as http:
-                response = await http.post(f"{self.base_url}/api/chat", json=payload)
-        except httpx.HTTPError as exc:
-            raise VoiceoverGeneratorError(f"Ollama request failed: {exc}") from exc
-
-        if response.status_code >= 400:
-            raise VoiceoverGeneratorError(
-                f"Ollama returned HTTP {response.status_code}: {response.text[:200]}"
+            parsed = await self._llm.chat_json(
+                system=_SYSTEM_PROMPT,
+                user=_user_prompt(brand, theme),
+                options={"temperature": 0.6},
             )
-
-        try:
-            body = response.json()
-            content = body["message"]["content"]
-        except (json.JSONDecodeError, KeyError, TypeError) as exc:
-            raise VoiceoverGeneratorError(f"unexpected Ollama response shape: {exc}") from exc
-
-        try:
-            parsed = json.loads(content)
-        except json.JSONDecodeError as exc:
-            raise VoiceoverGeneratorError(
-                f"phi4 did not return valid JSON content: {content[:200]}"
-            ) from exc
+        except LLMClientError as exc:
+            raise VoiceoverGeneratorError(str(exc)) from exc
 
         text = (parsed.get("script") or "").strip()
         if not text:
@@ -108,6 +73,35 @@ class OllamaVoiceoverClient:
             brand.key, theme.slug, self.model, len(text.split()),
         )
         return VoiceoverScript(text=text, model=self.model)
+
+
+class OllamaVoiceoverClient(VoiceoverClient):
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        model: str,
+        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    ) -> None:
+        super().__init__(
+            OllamaLLMClient(
+                base_url=base_url, model=model, timeout_seconds=timeout_seconds
+            )
+        )
+        self.base_url = self._llm.base_url
+        self.timeout_seconds = timeout_seconds
+
+    @classmethod
+    def from_env(cls) -> "OllamaVoiceoverClient":
+        base_url = os.environ.get("SCF_OLLAMA_BASE_URL", DEFAULT_BASE_URL)
+        model = os.environ.get(VOICEOVER_MODEL_ENV_VAR, DEFAULT_MODEL)
+        return cls(base_url=base_url, model=model)
+
+
+def make_voiceover_client(brand: Brand) -> VoiceoverClient:
+    return VoiceoverClient(
+        make_llm_client(brand, model_env_var=VOICEOVER_MODEL_ENV_VAR)
+    )
 
 
 def _user_prompt(brand: Brand, theme: Theme) -> str:

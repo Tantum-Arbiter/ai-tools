@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 AspectRatio = Literal["1x1", "4x5", "9x16", "1.91x1"]
-LLMProvider = Literal["phi4", "openai"]
+LLMProvider = Literal["phi4", "openrouter"]
 
 
 class BrandIngest(BaseModel):
@@ -27,6 +27,7 @@ class Brand(BaseModel):
     default_formats: list[AspectRatio] = Field(min_length=1)
     allow_auto_publish: bool = False
     llm_provider: LLMProvider = "phi4"
+    llm_model: str | None = None
     draft: bool = False
     ingest: BrandIngest | None = None
 
@@ -37,3 +38,9 @@ class Brand(BaseModel):
         if not normalised.replace("-", "").replace("_", "").isalnum():
             raise ValueError("brand key must be a slug (alphanumeric, '-' or '_' only)")
         return normalised
+
+    @model_validator(mode="after")
+    def openrouter_requires_model(self) -> "Brand":
+        if self.llm_provider == "openrouter" and not self.llm_model:
+            raise ValueError("llm_model is required when llm_provider is 'openrouter'")
+        return self

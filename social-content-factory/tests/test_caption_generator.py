@@ -10,9 +10,12 @@ from social_content_factory.brand_loader import load_brand
 from social_content_factory.caption_generator import (
     IG_LIMIT,
     X_LIMIT,
+    CaptionClient,
     CaptionGeneratorError,
     OllamaCaptionClient,
+    make_caption_client,
 )
+from social_content_factory.schemas.brand import Brand
 from social_content_factory.theme_loader import load_theme
 
 MODULE_ROOT = Path(__file__).resolve().parent.parent
@@ -20,6 +23,8 @@ BRANDS_DIR = MODULE_ROOT / "brands"
 THEMES_DIR = MODULE_ROOT / "themes"
 OLLAMA_URL = "http://localhost:11434"
 CHAT_PATH = "/api/chat"
+OPENROUTER_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_CHAT_PATH = "/chat/completions"
 
 
 @pytest.fixture
@@ -155,3 +160,66 @@ class TestGenerate:
         messages_text = json.dumps(body["messages"]).lower()
         assert "weekly-build" in messages_text or theme.subject.lower()[:20] in messages_text
         assert "calm" in messages_text
+
+
+def _openrouter_response(*, instagram: str = "ig", x: str = "x") -> dict:
+    return {
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps({"instagram": instagram, "x": x}),
+                }
+            }
+        ]
+    }
+
+
+def _openrouter_brand() -> Brand:
+    return Brand(
+        key="router",
+        name="Router",
+        voice="calm",
+        audience="builders",
+        visual_style="dark",
+        negative_prompts=["nsfw"],
+        default_formats=["1x1"],
+        llm_provider="openrouter",
+        llm_model="anthropic/claude-sonnet-4-5",
+    )
+
+
+class TestMakeCaptionClient:
+    async def test_uses_openrouter_when_brand_configured(
+        self, theme, respx_mock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+        route = respx_mock.post(f"{OPENROUTER_URL}{OPENROUTER_CHAT_PATH}").mock(
+            return_value=httpx.Response(
+                200,
+                json=_openrouter_response(
+                    instagram="shipped via claude",
+                    x="Routed through OpenRouter, JSON mode, deterministic.",
+                ),
+            )
+        )
+
+        under_test = make_caption_client(_openrouter_brand())
+        captions = await under_test.generate(_openrouter_brand(), theme)
+
+        assert "claude" in captions.instagram.lower()
+        assert captions.model == "anthropic/claude-sonnet-4-5"
+        request = route.calls.last.request
+        assert request.headers["Authorization"] == "Bearer sk-or-test"
+        body = json.loads(request.content.decode())
+        assert body["model"] == "anthropic/claude-sonnet-4-5"
+        assert body["response_format"] == {"type": "json_object"}
+
+    def test_phi4_brand_returns_ollama_backed_client(
+        self, brand, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+        under_test = make_caption_client(brand)
+
+        assert isinstance(under_test, CaptionClient)
+        assert under_test.model == "phi4:14b"

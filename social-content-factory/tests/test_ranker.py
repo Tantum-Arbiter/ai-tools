@@ -15,9 +15,12 @@ from social_content_factory.ingest.ranker import (
     DEFAULT_MODEL,
     OllamaRankerClient,
     RankedCandidate,
+    RankerClient,
     RankerError,
+    make_ranker_client,
     rank_items,
 )
+from social_content_factory.schemas.brand import Brand
 
 MODULE_ROOT = pytest.importorskip("pathlib").Path(__file__).parent.parent
 BRANDS_DIR = MODULE_ROOT / "brands"
@@ -196,3 +199,53 @@ class TestRankItems:
         results = await rank_items(_client(), brand, items, min_score=0.0)
 
         assert [r.score for r in results] == [0.9, 0.4]
+
+
+def _openrouter_brand() -> Brand:
+    return Brand(
+        key="router",
+        name="Router",
+        voice="calm",
+        audience="builders",
+        visual_style="dark",
+        negative_prompts=["nsfw"],
+        default_formats=["1x1"],
+        llm_provider="openrouter",
+        llm_model="anthropic/claude-sonnet-4-5",
+    )
+
+
+class TestMakeRankerClient:
+    @respx.mock
+    async def test_uses_openrouter_when_brand_configured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+        route = respx.post("https://openrouter.ai/api/v1/chat/completions").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"content": json.dumps(_good_payload())}}
+                    ]
+                },
+            )
+        )
+
+        under_test = make_ranker_client(_openrouter_brand())
+        result = await under_test.rank(_openrouter_brand(), _item())
+
+        assert isinstance(result, RankedCandidate)
+        assert result.model == "anthropic/claude-sonnet-4-5"
+        assert route.called
+
+    def test_phi4_brand_returns_ranker_client(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        brand = load_brand("personal", brands_dir=BRANDS_DIR)
+
+        under_test = make_ranker_client(brand)
+
+        assert isinstance(under_test, RankerClient)
+        assert under_test.model == "phi4:14b"
