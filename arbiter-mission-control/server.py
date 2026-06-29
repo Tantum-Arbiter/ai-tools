@@ -146,6 +146,7 @@ _SESSION_TOKEN_ROUTES = frozenset({"/api/events"})
 
 # ── Input Length Limits ───────────────────────────────────────────────
 _MAX_DIRECTIVE_LEN = int(os.getenv("MAX_DIRECTIVE_LEN", "5000"))      # ~1250 tokens
+_CEO_AGENT_MAX_TOKENS = int(os.getenv("CEO_AGENT_MAX_TOKENS", "4096"))
 _MAX_SYSTEM_PROMPT_LEN = int(os.getenv("MAX_SYSTEM_PROMPT_LEN", "8000"))  # ~2000 tokens
 _MAX_NAME_LEN = 200
 _MAX_DESCRIPTION_LEN = 2000
@@ -3950,12 +3951,12 @@ async def _org_compress_brief(agent_output: str, child_agents: list, directive: 
     try:
         reply = None
         if OPENROUTER_API_KEY:
-            reply = await _chat_openrouter(messages, max_tokens=1200, temperature=0.3)
+            reply = await _chat_openrouter(messages, max_tokens=2000, temperature=0.3)
         if not reply:
-            reply = await _chat_llm(messages, max_tokens=1200, purpose="org_brief_compress")
+            reply = await _chat_llm(messages, max_tokens=2000, purpose="org_brief_compress")
     except Exception:
         # Fallback: send truncated parent output to all children
-        truncated = agent_output[:500]
+        truncated = agent_output[:1000]
         return {cid: truncated for cid in child_agents}
 
     # Parse briefs from response
@@ -3971,7 +3972,7 @@ async def _org_compress_brief(agent_output: str, child_agents: list, directive: 
             end = min(next_markers) if next_markers else len(reply)
             briefs[cid] = reply[start:end].strip()
         else:
-            briefs[cid] = agent_output[:400]  # fallback
+            briefs[cid] = agent_output[:800]
     return briefs
 
 
@@ -4113,7 +4114,7 @@ async def _ceo_dispatch(agent_id: str, task: str, source: str = "dispatch",
     try:
         if provider == "openrouter" and OPENROUTER_API_KEY:
             reply = await _chat_openrouter(
-                messages, max_tokens=2400, temperature=0.6,
+                messages, max_tokens=_CEO_AGENT_MAX_TOKENS, temperature=0.6,
                 model=model, out_meta=or_meta,
             )
         elif provider == "claude" and ANTHROPIC_API_KEY:
@@ -4122,12 +4123,12 @@ async def _ceo_dispatch(agent_id: str, task: str, source: str = "dispatch",
                 log.warning(f"Claude blocked ({block}) — falling back to OpenRouter for [{agent_id}]")
                 if OPENROUTER_API_KEY:
                     reply = await _chat_openrouter(
-                        messages, max_tokens=2400, temperature=0.6,
+                        messages, max_tokens=_CEO_AGENT_MAX_TOKENS, temperature=0.6,
                         model=_OPENROUTER_AGENT_MODEL, out_meta=or_meta,
                     )
                     actual_provider = "openrouter"
                 else:
-                    reply = await _chat_llm(messages, max_tokens=2400, purpose=f"ceo-{agent_id}")
+                    reply = await _chat_llm(messages, max_tokens=_CEO_AGENT_MAX_TOKENS, purpose=f"ceo-{agent_id}")
                     actual_provider = "ollama"
             else:
                 client = _get_anthropic()
@@ -4150,7 +4151,7 @@ async def _ceo_dispatch(agent_id: str, task: str, source: str = "dispatch",
 
                     _create_kwargs = {
                         "model": model,
-                        "max_tokens": 2400,
+                        "max_tokens": _CEO_AGENT_MAX_TOKENS,
                         "temperature": 0.6,
                         "messages": api_messages,
                     }
@@ -4163,7 +4164,7 @@ async def _ceo_dispatch(agent_id: str, task: str, source: str = "dispatch",
                     _claude_record_usage(input_tok, output_tok)
                     log.info(f"Claude agent [{agent_id}]: {input_tok}in/{output_tok}out tokens via {model}")
                 else:
-                    reply = await _chat_llm(messages, max_tokens=2400, purpose=f"ceo-{agent_id}")
+                    reply = await _chat_llm(messages, max_tokens=_CEO_AGENT_MAX_TOKENS, purpose=f"ceo-{agent_id}")
                     actual_provider = "ollama"
         elif provider == "gemini" and GOOGLE_API_KEY:
             gemini_block = _gemini_check_budget()
@@ -4171,12 +4172,12 @@ async def _ceo_dispatch(agent_id: str, task: str, source: str = "dispatch",
                 log.warning(f"Gemini blocked ({gemini_block}) — falling back to OpenRouter for [{agent_id}]")
                 if OPENROUTER_API_KEY:
                     reply = await _chat_openrouter(
-                        messages, max_tokens=2400, temperature=0.6,
+                        messages, max_tokens=_CEO_AGENT_MAX_TOKENS, temperature=0.6,
                         model=_OPENROUTER_AGENT_MODEL, out_meta=or_meta,
                     )
                     actual_provider = "openrouter"
                 else:
-                    reply = await _chat_llm(messages, max_tokens=2400, purpose=f"ceo-{agent_id}")
+                    reply = await _chat_llm(messages, max_tokens=_CEO_AGENT_MAX_TOKENS, purpose=f"ceo-{agent_id}")
                     actual_provider = "ollama"
             else:
                 from openai import OpenAI as _OAI
@@ -4187,7 +4188,7 @@ async def _ceo_dispatch(agent_id: str, task: str, source: str = "dispatch",
                 try:
                     resp = gemini.chat.completions.create(
                         model=model, messages=messages,
-                        max_tokens=2400, temperature=0.6,
+                        max_tokens=_CEO_AGENT_MAX_TOKENS, temperature=0.6,
                         timeout=_OPENROUTER_TIMEOUT,
                     )
                     reply = resp.choices[0].message.content.strip()
@@ -4199,21 +4200,21 @@ async def _ceo_dispatch(agent_id: str, task: str, source: str = "dispatch",
                     log.warning(f"Gemini error for [{agent_id}]: {gem_err} — falling back to OpenRouter")
                     if OPENROUTER_API_KEY:
                         reply = await _chat_openrouter(
-                            messages, max_tokens=2400, temperature=0.6,
+                            messages, max_tokens=_CEO_AGENT_MAX_TOKENS, temperature=0.6,
                             model=_OPENROUTER_AGENT_MODEL, out_meta=or_meta,
                         )
                         actual_provider = "openrouter"
                     else:
-                        reply = await _chat_llm(messages, max_tokens=2400, purpose=f"ceo-{agent_id}")
+                        reply = await _chat_llm(messages, max_tokens=_CEO_AGENT_MAX_TOKENS, purpose=f"ceo-{agent_id}")
                         actual_provider = "ollama"
         elif provider == "openai" and OPENAI_API_KEY:
             resp = oai.chat.completions.create(
                 model=model, messages=messages,
-                max_tokens=2400, temperature=0.6,
+                max_tokens=_CEO_AGENT_MAX_TOKENS, temperature=0.6,
             )
             reply = resp.choices[0].message.content.strip()
         else:
-            reply = await _chat_llm(messages, max_tokens=2400, purpose=f"ceo-{agent_id}")
+            reply = await _chat_llm(messages, max_tokens=_CEO_AGENT_MAX_TOKENS, purpose=f"ceo-{agent_id}")
             actual_provider = "ollama"
     except Exception as e:
         log.error(f"CEO dispatch [{agent_id}] error: {e}")
@@ -4838,9 +4839,17 @@ _PIPELINE_TEMPLATES = {
             "description": "Market intelligence & evidence gathering",
             "task_template": (
                 "## DIRECTIVE\n{directive}\n\n"
-                "## TASK\n"
-                "Deliver a research brief: executive summary, market intelligence, "
-                "competitive landscape, audience & demand signals, trend analysis (6-18 month), sources.\n"
+                "## TASK — RESEARCHER\n"
+                "You are a senior market researcher. Produce a thorough, structured research brief.\n"
+                "Use any web research data provided below. Fill every section with substance.\n\n"
+                "### Required sections (use these exact headings):\n"
+                "1. **Executive Summary** — 3-5 sentence overview of findings\n"
+                "2. **Market Intelligence** — market size, growth rate, key players, recent developments\n"
+                "3. **Competitive Landscape** — top 5+ competitors, their strengths/weaknesses, positioning\n"
+                "4. **Audience & Demand Signals** — target segments, pain points, buying behaviour, search trends\n"
+                "5. **Trend Analysis (6-18 months)** — emerging patterns, technology shifts, regulatory changes\n"
+                "6. **Sources & Confidence** — cite sources used, note confidence level per claim\n\n"
+                "Write at least 800 words. Be specific with numbers, names, and dates.\n"
             ),
             "gate": False,
         },
@@ -4945,9 +4954,17 @@ _PIPELINE_TEMPLATES = {
             "description": "Deep research & intelligence",
             "task_template": (
                 "## DIRECTIVE\n{directive}\n\n"
-                "## TASK\n"
-                "Deliver a comprehensive research brief: executive summary, market intelligence, "
-                "competitive landscape, audience & demand, trends, sources.\n"
+                "## TASK — DEEP RESEARCHER\n"
+                "Produce a comprehensive research brief with concrete data points.\n"
+                "Use any web research data provided below.\n\n"
+                "### Required sections:\n"
+                "1. **Executive Summary** — key findings in 3-5 sentences\n"
+                "2. **Market Intelligence** — size, growth, key players, recent news\n"
+                "3. **Competitive Landscape** — competitors, positioning, gaps\n"
+                "4. **Audience & Demand** — segments, pain points, buying signals\n"
+                "5. **Trends** — 6-18 month outlook\n"
+                "6. **Sources & Confidence**\n\n"
+                "Be specific. Use numbers. Write at least 600 words.\n"
             ),
             "gate": False,
         },
@@ -4973,9 +4990,16 @@ _PIPELINE_TEMPLATES = {
             "description": "Background research for content",
             "task_template": (
                 "## DIRECTIVE\n{directive}\n\n"
-                "## TASK\n"
-                "Research for content creation: key facts, audience insights, "
-                "trending angles, competitor content gaps, hook ideas, sources.\n"
+                "## TASK — CONTENT RESEARCHER\n"
+                "Research for content creation. Use any web research data provided below.\n\n"
+                "### Required sections:\n"
+                "1. **Key Facts & Statistics** — data points to support content\n"
+                "2. **Audience Insights** — who cares, why, what they search for\n"
+                "3. **Trending Angles** — what's hot right now in this space\n"
+                "4. **Competitor Content Gaps** — what others miss\n"
+                "5. **Hook Ideas** — 5+ attention-grabbing angles\n"
+                "6. **Sources**\n\n"
+                "Be specific with examples and data.\n"
             ),
             "gate": False,
         },
@@ -5846,9 +5870,8 @@ async def _generate_pipeline_report(pipeline_id: str, directive: str, stages: li
             return
 
         all_context = "\n".join(agent_outputs)
-        # Truncate if massive (keep first 24000 chars — enough for 8 agents at 2400 tokens each)
-        if len(all_context) > 24000:
-            all_context = all_context[:24000] + "\n\n[...truncated for token budget]"
+        if len(all_context) > 40000:
+            all_context = all_context[:40000] + "\n\n[...truncated for token budget]"
 
         messages = [
             {"role": "system", "content": _PIPELINE_REPORT_PROMPT},
@@ -6113,7 +6136,34 @@ async def _pipeline_run_next(pipeline_id: str) -> dict:
             all_outputs=all_outputs,
         )
 
-        # Run the agent
+        if stage["agent_id"] == "researcher":
+            try:
+                directive_text = pipe["directive"]
+                search_queries = [
+                    directive_text[:120],
+                    f"{directive_text[:80]} market size statistics",
+                    f"{directive_text[:80]} competitor analysis",
+                ]
+                web_results = await asyncio.gather(
+                    *[_search_and_fetch(q, max_urls=3, chars_per_url=2000) for q in search_queries],
+                    return_exceptions=True,
+                )
+                web_parts = []
+                for q, r in zip(search_queries, web_results):
+                    if isinstance(r, str) and r not in ("[No search results]", "[No content retrieved]"):
+                        web_parts.append(f"### Search: {q}\n{r}")
+                if web_parts:
+                    web_context = "\n\n".join(web_parts)
+                    if len(web_context) > 12000:
+                        web_context = web_context[:12000] + "\n\n[...truncated]"
+                    task += (
+                        "\n\n## LIVE WEB RESEARCH (sourced automatically — cite these)\n"
+                        + web_context
+                    )
+                    log.info(f"Pipeline [{pipeline_id}] researcher: injected {len(web_context)} chars of web research")
+            except Exception as e:
+                log.warning(f"Pipeline [{pipeline_id}] researcher web research failed (non-fatal): {e}")
+
         stage["status"] = "running"
         stage["started_at"] = datetime.utcnow().isoformat()
         arbiter_db.update_pipeline(pipeline_id, stages, idx, "running")
