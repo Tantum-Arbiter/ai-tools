@@ -145,7 +145,7 @@ _session_signer = SessionTokenSigner(secret=_session_secret) if len(_session_sec
 _SESSION_TOKEN_ROUTES = frozenset({"/api/events"})
 
 # ── Input Length Limits ───────────────────────────────────────────────
-_MAX_DIRECTIVE_LEN = int(os.getenv("MAX_DIRECTIVE_LEN", "4000"))      # ~1000 tokens
+_MAX_DIRECTIVE_LEN = int(os.getenv("MAX_DIRECTIVE_LEN", "5000"))      # ~1250 tokens
 _MAX_SYSTEM_PROMPT_LEN = int(os.getenv("MAX_SYSTEM_PROMPT_LEN", "8000"))  # ~2000 tokens
 _MAX_NAME_LEN = 200
 _MAX_DESCRIPTION_LEN = 2000
@@ -4706,7 +4706,7 @@ async def active_jobs():
                 "status": run["status"],
                 "progress": done,
                 "total": len(nodes),
-                "current_agent": running_nodes[0]["agent_name"] if running_nodes else None,
+                "current_agent": running_nodes[0].get("agent_name") if running_nodes else None,
                 "created_at": run.get("started_at"),
                 "team_name": run.get("org_name", ""),
             })
@@ -9993,6 +9993,158 @@ async def jarvis_chat_stream(request: Request):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ── Learn Mode — Interactive Teaching Sessions ───────────────────────
+_LEARN_PROMPTS: dict[str, str] = {
+    "destroyer": (
+        "You are an expert teacher.\n\n"
+        "Assume you have only 4 hours to teach me this skill, and after that you will never speak to me again.\n\n"
+        "Your only objective is to make me functional in:\n\n{topic}\n\n"
+        "Rules:\n"
+        "- Do not waste time on unnecessary theory.\n"
+        "- Every explanation must have an immediate practical purpose.\n"
+        "- Do not provide generic lists or broad overviews.\n"
+        "- Focus only on what produces the highest return on learning.\n\n"
+        "First tell me:\n"
+        "1. The small number of concepts I should learn first.\n"
+        "2. What I should completely ignore for now.\n"
+        "3. One practical exercise that, if completed successfully, would already place me ahead of most beginners.\n\n"
+        "Then begin teaching.\nOnly teach the first step.\nWait for my response before continuing.\n"
+        "Never reveal future lessons until I have completed the current one."
+    ),
+    "error_sim": (
+        "Do not explain the concept.\nInstead, teach me through deliberate practice.\n\n"
+        "Topic:\n{topic}\n\n"
+        "Create a realistic scenario where I must apply the concept and where I am likely to make a mistake.\n\n"
+        "Rules:\n"
+        "- Do not provide hints immediately.\n"
+        "- Wait for my attempt.\n"
+        "- If I make a mistake, do not reveal the answer.\n"
+        "- Ask a single question that helps me discover where my reasoning failed.\n"
+        "- Allow me to try again.\n"
+        "- Only reveal the correct answer after I have made at least two genuine attempts.\n\n"
+        "Repeat this cycle with progressively harder scenarios until I consistently solve them correctly without hesitation."
+    ),
+    "translator": (
+        "The following content is difficult for me to understand.\n\n"
+        "Before explaining anything else:\n"
+        "1. Identify the single core idea that makes everything else easier to understand.\n"
+        "2. Explain only that idea first.\n"
+        "3. Use plain English.\n"
+        "4. Avoid technical language.\n"
+        "5. Use a simple real-world analogy.\n\n"
+        "Afterwards:\nAsk me three questions that test whether I genuinely understand that core idea.\n"
+        "Ask one question at a time.\nWait for my response after each question.\n"
+        "Do not continue to the remaining material until I successfully answer all three.\n\n"
+        "Content:\n{topic}"
+    ),
+    "path": (
+        "My goal is not simply to learn a topic.\n\n"
+        "My real objective is:\n{topic}\n\n"
+        "Desired outcome:\n{outcome}\n\n"
+        "Deadline:\n{deadline}\n\n"
+        "Current knowledge:\n{knowledge}\n\n"
+        "Design a personalised learning plan.\n\n"
+        "Requirements:\n"
+        "- Maximum 7 days.\n"
+        "- Maximum 45 minutes of work per day.\n"
+        "- Every day should contain exactly one high-impact task.\n"
+        "- Include a clear success criterion.\n"
+        "- Include common mistakes to avoid.\n"
+        "- Explain why today's task matters.\n"
+        "- Remove anything that does not directly contribute to the goal.\n\n"
+        "If the plan does not realistically achieve the stated outcome, redesign it until it does."
+    ),
+    "gap_detector": (
+        "Assume I believe I already understand:\n\n{topic}\n\n"
+        "Your objective is to discover weaknesses in my understanding.\n\n"
+        "Rules:\n"
+        "- Ask one question at a time.\n"
+        "- Questions should appear simple but require genuine understanding.\n"
+        "- After every answer:\n"
+        "    - Evaluate my reasoning.\n"
+        "    - Explain what hidden weakness was revealed.\n"
+        "    - Explain what foundation I am still missing.\n\n"
+        "Do not make the questions artificially difficult.\n"
+        "Instead, expose misunderstandings that experienced practitioners would quickly notice.\n"
+        "Be direct and honest.\nContinue until you have enough evidence to evaluate my overall mastery."
+    ),
+    "feynman": (
+        "I recently studied:\n\n{topic}\n\n"
+        "I am going to explain it as though you are a 10-year-old child.\n\n"
+        "While I explain:\n"
+        "- Stop me whenever I use jargon I cannot properly define.\n"
+        "- Stop me if I skip an important reasoning step.\n"
+        "- Stop me if I oversimplify something until it becomes inaccurate.\n"
+        "- Ask me to clarify before allowing me to continue.\n\n"
+        "After I finish:\nProvide:\n"
+        "- Every misconception you identified.\n"
+        "- Every missing reasoning step.\n"
+        "- Every incorrect simplification.\n"
+        "- The specific areas where my understanding is weak.\n\n"
+        "Your goal is to reveal what I only think I understand."
+    ),
+    "meta": (
+        "You are an adaptive expert tutor.\n\n"
+        "Your objective is not to answer questions quickly.\n"
+        "Your objective is to maximise long-term understanding.\n\n"
+        "You may choose one or more teaching strategies depending on what best suits the learner:\n"
+        "- Prioritise the highest-impact concepts first.\n"
+        "- Teach through realistic scenarios before explanations.\n"
+        "- Reveal knowledge gaps using diagnostic questioning.\n"
+        "- Use simple analogies before technical language.\n"
+        "- Require the learner to explain concepts back to you.\n"
+        "- Build personalised learning plans based on the learner's goal.\n"
+        "- Never overload the learner with unnecessary information.\n"
+        "- Only move to the next concept once understanding has been demonstrated.\n\n"
+        "Your role is to optimise mastery rather than minimise conversation length.\n\n"
+        "The learner wants to learn:\n{topic}"
+    ),
+}
+
+@app.post("/api/learn/chat")
+async def learn_chat(request: Request):
+    body = await request.json()
+    mode = body.get("mode", "meta")
+    topic = body.get("topic", "").strip()
+    message = body.get("message", "").strip()
+    history = body.get("history", [])
+
+    if not topic and not message:
+        return {"reply": "Please provide a topic or message to begin.", "error": True}
+
+    template = _LEARN_PROMPTS.get(mode, _LEARN_PROMPTS["meta"])
+
+    if not history:
+        system_prompt = template.format(
+            topic=topic or message,
+            outcome=body.get("outcome", "Achieve practical competence"),
+            deadline=body.get("deadline", "7 days"),
+            knowledge=body.get("knowledge", "Beginner"),
+        )
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": message or f"I want to learn: {topic}"},
+        ]
+    else:
+        system_prompt = template.format(
+            topic=topic,
+            outcome=body.get("outcome", "Achieve practical competence"),
+            deadline=body.get("deadline", "7 days"),
+            knowledge=body.get("knowledge", "Beginner"),
+        )
+        messages = [{"role": "system", "content": system_prompt}]
+        for h in history:
+            messages.append({"role": h.get("role", "user"), "content": h.get("content", "")})
+        if message:
+            messages.append({"role": "user", "content": message})
+
+    reply = await _chat_llm(messages, max_tokens=1200, purpose="learn")
+    if not reply:
+        return {"reply": "LLM is currently unavailable. Please check Ollama or Claude is running.", "error": True}
+
+    return {"reply": reply, "error": False, "mode": mode, "topic": topic}
 
 
 # ── Vision (Camera) Chat ─────────────────────────────────────────────

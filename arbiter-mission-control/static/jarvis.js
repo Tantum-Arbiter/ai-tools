@@ -6711,6 +6711,7 @@ const DOCK_EXPAND = {
     claude:    { title: 'CLAUDE API USAGE',           panel: 'dock-panel-claude' },
     ceo:       { title: 'AGENT ORCHESTRATOR',           panel: 'dock-panel-ceo' },
     org:       { title: 'CEO',                        panel: 'dock-panel-org' },
+    learn:     { title: 'LEARN',                       panel: 'dock-panel-learn' },
 };
 
 let activeDock = null;
@@ -10554,6 +10555,184 @@ function _camInitParticles() {
     animate();
 }
 
+// ── Learn Tab — Interactive Teaching Sessions ──────────────────────
+const _learn = {
+    mode: null,
+    topic: '',
+    history: [],
+    sending: false,
+    fields: {},
+};
+
+const _LEARN_MODES = {
+    destroyer:    { icon: '⚡', name: 'LEARNING CURVE DESTROYER',  fields: ['topic'] },
+    error_sim:    { icon: '🎯', name: 'REAL ERROR SIMULATOR',      fields: ['topic'] },
+    translator:   { icon: '🔑', name: 'CORE CONCEPT TRANSLATOR',   fields: ['topic'] },
+    path:         { icon: '🗺️', name: 'LEARNING PATH ARCHITECT',   fields: ['topic', 'outcome', 'deadline', 'knowledge'] },
+    gap_detector: { icon: '🔍', name: 'KNOWLEDGE GAP DETECTOR',    fields: ['topic'] },
+    feynman:      { icon: '🧠', name: 'FORCED FEYNMAN TEACHER',    fields: ['topic'] },
+    meta:         { icon: '🤖', name: 'ADAPTIVE META COACH',       fields: ['topic'] },
+};
+
+const _LEARN_FIELD_LABELS = {
+    topic:     { label: 'What do you want to learn?', placeholder: 'e.g. React hooks, Kubernetes networking, SQL window functions...' },
+    outcome:   { label: 'Desired outcome',             placeholder: 'e.g. Build a production REST API' },
+    deadline:  { label: 'Deadline',                    placeholder: 'e.g. 7 days, 2 weeks' },
+    knowledge: { label: 'Current knowledge level',     placeholder: 'e.g. Beginner, I know basic Python but not async' },
+};
+
+function _learnSelectMode(mode) {
+    const cfg = _LEARN_MODES[mode];
+    if (!cfg) return;
+
+    _learn.mode = mode;
+    _learn.history = [];
+    _learn.fields = {};
+
+    document.getElementById('learn-mode-selector').style.display = 'none';
+    const setup = document.getElementById('learn-setup');
+    setup.style.display = 'block';
+    document.getElementById('learn-setup-icon').textContent = cfg.icon;
+    document.getElementById('learn-setup-title').textContent = cfg.name;
+
+    const fieldsEl = document.getElementById('learn-setup-fields');
+    fieldsEl.innerHTML = '';
+    for (const f of cfg.fields) {
+        const fl = _LEARN_FIELD_LABELS[f] || { label: f, placeholder: '' };
+        const div = document.createElement('div');
+        div.className = 'learn-field-group';
+        div.innerHTML = `
+            <label class="learn-field-label">${fl.label}</label>
+            ${f === 'topic'
+                ? `<textarea class="learn-field-input learn-topic-textarea" id="learn-field-${f}" placeholder="${fl.placeholder}" rows="3"></textarea>`
+                : `<input class="learn-field-input" id="learn-field-${f}" placeholder="${fl.placeholder}" />`}
+        `;
+        fieldsEl.appendChild(div);
+    }
+
+    const firstField = fieldsEl.querySelector('.learn-field-input');
+    if (firstField) setTimeout(() => firstField.focus(), 100);
+}
+
+function _learnBackToModes() {
+    document.getElementById('learn-setup').style.display = 'none';
+    document.getElementById('learn-mode-selector').style.display = 'block';
+    _learn.mode = null;
+}
+
+function _learnReset() {
+    document.getElementById('learn-session').style.display = 'none';
+    document.getElementById('learn-setup').style.display = 'none';
+    document.getElementById('learn-mode-selector').style.display = 'block';
+    _learn.mode = null;
+    _learn.topic = '';
+    _learn.history = [];
+    _learn.sending = false;
+}
+
+async function _learnStart() {
+    const cfg = _LEARN_MODES[_learn.mode];
+    if (!cfg) return;
+
+    for (const f of cfg.fields) {
+        const el = document.getElementById(`learn-field-${f}`);
+        _learn.fields[f] = el ? el.value.trim() : '';
+    }
+    _learn.topic = _learn.fields.topic || '';
+
+    if (!_learn.topic) {
+        const topicEl = document.getElementById('learn-field-topic');
+        if (topicEl) { topicEl.focus(); topicEl.classList.add('learn-field-error'); }
+        return;
+    }
+
+    document.getElementById('learn-setup').style.display = 'none';
+    const session = document.getElementById('learn-session');
+    session.style.display = 'flex';
+    document.getElementById('learn-session-mode').textContent = cfg.icon + ' ' + cfg.name;
+    document.getElementById('learn-session-topic').textContent = _learn.topic;
+    document.getElementById('learn-messages').innerHTML = '';
+    _learn.history = [];
+
+    _learnAddMessage('system', 'Starting session...');
+    await _learnSendToAPI(_learn.topic);
+
+    const input = document.getElementById('learn-input');
+    if (input) input.focus();
+}
+
+function _learnAddMessage(role, content) {
+    const container = document.getElementById('learn-messages');
+    const div = document.createElement('div');
+    div.className = `learn-msg learn-msg-${role}`;
+
+    const formatted = content
+        .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre class="learn-code"><code>$2</code></pre>')
+        .replace(/`([^`]+)`/g, '<code class="learn-inline-code">$1</code>')
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        .replace(/^\s*(\d+)\.\s+(.+)$/gm, '<div class="learn-list-item"><span class="learn-list-num">$1.</span> $2</div>')
+        .replace(/^\s*[-•]\s+(.+)$/gm, '<div class="learn-list-item"><span class="learn-list-bullet">•</span> $1</div>')
+        .replace(/\n/g, '<br>');
+
+    div.innerHTML = `<div class="learn-msg-role">${role === 'assistant' ? '🤖 TUTOR' : role === 'user' ? '👤 YOU' : '⚙ SYSTEM'}</div><div class="learn-msg-content">${formatted}</div>`;
+    container.appendChild(div);
+    container.scrollTop = container.scrollHeight;
+}
+
+async function _learnSend() {
+    if (_learn.sending) return;
+    const input = document.getElementById('learn-input');
+    const msg = input.value.trim();
+    if (!msg) return;
+
+    input.value = '';
+    _learnAddMessage('user', msg);
+    await _learnSendToAPI(msg);
+}
+
+async function _learnSendToAPI(message) {
+    _learn.sending = true;
+    const sendBtn = document.getElementById('learn-send-btn');
+    if (sendBtn) sendBtn.disabled = true;
+
+    const loadingDiv = document.createElement('div');
+    loadingDiv.className = 'learn-msg learn-msg-loading';
+    loadingDiv.innerHTML = '<div class="learn-typing"><span></span><span></span><span></span></div>';
+    document.getElementById('learn-messages').appendChild(loadingDiv);
+
+    try {
+        const resp = await fetch('/api/learn/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                mode: _learn.mode,
+                topic: _learn.topic,
+                message,
+                history: _learn.history,
+                outcome: _learn.fields.outcome || '',
+                deadline: _learn.fields.deadline || '',
+                knowledge: _learn.fields.knowledge || '',
+            }),
+        });
+        const data = await resp.json();
+        loadingDiv.remove();
+
+        if (data.error) {
+            _learnAddMessage('system', data.reply || 'Error communicating with LLM.');
+        } else {
+            _learn.history.push({ role: 'user', content: message });
+            _learn.history.push({ role: 'assistant', content: data.reply });
+            _learnAddMessage('assistant', data.reply);
+        }
+    } catch (err) {
+        loadingDiv.remove();
+        _learnAddMessage('system', `Network error: ${err.message}`);
+    }
+
+    _learn.sending = false;
+    if (sendBtn) sendBtn.disabled = false;
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     // Dock panel clicks → full-page panel view
     document.querySelectorAll('.dock-panel[data-dock]').forEach(tile => {
@@ -10586,6 +10765,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const todoInput = document.getElementById('todo-input');
     if (todoAddBtn) todoAddBtn.addEventListener('click', _addTodo);
     if (todoInput) todoInput.addEventListener('keydown', e => { if (e.key === 'Enter') _addTodo(); });
+    // Learn tab: enter key sends
+    const learnInput = document.getElementById('learn-input');
+    if (learnInput) learnInput.addEventListener('keydown', e => { if (e.key === 'Enter') _learnSend(); });
     // Init todo dock badge + reminders
     _updateTodoDock();
     _initTodoReminders();

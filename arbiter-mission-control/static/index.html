@@ -544,6 +544,13 @@
                 <div class="dp-stat"><span class="dp-val nominal" id="dock-org-teams">0</span><span class="dp-lbl">TEAMS</span></div>
             </div>
         </div>
+        <!-- Learn -->
+        <div class="dock-panel" data-dock="learn" title="Interactive Learning Sessions">
+            <div class="dp-header"><span class="dp-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg></span><span class="dp-title">LEARN</span></div>
+            <div class="dp-stats">
+                <div class="dp-stat"><span class="dp-val nominal" id="dock-learn-modes">7</span><span class="dp-lbl">MODES</span></div>
+            </div>
+        </div>
         <!-- Camera Vision -->
         <div class="dock-panel dock-panel-cam" id="dock-cam-btn" title="Camera Vision">
             <div class="dp-header"><span class="dp-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg></span><span class="dp-title">VISION</span></div>
@@ -843,6 +850,75 @@
                 <div style="display:flex; justify-content:space-between; font-family:var(--font-mono); font-size:10px; letter-spacing:0.5px;">
                     <span style="color:var(--text-dim);">COMBINED DAILY SPEND</span>
                     <span style="color:var(--amber);" id="llm-total-cost">—</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Learn -->
+        <div id="dock-panel-learn" class="dock-panel-inner">
+            <div class="learn-container" id="learn-container">
+                <!-- Mode selector -->
+                <div class="learn-mode-selector" id="learn-mode-selector">
+                    <div class="learn-mode-grid">
+                        <button class="learn-mode-card" data-mode="destroyer" onclick="_learnSelectMode('destroyer')">
+                            <span class="learn-mode-icon">⚡</span>
+                            <span class="learn-mode-name">LEARNING CURVE DESTROYER</span>
+                            <span class="learn-mode-desc">4-hour intensive — highest ROI concepts only</span>
+                        </button>
+                        <button class="learn-mode-card" data-mode="error_sim" onclick="_learnSelectMode('error_sim')">
+                            <span class="learn-mode-icon">🎯</span>
+                            <span class="learn-mode-name">REAL ERROR SIMULATOR</span>
+                            <span class="learn-mode-desc">Learn by failing — deliberate practice with guided correction</span>
+                        </button>
+                        <button class="learn-mode-card" data-mode="translator" onclick="_learnSelectMode('translator')">
+                            <span class="learn-mode-icon">🔑</span>
+                            <span class="learn-mode-name">CORE CONCEPT TRANSLATOR</span>
+                            <span class="learn-mode-desc">Find the one idea that unlocks everything else</span>
+                        </button>
+                        <button class="learn-mode-card" data-mode="path" onclick="_learnSelectMode('path')">
+                            <span class="learn-mode-icon">🗺️</span>
+                            <span class="learn-mode-name">LEARNING PATH ARCHITECT</span>
+                            <span class="learn-mode-desc">7-day personalised plan — 45 min/day max</span>
+                        </button>
+                        <button class="learn-mode-card" data-mode="gap_detector" onclick="_learnSelectMode('gap_detector')">
+                            <span class="learn-mode-icon">🔍</span>
+                            <span class="learn-mode-name">KNOWLEDGE GAP DETECTOR</span>
+                            <span class="learn-mode-desc">Expose what you think you know but don't</span>
+                        </button>
+                        <button class="learn-mode-card" data-mode="feynman" onclick="_learnSelectMode('feynman')">
+                            <span class="learn-mode-icon">🧠</span>
+                            <span class="learn-mode-name">FORCED FEYNMAN TEACHER</span>
+                            <span class="learn-mode-desc">Explain it simply — get caught on every gap</span>
+                        </button>
+                        <button class="learn-mode-card" data-mode="meta" onclick="_learnSelectMode('meta')">
+                            <span class="learn-mode-icon">🤖</span>
+                            <span class="learn-mode-name">ADAPTIVE META COACH</span>
+                            <span class="learn-mode-desc">AI picks the best strategy for you automatically</span>
+                        </button>
+                    </div>
+                </div>
+                <!-- Setup form (shown after mode selection) -->
+                <div class="learn-setup" id="learn-setup" style="display:none;">
+                    <button class="learn-back-btn" onclick="_learnBackToModes()">← BACK TO MODES</button>
+                    <div class="learn-setup-header">
+                        <span class="learn-setup-icon" id="learn-setup-icon">⚡</span>
+                        <span class="learn-setup-title" id="learn-setup-title">MODE</span>
+                    </div>
+                    <div class="learn-setup-fields" id="learn-setup-fields"></div>
+                    <button class="learn-start-btn" id="learn-start-btn" onclick="_learnStart()">BEGIN SESSION</button>
+                </div>
+                <!-- Chat session (shown during active learning) -->
+                <div class="learn-session" id="learn-session" style="display:none;">
+                    <div class="learn-session-header">
+                        <button class="learn-back-btn" onclick="_learnReset()">← NEW SESSION</button>
+                        <span class="learn-session-mode" id="learn-session-mode">MODE</span>
+                        <span class="learn-session-topic" id="learn-session-topic">TOPIC</span>
+                    </div>
+                    <div class="learn-messages" id="learn-messages"></div>
+                    <div class="learn-input-row">
+                        <input type="text" class="learn-input" id="learn-input" placeholder="Your response..." autocomplete="off" />
+                        <button class="learn-send-btn" id="learn-send-btn" onclick="_learnSend()">▶</button>
+                    </div>
                 </div>
             </div>
         </div>

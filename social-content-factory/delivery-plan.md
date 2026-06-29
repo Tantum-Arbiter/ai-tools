@@ -119,13 +119,49 @@ RSS / GH (Phase 5) ───┘    (local phi4)      (brand-aware)         │
 
 ---
 
-## Phase 5 — Theme auto-ingest (stretch)
+## Phase 5 — Theme auto-ingest (Days 11–14, opt-in)
 
-**Deliverable:** themes can be auto-suggested from GitHub releases / RSS / JIRA changelog.
+**Deliverable:** `factory ingest --brand personal --source github` pulls upstream release notes, ranks them with local `phi4` against the brand's voice/audience, and writes review-gated candidates to `themes/personal.suggested.yaml`; `factory promote <slug> --brand personal` moves an approved candidate into `themes/personal.yaml`. No candidate ever renders without an explicit promote.
 
-- New `ingest/` package with one collector per source.
-- LLM-assisted ranking against brand audience; output candidate themes to `themes/<brand>.suggested.yaml` for operator review.
-- **Never** auto-render from auto-ingested themes — operator promotes them manually.
+> Locked (extends D4): auto-ingested themes are **suggestions only**. `render` reads `themes/<brand>.yaml`; it never reads `*.suggested.yaml`. `themes/*.suggested.yaml` is gitignored — promotion is the only path to render.
+
+### 5.1 Suggested-theme schema + brand ingest config — shipped
+- `schemas/suggested_theme.py::SuggestedTheme` — a theme entry (`slug`, `title`, `subject`, `narrative`, `tags`, `cta`, `format_overrides`) plus provenance: `source`, `source_url`, `score` (0..1), `ingested_at`, `model_used`, `raw_tag`. `extra="forbid"`, slug-validated.
+- `schemas/brand.py::BrandIngest` — `github_repos: list[str]`, `min_score: float` (default 0.5); optional `Brand.ingest`.
+- **Remaining:** add an `ingest:` block to `brands/personal.yaml` (currently absent) before first run — `ingest` exits 3 with "no ingest.github_repos configured" otherwise.
+- Tests: `test_suggested_writer.py` schema round-trip; `test_brand_loader.py` accepts/rejects `ingest`.
+
+### 5.2 GitHub releases collector — shipped
+- `ingest/github_releases.py::GitHubReleasesClient` — `httpx.AsyncClient`, `GITHUB_TOKEN` from env (anonymous if unset), Link-header pagination capped at `MAX_PAGES`, drops drafts/prereleases, honours `since` cutoff + `--limit`, normalises to `RawIngestItem`.
+- Tests (`test_github_releases.py`): `respx`-mocked — pagination, draft/prerelease filtering, malformed payload → `GitHubReleasesError`, `since`/`limit` honoured. No live network.
+
+### 5.3 Local ranker — shipped
+- `ingest/ranker.py::RankerClient.rank` — one `phi4` `chat_json` call per item; coerces `score/slug/title/subject/narrative/tags`, clamps score to [0,1], normalises slug. `rank_items` drops sub-`min_score` items and sorts score-desc.
+- Routes through the brand's `llm_client` (local `phi4` default; OpenRouter only on explicit brand opt-in). Release body is truncated in the prompt; never log the full body.
+- Tests (`test_ranker.py`): LLM stubbed at boundary — `min_score` filter, sort order, malformed JSON drops the item, slug normalisation.
+
+### 5.4 Suggested-file writer + promote — shipped
+- `ingest/suggested_writer.py` — atomic temp-file+rename write to `themes/<brand>.suggested.yaml`, `--merge` dedupes by slug, score-desc ordering; `load_suggestions` / `remove_suggestion`.
+- `cli.py::promote` — rejects a slug already in the main catalogue, appends the theme-shaped subset to `themes/<brand>.yaml`, removes it from the suggested file.
+- Tests (`test_suggested_writer.py`, `test_cli_ingest.py`, `test_cli_promote.py`): atomic write under `tmp_path`, merge dedupe, promote happy-path + duplicate/missing-slug errors.
+
+### 5.5 Additional collectors (RSS, JIRA changelog) — planned
+- One collector module per source under `ingest/`, each emitting `RawIngestItem`; extend the `--source` switch (today only `github`) to `rss` / `jira`.
+- RSS: `httpx` fetch + parse; per-feed URLs added to `BrandIngest`. JIRA: read-only changelog pull.
+- Same TDD shape as 5.2: `respx`-mocked fetch, no live network, malformed-feed error path.
+- ⚠️ Open question: RSS feed list and whether JIRA is in scope for the `personal` brand — confirm before building.
+
+### 5.6 Incremental ingest + suggestion hygiene — planned
+- Persist a per-source `since` watermark so re-runs only rank new releases (avoid re-spending `phi4` on seen items).
+- `factory prune-suggestions --brand <key> --older-than 30d`, mirroring the `outbox` prune story.
+- Tests: watermark advances across runs; stale suggestions pruned; promoted slugs never re-suggested.
+
+### Phase 5 acceptance
+- ✅ `pytest` green; no GitHub/Ollama/RSS/JIRA network calls in tests (all boundary-stubbed).
+- ✅ `factory ingest --brand personal --source github` writes a well-formed `themes/personal.suggested.yaml`; nothing rendered.
+- ✅ `factory promote <slug> --brand personal` moves a candidate into `themes/personal.yaml` and removes it from suggestions.
+- ✅ `render` only ever reads `themes/<brand>.yaml` — enforced by a test asserting the render path never opens `*.suggested.yaml`.
+- ✅ `themes/*.suggested.yaml` stays gitignored.
 
 ---
 
@@ -137,7 +173,7 @@ RSS / GH (Phase 5) ───┘    (local phi4)      (brand-aware)         │
 | 2 | All 4 formats render · captions within platform limits · parallel job queueing doesn't dead-lock |
 | 3 | Ken Burns MP4 valid, ≤ 12 MB, audio present · video re-renders with same seed |
 | 4 | IG dry-run path · live post only with `--confirm` · `allow_auto_publish=false` blocks publish |
-| 5 | Each ingestor produces well-formed suggested themes · no auto-promotion to render |
+| 5 | GitHub collector (respx-mocked) · ranker `min_score`/sort (stubbed phi4) · atomic suggested-file write · `promote` moves slug + dedupes · `render` never reads `*.suggested.yaml` |
 
 ---
 
@@ -168,4 +204,4 @@ RSS / GH (Phase 5) ───┘    (local phi4)      (brand-aware)         │
 | 2 | 2 days | Multi-format + captions |
 | 3 | 3 days | Video (Ken Burns + TTS) |
 | 4 | 2 days | Publish hooks, dry-run default |
-| 5 | TBD | Theme auto-ingest |
+| 5 | 4 days | Theme auto-ingest (GitHub + ranker + promote shipped; RSS/JIRA + incremental ingest planned) |

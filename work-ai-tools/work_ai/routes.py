@@ -10,6 +10,8 @@ from dataclasses import asdict
 
 from fastapi import APIRouter, HTTPException
 
+from .board_config import BoardsConfig, load_boards_config
+from .board_observer import BoardObserver, BoardSnapshot
 from .config import load_config
 from .github_api_client import GitHubAPIClient
 from .github_client import GitHubScraper
@@ -29,10 +31,12 @@ _github_api: GitHubAPIClient | None = None
 _github_scraper: GitHubScraper | None = None
 _github: GitHubScraper | GitHubAPIClient | None = None
 _monday: MondayClient | None = None
+_observer: BoardObserver | None = None
+_boards_config: BoardsConfig | None = None
 
 
 def init_work_ai(secret: bytes, log_dir: str = "logs") -> None:
-    global _gate, _github, _github_api, _github_scraper, _monday
+    global _gate, _github, _github_api, _github_scraper, _monday, _observer, _boards_config
     import os
     from pathlib import Path
 
@@ -42,6 +46,14 @@ def init_work_ai(secret: bytes, log_dir: str = "logs") -> None:
     signer = ConfirmationSigner(secret)
     audit = SafetyAuditLog(Path(log_dir))
     _gate = SafetyGate(signer, audit)
+
+    # Load board configs (YAML)
+    boards_yaml = Path(__file__).parent.parent / "boards.yaml"
+    _boards_config = load_boards_config(boards_yaml)
+    if _boards_config.boards:
+        profile_dir = _boards_config.browser_profile_dir or config.github.browser_profile_dir
+        _observer = BoardObserver(profile_dir=profile_dir)
+        _log.info("Board observer initialised with %d board(s)", len(_boards_config.boards))
 
     pat = os.getenv("DAYJOB_GITHUB_PAT_SEARCH", "")
     if config.github.has_config:
@@ -119,19 +131,32 @@ async def work_query(q: str = "") -> dict:
         "parsed query: action=%s term=%r repo=%s squad=%s labels=%s",
         parsed.action, parsed.search_term, parsed.repo, parsed.squad, parsed.label_filter,
     )
-    try:
-        items = await fetch_data(parsed, _github, _monday)
-    except Exception as exc:
-        if _github_api and _github_scraper and _github is _github_api:
-            print(f"[WORK-AI] API failed ({exc}), falling back to scraper")
+    # Try observer first if available and this is a sprint/project query
+    items: list[dict] = []
+    if _observer and _boards_config and parsed.action in ("sprint", "search") and parsed.service == "github":
+        board = next(iter(_boards_config.boards.values()), None)
+        if board:
             try:
-                items = await fetch_data(parsed, _github_scraper, _monday)
-            except Exception as fallback_exc:
-                log.error("fetch_data fallback failed: %s", fallback_exc, exc_info=True)
-                return {"title": "ERROR", "items": [], "error": str(fallback_exc)}
-        else:
-            log.error("fetch_data failed: %s", exc, exc_info=True)
-            return {"title": "ERROR", "items": [], "error": str(exc)}
+                snapshot = await _observer.observe(board)
+                items = snapshot.rows
+                log.info("Observer returned %d rows (filters: %s)", len(items), snapshot.active_filters)
+            except Exception as obs_exc:
+                log.warning("Observer failed (%s), falling back to API/scraper", obs_exc)
+
+    if not items:
+        try:
+            items = await fetch_data(parsed, _github, _monday)
+        except Exception as exc:
+            if _github_api and _github_scraper and _github is _github_api:
+                print(f"[WORK-AI] API failed ({exc}), falling back to scraper")
+                try:
+                    items = await fetch_data(parsed, _github_scraper, _monday)
+                except Exception as fallback_exc:
+                    log.error("fetch_data fallback failed: %s", fallback_exc, exc_info=True)
+                    return {"title": "ERROR", "items": [], "error": str(fallback_exc)}
+            else:
+                log.error("fetch_data failed: %s", exc, exc_info=True)
+                return {"title": "ERROR", "items": [], "error": str(exc)}
 
     log.info("fetch_data returned %d items", len(items))
 
@@ -152,3 +177,29 @@ async def work_query(q: str = "") -> dict:
             "squad": parsed.squad,
         },
     }
+
+
+
+@router.get("/observe/{board_name}")
+async def observe_board(board_name: str, view: str = "default") -> dict:
+    """E2E-style board observation — navigate, read filters, columns, rows."""
+    if not _observer or not _boards_config:
+        raise HTTPException(503, "Board observer not configured — add boards.yaml")
+    board = _boards_config.boards.get(board_name)
+    if not board:
+        available = list(_boards_config.boards.keys())
+        raise HTTPException(404, f"Board '{board_name}' not found. Available: {available}")
+    try:
+        snapshot = await _observer.observe(board, view_name=view)
+        return {
+            "board": snapshot.board_name,
+            "view": snapshot.view_name,
+            "url": snapshot.url,
+            "active_filters": snapshot.active_filters,
+            "columns": snapshot.columns,
+            "rows": snapshot.rows,
+            "total": snapshot.total_visible,
+        }
+    except Exception as exc:
+        _log.error("Board observation failed: %s", exc, exc_info=True)
+        raise HTTPException(500, f"Observation failed: {exc}")

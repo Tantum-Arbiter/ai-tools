@@ -1,0 +1,44 @@
+# Board observer configuration — defines what to observe on each project board.
+# Copy to boards.yaml and fill in your values.
+
+browser_profile_dir: ""  # Leave empty to use DAYJOB_BROWSER_PROFILE_PATH from .env
+
+boards:
+  scupper:
+    name: "Scupper"
+    org: "NBCUDTC"
+    project_number: 242
+    views:
+      - name: default
+        layout: table
+      - name: by-stream
+        layout: table
+        view_id: ""  # Fill in from URL after clicking the view tab
+    columns:
+      - {name: squad, type: single_select}
+      - {name: stream, type: single_select}
+      - {name: estimates, type: number}
+      - {name: assignees, type: text}
+      - {name: status, type: single_select}
+      - {name: milestone, type: text}
+      - {name: labels, type: labels}
+    known_labels:
+      - app-lar
+      - app-dm
+      - app-cmi
+      - app-download
+      - app-lci
+      - app-lcm
+      - Squad A
+      - Squad B
+      - Squad C
+      - Squad D
+    known_statuses:
+      - Sprint Backlog
+      - In Progress
+      - Ready to Demo
+      - Ready for QA
+      - QA
+      - Ready for NFT
+      - NFT in progress
+      - Done
