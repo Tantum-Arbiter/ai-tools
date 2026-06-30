@@ -1409,6 +1409,8 @@ class VoiceEngine {
     _requestStart(mode) {
         // mode = 'passive' | 'active'
         if (!this.recognition) return;
+        // Chat mode guard — no voice recognition during hands-on typing
+        if (this._chatMode) { this._pendingStart = null; return; }
         // Mic mute guard — block all recognition starts
         if (_micMuted) { this._pendingStart = null; return; }
         // Mic denied guard — browser refused permission, stop retrying
@@ -1426,6 +1428,7 @@ class VoiceEngine {
 
     _doStart(mode) {
         if (!this.recognition) return;
+        if (this._chatMode) return;
         this._pendingStart = null;
         this._lastProcessed = 0; // always reset — new recognition session = fresh results
 
@@ -1657,6 +1660,13 @@ class VoiceEngine {
         this.recognition.onend = () => {
             this._running = false;
             this._lastProcessed = 0; // reset for next session
+
+            // Chat mode — never restart recognition while typing
+            if (this._chatMode) {
+                this._mode = 'off';
+                this._pendingStart = null;
+                return;
+            }
 
             // While speaking, do NOT restart recognition — prevents mic
             // picking up TTS audio and self-triggering on "Arbiter"
