@@ -36,6 +36,7 @@ from gcp_monitor import GCPMonitor
 from revenuecat_monitor import RevenueCatMonitor
 from service_health import ServiceHealthMonitor
 from persistence import ArbiterDB
+from vault_index import VaultIndex
 from factory_status import FactoryStatusPoller, FactoryStatusReader
 from rate_limit import SlidingWindowRateLimiter
 from security_headers import build_security_headers
@@ -618,6 +619,14 @@ agent_reg = AgentRegistry()
 gcp_mon = GCPMonitor()
 rc_mon = RevenueCatMonitor()
 arbiter_db = ArbiterDB(str(Path(__file__).parent / "arbiter.db"))
+
+_vault_dir = Path(__file__).parent / "vault"
+vault = VaultIndex(vault_dir=_vault_dir, db_path=":memory:")
+if _vault_dir.is_dir():
+    _vault_count = vault.rebuild()
+    log.info(f"Vault loaded: {_vault_count} documents from {_vault_dir}")
+else:
+    log.info("Vault directory not found — knowledge base disabled")
 
 _FACTORY_STATUS_LOG = (
     Path(__file__).parent.parent
@@ -9196,6 +9205,26 @@ async def trigger_schedule(job_id: str):
         return {"error": str(e)}
 
 
+def _vault_context(query: str, limit: int = 3) -> str:
+    """Search the vault knowledge base and format results as context."""
+    try:
+        docs = vault.search(query, limit=limit)
+        if not docs:
+            return ""
+        parts = ["\n─── KNOWLEDGE BASE ───"]
+        for doc in docs:
+            tags = ", ".join(doc.tags) if doc.tags else ""
+            header = f"[{doc.title}]"
+            if tags:
+                header += f" (tags: {tags})"
+            snippet = doc.body[:600].strip()
+            parts.append(f"{header}\n{snippet}")
+        return "\n".join(parts) + "\n─── END KNOWLEDGE BASE ───\n"
+    except Exception as exc:
+        log.warning("Vault search failed (non-fatal): %s", exc)
+        return ""
+
+
 # ── Jarvis Voice Chat ─────────────────────────────────────────────────
 @app.post("/api/jarvis/chat")
 async def jarvis_chat(request: Request):
@@ -9774,6 +9803,10 @@ async def jarvis_chat(request: Request):
         log.info(f"Research-primary mode: slim prompt + research only, context={len(sys_content)} chars")
     else:
         sys_content = JARVIS_SYSTEM + f"\n\n─── LIVE DATA ───\n[SYSTEM] {_now_str} — Current year: {_year_str}\n" + ctx + extra_ctx
+
+    vault_ctx = _vault_context(user_msg)
+    if vault_ctx:
+        sys_content += vault_ctx
 
     messages = [
         {"role": "system", "content": sys_content},
@@ -11434,6 +11467,10 @@ async def _jarvis_chat_claude(
             f"Ground your responses in this domain when relevant.\n\n"
             f"{biz_ctx}"
         )
+
+    vault_ctx = _vault_context(user_msg)
+    if vault_ctx:
+        system += vault_ctx
 
     # ── Select only relevant tools to reduce input tokens ──────────────
     selected_tools = _select_tools(topic, user_msg)

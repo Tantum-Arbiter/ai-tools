@@ -1505,19 +1505,22 @@ class VoiceEngine {
         this._latestDisplay = '';
 
         // ── Fuzzy wake word matching ──────────────────────────────
-        // Chrome often mishears "Arbiter" as "arbor", "Albert",
-        // "harbor", "arbiter's", "orbit", etc. We match phonetically.
-        // Wake word patterns — phonetic fuzzy match for "Arbiter".
-        // Chrome frequently mishears as: Albert, harbor, orbit, arbor, etc.
+        // Chrome often mishears "Arbiter" as "arbor", "arbiter's", etc.
+        // Tight patterns only — removed "albert", "harbor", "orbit"
+        // which caused false positives from ambient speech / TV audio.
         const WAKE_PATTERNS = [
             /\barbiter\b/i, /\barbitor\b/i,
             /\barbr?it/i,   /\barbeiter\b/i,
-            /\balbert\b/i,  /\barbor\b/i,
-            /\borbit\w*/i,  /\bharbor\b/i,
+            /\barbor\b/i,
             /\barvit/i,     /\barbat/i,
         ];
+        const WAKE_CONFIDENCE_THRESHOLD = 0.7;
         // Regex to strip the wake word + trailing punctuation from transcript
-        const WAKE_STRIP = /^.*?\b(?:arbiter|arbitor|arbrit\w*|arbeiter|albert|arbor|orbit\w*|harbor|arvit\w*|arbat\w*)\b[,.\s!?']*/i;
+        const WAKE_STRIP = /^.*?\b(?:arbiter|arbitor|arbrit\w*|arbeiter|arbor|arvit\w*|arbat\w*)\b[,.\s!?']*/i;
+
+        // Echo guard — timestamp until which wake word detection is suppressed
+        // Prevents TTS audio played through speakers from re-triggering Arbiter
+        this._echoGuardUntil = 0;
 
         this._matchesWakeWord = (text) => {
             const lower = text.toLowerCase();
@@ -1526,15 +1529,20 @@ class VoiceEngine {
 
         this.recognition.onresult = (e) => {
             if (this._mode === 'passive') {
+                // ── Echo guard: block wake detection shortly after TTS ends ──
+                if (Date.now() < this._echoGuardUntil) return;
+
                 // ── Passive: scan ALL alternatives for wake word (fuzzy) ──
                 for (let i = this._lastProcessed; i < e.results.length; i++) {
                     const result = e.results[i];
                     // Check every alternative transcript Chrome provides
+                    // Require confidence > threshold to avoid ambient false positives
                     let matched = false;
                     let bestTranscript = result[0].transcript.trim();
                     for (let a = 0; a < result.length; a++) {
                         const alt = result[a].transcript.trim();
-                        if (this._matchesWakeWord(alt)) {
+                        const conf = result[a].confidence || 0;
+                        if (this._matchesWakeWord(alt) && conf >= WAKE_CONFIDENCE_THRESHOLD) {
                             matched = true;
                             bestTranscript = alt;
                             break;
@@ -1602,7 +1610,7 @@ class VoiceEngine {
                 }
             }
             const display = (this._finalTranscript + ' ' + interim).trim();
-            const cleaned = display.replace(/^(?:arbiter|arbitor|arbrit\w*|arbeiter)[,.\s!?']*/i, '').trim();
+            const cleaned = display.replace(/^(?:arbiter|arbitor|arbrit\w*|arbeiter|arbor|arvit\w*|arbat\w*)[,.\s!?']*/i, '').trim();
 
             // NEVER overwrite _latestDisplay with shorter text (Chrome resets)
             if (cleaned.length > this._latestDisplay.length) {
@@ -1648,7 +1656,7 @@ class VoiceEngine {
                 if (this._mode === 'passive') {
                     // Safety: if onend doesn't fire within 1s, force restart
                     setTimeout(() => {
-                        if (!this._running && this._mode !== 'active') {
+                        if (!this._running && this._mode !== 'active' && !this._chatMode) {
                             this._mode = 'off';
                             this._requestStart('passive');
                         }
@@ -1706,7 +1714,7 @@ class VoiceEngine {
 
                 clearTimeout(this._silenceTimer);
                 const raw = (this._finalTranscript || '').trim() || (this._latestDisplay || '').trim();
-                const text = raw.replace(/^(?:arbiter|arbitor|arbrit\w*|arbeiter)[,.\s!?']*/i, '').trim();
+                const text = raw.replace(/^(?:arbiter|arbitor|arbrit\w*|arbeiter|arbor|arvit\w*|arbat\w*)[,.\s!?']*/i, '').trim();
 
                 this._stopLevelPump();
                 const bl = document.getElementById('btn-listen');
@@ -1752,7 +1760,7 @@ class VoiceEngine {
 
         // Use final transcript, or latest display (includes interim), whichever has content
         const raw = (this._finalTranscript || '').trim() || (this._latestDisplay || '').trim();
-        const text = raw.replace(/^(?:arbiter|arbitor|arbrit\w*|arbeiter|albert|arbor|orbit\w*|harbor|arvit\w*|arbat\w*)[,.\s!?']*/i, '').trim();
+        const text = raw.replace(/^(?:arbiter|arbitor|arbrit\w*|arbeiter|arbor|arvit\w*|arbat\w*)[,.\s!?']*/i, '').trim();
 
         this._mode = 'off';
         this._pendingStart = null;
@@ -4469,8 +4477,8 @@ class VoiceEngine {
     _startFollowUpListen() {
         this._followUpActive = true;
 
-        // Small delay before starting mic — avoids picking up TTS audio tail / echo
-        setTimeout(() => this._requestStart('active'), 400);
+        // Delay before starting mic — avoids picking up TTS audio tail / echo
+        setTimeout(() => this._requestStart('active'), 800);
 
         // Kill the default silence timer — use our own 5s window
         clearTimeout(this._silenceTimer);
@@ -4601,6 +4609,9 @@ class VoiceEngine {
             this._processingQuery = false;  // allow next query
             this.orb.setAudioLevel(0);
             this.orb.setState('idle');
+            // Echo guard — suppress wake word detection for 1.5s after TTS ends
+            // Prevents speaker output from re-triggering "Arbiter" via mic
+            this._echoGuardUntil = Date.now() + 1500;
             // Hide stop button
             const sb = document.getElementById('btn-stop');
             if (sb) sb.style.display = 'none';

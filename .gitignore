@@ -13,3 +13,5 @@ arbiter-mission-control/logs/
 *.swp
 .pytest_cache/
 arbiter-mission-control/ALL_PROMPTS.md
+arbiter-mission-control/vault/.obsidian/
+arbiter-mission-control/vault/sessions/

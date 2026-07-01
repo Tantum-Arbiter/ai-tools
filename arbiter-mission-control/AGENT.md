@@ -58,6 +58,15 @@
 - SSE event stream for proactive dashboard push
 - Schedule management API (list, create, toggle, trigger)
 
+### 🧠 Knowledge Base / Vault (Phase 7)
+- Obsidian-compatible `vault/` directory of Markdown files with YAML frontmatter
+- SQLite FTS5 full-text search — indexed on startup, searched at query time
+- YAML frontmatter parsing (`type`, `tags`, `updated`) for structured metadata
+- `[[wiki-link]]` extraction for relationship mapping between knowledge entries
+- Automatic context injection — top 3 vault hits appended to both Ollama and Claude system prompts
+- Session write-back — conversation summaries auto-saved as `vault/sessions/YYYY-MM-DD.md`
+- Zero external dependencies — uses built-in SQLite FTS5 + PyYAML
+
 ### 🔧 System Actions
 - Browser opening (explicit "open X" commands only)
 - Dashboard refresh
@@ -96,6 +105,15 @@ Lightweight asyncio cron scheduler with no external dependencies.
 - **Management API**: GET/POST/toggle/trigger via `/api/schedules`
 - **Frontend**: SSE listener auto-renders panels + speaks notifications
 
+### Phase 7 — Knowledge Base / Vault ✅ DONE
+Persistent Obsidian-style knowledge base with RAG-lite context injection.
+- **Vault directory**: `vault/` with folders for `entities/`, `runbooks/`, `decisions/`, `preferences/`, `learned/`, `sessions/`
+- **FTS5 indexing**: `vault_index.py` walks all `.md` files, parses YAML frontmatter + `[[wiki-links]]`, indexes into SQLite FTS5 virtual table
+- **Query-time retrieval**: before every LLM call, user query is searched against vault — top 3 results injected as `─── KNOWLEDGE BASE ───` context
+- **Session write-back**: `write_session()` auto-generates dated session summaries in `vault/sessions/`
+- **Obsidian-compatible**: vault is just Markdown files — open in Obsidian for graph view, manual editing, and tag navigation
+- **Token savings**: only relevant knowledge is injected (~200-600 tokens) instead of full context dumps
+
 ---
 
 ## Data Sources
@@ -112,6 +130,7 @@ Lightweight asyncio cron scheduler with no external dependencies.
 | ComfyUI | Creative | `COMFYUI_BASE_URL` | On-demand |
 | Agent Registry | Agents | `/api/agents` | Heartbeat |
 | StatusPage APIs | Health | `/api/service-health` | 30s |
+| Vault (FTS5) | Knowledge | `vault_index.py` | On startup |
 
 ---
 
@@ -122,7 +141,7 @@ Voice Input → Web Speech API (passive/active)
     ↓
 Wake Word / Clap Detector
     ↓
-LLM (phi4 local / GPT-4o) ← Live Data Context
+LLM (phi4 local / GPT-4o) ← Live Data Context + Vault Knowledge Base
     ↓
 Response Parser → Spoken Text + Actions
     ↓                    ↓
